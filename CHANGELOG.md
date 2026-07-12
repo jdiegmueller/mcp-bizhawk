@@ -7,13 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Genesis-friendly big-endian memory access.** `bizhawk_read16`/`read32`/
+  `write16`/`write32` take an optional `byteorder: "le" | "be"` parameter
+  (default `"le"`, backward compatible), mapped to BizHawk's native
+  `memory.*_u16_be`/`*_u32_be` functions. `observe_memory`,
+  `stop_on_memory_change`, and `wait_for_memory` accept the new widths
+  `"u16_be"` / `"u32_be"`. No more read_range + manual `(hi << 8) | lo`.
+- **`bizhawk_wait_for_memory` tool** — frame-advance until a memory value
+  satisfies a condition (`eq`/`ne`/`gt`/`lt`/`change`) or a frame budget
+  (default 600) runs out. Returns `matched`, `frames_waited`, and the final
+  value; a timeout is a result, not an error. Replaces "guess how many
+  frames until RAM initializes" with an explicit synchronization primitive.
+- **Run-length-encoded input: `hold` on `bizhawk_play_input_sequence`
+  frame entries** — `{buttons: {...}, hold: 60}` repeats the input for 60
+  consecutive frames (re-asserted each frame). Long sequences no longer
+  need one JSON entry per frame, eliminating oversized-payload truncation.
+- **Bridge identity in `bizhawk_get_info`** — the bridge now reports
+  `bridge: {name, version, pause_safe}`; the tool output surfaces it as a
+  positive "pause-safe" signal instead of inferring health from the absence
+  of a missing-capabilities warning.
+
 ### Changed
 
+- **Frame-scaled RPC timeouts.** `bizhawk_play_input_sequence`,
+  `bizhawk_frame_advance`, and `bizhawk_wait_for_memory` now compute their
+  timeout from the requested frame count (20 ms/frame + 5 s margin, never
+  below the flat default) instead of dying at the flat 10 s limit —
+  multi-thousand-frame batches are now safe.
+- **Bridge renamed: `lua/bridge.lua` → `lua/bridge_JD.lua`** (v0.5.5) —
+  the modified bridge carries its own name/version so `get_info` can
+  positively identify which script is loaded. It also gains an optional
+  per-frame NHL94 trace CSV + on-screen animation overlay (game-specific;
+  set `TRACE_PATH`/`TRACE_OSD` to nil/false to disable for other ROMs).
+- **Pause overhaul in `lua/bridge_JD.lua`** — pause control uses
+  `client.pause`/`client.unpause`/`client.ispaused` (the previous
+  `emu.pause`/`emu.unpause` don't exist in BizHawk), and the main poll loop
+  idles on `emu.yield()` instead of `emu.frameadvance()` so the bridge
+  keeps servicing RPCs while paused — pausing (from the API *or* the
+  keyboard) no longer wedges the bridge. Frame-locked handlers
+  (`frame_advance`, `play_input_sequence`, `wait_for_memory`) briefly
+  unpause and restore the paused state afterwards.
+- **`bizhawk_load_state` preserves pause state.** The bridge re-pauses in
+  the same Lua callback as `savestate.load`, so zero frames run between
+  load and re-pause. New optional `pause: true` parameter forces a paused
+  state after load regardless of prior state; output reports
+  `(paused/running)`.
+- **Bridge auto-reconnect reworked** (verified against BizHawk 2.11.1
+  source): `comm.socketServerConnect` does not exist in 2.11.x — the
+  re-dial primitive is `comm.socketServerSetIp(comm.socketServerGetIp())`,
+  which rebuilds and re-dials the socket. Liveness is now "bytes received
+  recently" (the server answers every frame's READY with at least NONE);
+  `socketServerIsConnected` is ignored because its backing flag is never
+  cleared. The watchdog re-dials every ~5 s once the link is silent for
+  ~10 s or a send fails, and re-applies the receive timeout after each
+  re-dial (a fresh socket otherwise blocks forever).
 - **BREAKING: minimum Node version raised from >=18 to >=22.** Node 18 (EOL
   April 2025) and 20 (EOL April 2026) are no longer supported; only active
   LTS lines are. CI matrix now tests Node 22 + 24, and workflow actions
   bumped to `actions/checkout@v5` / `actions/setup-node@v5` (the v4 actions'
   Node 20 runtime is deprecated by GitHub as of June 2026).
+
+### Fixed
+
+- **`bizhawk_play_input_sequence` no longer crashes when zero observations
+  are captured.** A Lua empty table serializes to JSON `{}` (object, not
+  array), which broke the Node handler's iteration whenever neither
+  `screenshot_every` nor `observe_memory` was requested. The bridge now
+  omits the key entirely and the server guards with `Array.isArray`.
+- **Batched frames are no longer missing from the bridge's trace CSV** —
+  `trace_tick()` runs after every `emu.frameadvance()` inside command
+  handlers (`play_input_sequence`, `frame_advance`, `wait_for_memory`),
+  and dedupes on `emu.framecount()` so re-entrant `emu.yield()` can't
+  write duplicate rows.
 
 ## [0.1.5] - 2026-05-15
 

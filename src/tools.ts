@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { BizhawkServer } from "./bizhawk.js";
+import { VERSION } from "./version.js";
 
 const VALID_BUTTONS = [
   "A", "B", "X", "Y",                 // Face buttons
@@ -39,6 +40,17 @@ const DOMAIN_PARAM_DESC =
   "68K RAM on Genesis, MainRAM on PSX, EWRAM/IWRAM on GBA). Returns an error if the name doesn't " +
   "match any domain on the loaded core.";
 
+const BYTEORDER_PARAM_DESC =
+  "Byte order for the value: 'le' (little-endian, default) or 'be' (big-endian). " +
+  "Use 'be' on big-endian systems — notably the Genesis/Mega Drive 68K, where game values " +
+  "are stored big-endian and a little-endian read returns byte-swapped garbage. " +
+  "Requires the bridge's memory_read/write_*_be capability (present on standard BizHawk builds).";
+
+// Frame-locked commands take ~16.7ms per emulated frame at 60Hz. Scale the
+// RPC timeout with the requested frame count (20ms/frame headroom + fixed
+// margin) so long batches don't die at the flat default timeout.
+const frameTimeout = (frames: number) => frames * 20 + 5000;
+
 const ADDRESS_PARAM_DESC = (widthBytes: number) =>
   `Byte offset within the chosen memory domain. Per-domain offsets are 0-based and INDEPENDENT ` +
   `of system bus addresses (e.g. SNES WRAM uses 0x09C6, NOT 0x7E09C6). Reads ${widthBytes} ` +
@@ -51,10 +63,10 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_ping",
     description:
-      "PURPOSE: Verify that the BizHawk Lua bridge is connected and responding to RPC over the TCP socket. " +
-      "USAGE: Call this once at start-of-session before issuing other tool calls; if it succeeds, every other tool will work. " +
-      "BEHAVIOR: No side effects — pure liveness probe. Times out after ~10 seconds with a clear error if BizHawk isn't running, isn't pointed at the right host:port, or hasn't loaded lua/bridge.lua via Tools → Lua Console. " +
-      "RETURNS: The literal string 'pong' on success.",
+      "PURPOSE: Report the MCP server version and the BizHawk bridge's connection/liveness state. " +
+      "USAGE: Call this once at start-of-session before issuing other tool calls. ALWAYS answers immediately, even when BizHawk isn't running — so it doubles as a check of which server build is installed. Only a 'pong ... bridge polling' response means other tools will work. " +
+      "BEHAVIOR: No side effects — pure probe. Never errors: if BizHawk isn't connected or bridge_JD.lua isn't polling, it says so in the response instead of timing out. " +
+      "RETURNS: 'pong (mcp-bizhawk vX.Y.Z, bridge polling)' when fully up; otherwise 'mcp-bizhawk vX.Y.Z — <what's missing>'. A '-jd' version suffix identifies the modified server build (frame-scaled timeouts, byteorder, hold, wait_for_memory).",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -98,16 +110,17 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_read16",
     description:
-      "PURPOSE: Read an unsigned 16-bit little-endian value from emulator memory at the given address. " +
-      "USAGE: Use for 16-bit fields (most game-state values: HP, score, coordinates). For single bytes use bizhawk_read8; for 32-bit values use bizhawk_read32; for non-aligned spans or big-endian fields use bizhawk_read_range and decode the bytes yourself (this tool always interprets bytes as little-endian regardless of the target system's native endianness). " +
-      "BEHAVIOR: No side effects — pure read. Reads two consecutive bytes (low byte at `address`, high byte at `address+1`) and combines them as little-endian. Returns an error if the named domain doesn't exist, address+2 exceeds domain size, or the core doesn't expose memory.read_u16_le. " +
+      "PURPOSE: Read an unsigned 16-bit value from emulator memory at the given address, little-endian by default or big-endian with byteorder='be'. " +
+      "USAGE: Use for 16-bit fields (most game-state values: HP, score, coordinates). For single bytes use bizhawk_read8; for 32-bit values use bizhawk_read32; for non-aligned spans use bizhawk_read_range. On big-endian systems (Genesis/Mega Drive 68K) pass byteorder='be' — the little-endian default returns byte-swapped values there. " +
+      "BEHAVIOR: No side effects — pure read. Reads two consecutive bytes starting at `address` and combines them per `byteorder`. Returns an error if the named domain doesn't exist, address+2 exceeds domain size, or the core doesn't expose memory.read_u16_le/read_u16_be. " +
       "RETURNS: Single line 'ADDR_HEX: VAL_DEC (0xVAL_HEX)'.",
     inputSchema: {
       type: "object",
       required: ["address"],
       properties: {
-        address: { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(2) },
-        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+        address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(2) },
+        domain:    { type: "string", description: DOMAIN_PARAM_DESC },
+        byteorder: { type: "string", enum: ["le", "be"], default: "le", description: BYTEORDER_PARAM_DESC },
       },
       additionalProperties: false,
     },
@@ -115,16 +128,17 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_read32",
     description:
-      "PURPOSE: Read an unsigned 32-bit little-endian value from emulator memory at the given address. " +
-      "USAGE: Use for 32-bit fields (timestamps, large counters, pointers on 32-bit systems, RGBA colors). For 8/16-bit reads use bizhawk_read8/read16; for big-endian or unaligned multi-word reads use bizhawk_read_range and decode yourself. " +
-      "BEHAVIOR: No side effects — pure read. Reads four consecutive bytes starting at `address` and combines them as little-endian (LSB at `address`, MSB at `address+3`). Returns an error if the domain doesn't exist, address+4 exceeds the domain, or the core lacks memory.read_u32_le. " +
+      "PURPOSE: Read an unsigned 32-bit value from emulator memory at the given address, little-endian by default or big-endian with byteorder='be'. " +
+      "USAGE: Use for 32-bit fields (timestamps, large counters, pointers on 32-bit systems, RGBA colors). For 8/16-bit reads use bizhawk_read8/read16; for unaligned multi-word reads use bizhawk_read_range. On big-endian systems (Genesis/Mega Drive 68K) pass byteorder='be'. " +
+      "BEHAVIOR: No side effects — pure read. Reads four consecutive bytes starting at `address` and combines them per `byteorder`. Returns an error if the domain doesn't exist, address+4 exceeds the domain, or the core lacks memory.read_u32_le/read_u32_be. " +
       "RETURNS: Single line 'ADDR_HEX: VAL_DEC (0xVAL_HEX)'.",
     inputSchema: {
       type: "object",
       required: ["address"],
       properties: {
-        address: { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(4) },
-        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+        address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(4) },
+        domain:    { type: "string", description: DOMAIN_PARAM_DESC },
+        byteorder: { type: "string", enum: ["le", "be"], default: "le", description: BYTEORDER_PARAM_DESC },
       },
       additionalProperties: false,
     },
@@ -171,17 +185,18 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_write16",
     description:
-      "PURPOSE: Write an unsigned 16-bit little-endian value to emulator memory at the given address. " +
-      "USAGE: Use for 16-bit cheats and pokes (HP, score, coordinates). For single bytes use bizhawk_write8; for 32-bit use bizhawk_write32; for big-endian fields, byteswap and use bizhawk_write_range; for cart save RAM seeding, use bizhawk_load_state. " +
-      "BEHAVIOR: DESTRUCTIVE: overwrites two bytes (low byte at `address`, high byte at `address+1`) with no undo. Direct memory write — no MBC/mapper/DMA mediation, see bizhawk_write8 notes. Returns an error if the domain is unknown, address+2 exceeds the domain, value < 0 or > 65535, or the core lacks memory.write_u16_le. " +
+      "PURPOSE: Write an unsigned 16-bit value to emulator memory at the given address, little-endian by default or big-endian with byteorder='be'. " +
+      "USAGE: Use for 16-bit cheats and pokes (HP, score, coordinates). For single bytes use bizhawk_write8; for 32-bit use bizhawk_write32; for cart save RAM seeding, use bizhawk_load_state. On big-endian systems (Genesis/Mega Drive 68K) pass byteorder='be'. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites two bytes starting at `address` with no undo, in the byte order given by `byteorder`. Direct memory write — no MBC/mapper/DMA mediation, see bizhawk_write8 notes. Returns an error if the domain is unknown, address+2 exceeds the domain, value < 0 or > 65535, or the core lacks memory.write_u16_le/write_u16_be. " +
       "RETURNS: Single line 'Wrote VAL_DEC (0xVAL_HEX) → ADDR_HEX (DOMAIN)'.",
     inputSchema: {
       type: "object",
       required: ["address", "value"],
       properties: {
-        address: { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(2) },
-        value:   { type: "integer", minimum: 0, maximum: 65535, description: "16-bit value to write. Must be 0-65535 (0x0000-0xFFFF). LSB is written to `address`, MSB to `address+1`. Values outside this range return an error." },
-        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+        address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(2) },
+        value:     { type: "integer", minimum: 0, maximum: 65535, description: "16-bit value to write. Must be 0-65535 (0x0000-0xFFFF). Byte placement follows `byteorder`. Values outside this range return an error." },
+        domain:    { type: "string", description: DOMAIN_PARAM_DESC },
+        byteorder: { type: "string", enum: ["le", "be"], default: "le", description: BYTEORDER_PARAM_DESC },
       },
       additionalProperties: false,
     },
@@ -189,17 +204,18 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_write32",
     description:
-      "PURPOSE: Write an unsigned 32-bit little-endian value to emulator memory at the given address. " +
-      "USAGE: Use for 32-bit cheats and pokes (timestamps, large counters, pointers on 32-bit systems). For 8/16-bit values use bizhawk_write8/write16; for big-endian layouts byteswap and use bizhawk_write_range. " +
-      "BEHAVIOR: DESTRUCTIVE: overwrites four bytes starting at `address` with no undo (snapshot via bizhawk_save_state first if you need rollback). Direct memory write — bypasses MBC/mapper/DMA, see bizhawk_write8 notes. Returns an error if the domain is unknown, address+4 exceeds the domain, value < 0 or > 4294967295, or the core lacks memory.write_u32_le. " +
+      "PURPOSE: Write an unsigned 32-bit value to emulator memory at the given address, little-endian by default or big-endian with byteorder='be'. " +
+      "USAGE: Use for 32-bit cheats and pokes (timestamps, large counters, pointers on 32-bit systems). For 8/16-bit values use bizhawk_write8/write16. On big-endian systems (Genesis/Mega Drive 68K) pass byteorder='be'. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites four bytes starting at `address` with no undo (snapshot via bizhawk_save_state first if you need rollback), in the byte order given by `byteorder`. Direct memory write — bypasses MBC/mapper/DMA, see bizhawk_write8 notes. Returns an error if the domain is unknown, address+4 exceeds the domain, value < 0 or > 4294967295, or the core lacks memory.write_u32_le/write_u32_be. " +
       "RETURNS: Single line 'Wrote VAL_DEC (0xVAL_HEX) → ADDR_HEX (DOMAIN)'.",
     inputSchema: {
       type: "object",
       required: ["address", "value"],
       properties: {
-        address: { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(4) },
-        value:   { type: "integer", minimum: 0, maximum: 4294967295, description: "32-bit value to write. Must be 0-4294967295 (0x00000000-0xFFFFFFFF). LSB lands at `address`, MSB at `address+3`. Values outside this range return an error." },
-        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+        address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(4) },
+        value:     { type: "integer", minimum: 0, maximum: 4294967295, description: "32-bit value to write. Must be 0-4294967295 (0x00000000-0xFFFFFFFF). Byte placement follows `byteorder`. Values outside this range return an error." },
+        domain:    { type: "string", description: DOMAIN_PARAM_DESC },
+        byteorder: { type: "string", enum: ["le", "be"], default: "le", description: BYTEORDER_PARAM_DESC },
       },
       additionalProperties: false,
     },
@@ -265,7 +281,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_play_input_sequence",
     description:
       "PURPOSE: Play a pre-built sequence of per-frame joypad inputs back-to-back, advancing one frame per element, ENTIRELY SERVER-SIDE in a single bridge round-trip. Optionally captures screenshots AND labeled memory reads at fixed frame intervals during the play, and optionally aborts play early when a specified memory address changes. All observations come back inline so the agent sees the full trajectory + game state in one tool response. " +
-      "USAGE: Use whenever you have ≥10 frames of inputs to play in order — TAS movie playback, scripted multi-frame sequences, AI-search of input patterns, agent-driven gameplay. ONE bridge round-trip ships N frames instead of the 2N round-trips you'd pay looping bizhawk_press_buttons + bizhawk_frame_advance(1). For sequences over ~200 frames, CHUNK. " +
+      "USAGE: Use whenever you have ≥10 frames of inputs to play in order — TAS movie playback, scripted multi-frame sequences, AI-search of input patterns, agent-driven gameplay. ONE bridge round-trip ships N frames instead of the 2N round-trips you'd pay looping bizhawk_press_buttons + bizhawk_frame_advance(1). Use `hold` on each element to run-length-encode repeated input ({buttons:{}, hold:60} = 60 idle frames in one entry) — this keeps the JSON tiny for long sequences. The RPC timeout scales with the total frame count, so multi-thousand-frame batches are fine; the practical reason to chunk is responsiveness (the bridge can't service other calls mid-batch). " +
       "FOR AGENT-DRIVEN PLAY: combine `screenshot_every`, `observe_memory`, and `stop_on_memory_change` for the killer pattern — 'walk right for up to 200 frames, observing screenshot+x+y+hp every second, but STOP the moment the room ID changes'. The agent sees: where Samus was at each second, AND whether the goal (room transition) was reached, AND screenshots for visual confirmation — all in one tool response. " +
       "BEHAVIOR: For each `frames` element, calls joypad.set with that frame's buttons then emu.frameadvance. The bridge's main poll loop is BLOCKED for the duration of the call (no other RPCs, no heartbeat) until the sequence finishes or fails. With `screenshot_every`, each captured screenshot adds ~1 frame of wall-clock. With `observe_memory`, each observation also reads the listed memory addresses at the same frame the screenshot was taken — values come back labeled by `name` in each observation's `memory` field. With `stop_on_memory_change`, the bridge records the listed address's value before the first frame, re-reads it after each frame, and aborts the sequence the moment it changes (a final observation is captured at the stop frame regardless of cadence). Returns an error if joypad.set / emu.frameadvance / client.screenshot is missing when needed, if any `observe_memory` entry references an unknown domain, if any `width` isn't 'u8' / 'u16' / 'u32', or if any address is out of range. " +
       "RETURNS: A text summary ('Played N frames. Final framecount: M. Stopped early: yes/no [reason]. Captured K observations with their memory values') followed by K inline image content blocks (one per observation, in frame order). Each observation in the text summary includes its frame_offset and labeled memory values so the agent can correlate the visible screenshot with the game state at that exact frame.",
@@ -276,10 +292,11 @@ const TOOLS: Tool[] = [
         frames: {
           type: "array",
           description:
-            "Array of per-frame input objects. Each element describes ONE emulated frame: " +
-            "`{\"buttons\": {\"Right\": true, ...}, \"player\": 1}`. Empty `buttons` (or empty object) = no input on that frame. " +
-            "`player` defaults to 1 if omitted. Array order = frame playback order. " +
-            "Chunk longer sequences across multiple calls (≤200 frames each is a reasonable upper bound) to keep the bridge responsive.",
+            "Array of input entries. Each element describes `hold` consecutive emulated frames (default 1): " +
+            "`{\"buttons\": {\"Right\": true, ...}, \"player\": 1, \"hold\": 30}` holds Right for 30 frames. " +
+            "Empty `buttons` (or empty object) = no input for that entry's frames. `player` defaults to 1 if omitted. " +
+            "Array order = playback order. Prefer `hold` over repeating identical entries — it keeps the JSON small. " +
+            "The RPC timeout scales with total frame count; chunk very long sequences (>~1000 frames) mainly to keep the bridge responsive to other calls.",
           minItems: 1,
           items: {
             type: "object",
@@ -295,6 +312,12 @@ const TOOLS: Tool[] = [
                 minimum: 1,
                 default: 1,
                 description: "Player number (1-based). Default 1.",
+              },
+              hold: {
+                type: "integer",
+                minimum: 1,
+                default: 1,
+                description: "Number of consecutive frames to repeat this input (run-length encoding). Default 1. The input is re-asserted every frame of the hold, so it behaves exactly like N identical entries.",
               },
             },
           },
@@ -340,8 +363,8 @@ const TOOLS: Tool[] = [
               },
               width: {
                 type: "string",
-                enum: ["u8", "u16", "u32"],
-                description: "Read width. 'u16'/'u32' are little-endian (BizHawk's default). For big-endian reads, use width 'u8' multiple times and reassemble client-side (rare).",
+                enum: ["u8", "u16", "u32", "u16_be", "u32_be"],
+                description: "Read width. 'u16'/'u32' are little-endian; 'u16_be'/'u32_be' are big-endian (use these on Genesis/Mega Drive).",
               },
             },
           },
@@ -365,8 +388,8 @@ const TOOLS: Tool[] = [
             },
             width: {
               type: "string",
-              enum: ["u8", "u16", "u32"],
-              description: "Read width for the monitored value. Must match the underlying field's actual width (a u8 watch on a u16 field will only trigger on low-byte changes).",
+              enum: ["u8", "u16", "u32", "u16_be", "u32_be"],
+              description: "Read width for the monitored value ('_be' variants are big-endian — use on Genesis/Mega Drive). Must match the underlying field's actual width (a u8 watch on a u16 field will only trigger on low-byte changes).",
             },
           },
         },
@@ -459,13 +482,53 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Restore the emulator from a previously saved .State file at the given path. " +
       "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. To start fresh from console boot instead, use bizhawk_reset. " +
-      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
-      "RETURNS: Single line 'Loaded state from PATH'.",
+      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge preserves the pause state across the load: if the emulator was paused before loading, it is re-paused in the same callback (ZERO frames run in between); pass pause=true to force a paused state after load regardless. Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
+      "RETURNS: Single line 'Loaded state from PATH (paused/running)'.",
     inputSchema: {
       type: "object",
       required: ["path"],
       properties: {
-        path: { type: "string", description: "Absolute filesystem path to an existing .State file produced by bizhawk_save_state on this same ROM and BizHawk core version. Loading mismatched files typically crashes the core." },
+        path:  { type: "string", description: "Absolute filesystem path to an existing .State file produced by bizhawk_save_state on this same ROM and BizHawk core version. Loading mismatched files typically crashes the core." },
+        pause: { type: "boolean", default: false, description: "If true, the emulator is left PAUSED after the load even if it was running before. If false/omitted, the pre-load pause state is preserved. Either way, no frames run between the load and the pause taking effect." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_wait_for_memory",
+    description:
+      "PURPOSE: Advance emulation frame-by-frame until a memory value satisfies a condition (or a frame budget runs out), then return how long it took and the final value. " +
+      "USAGE: Use to synchronize with game state instead of guessing frame counts — wait for RAM to initialize after boot (many systems, including the Genesis, have garbage/zero RAM until gameplay starts), wait for a room/level transition to complete, wait for a cutscene flag to clear. Combine with bizhawk_play_input_sequence: play the menu inputs, then wait_for_memory on a known game-state flag before reading RAM. For monitoring DURING an input sequence, use play_input_sequence's stop_on_memory_change instead. " +
+      "BEHAVIOR: Steps frames server-side in a single bridge round-trip (pause state is preserved — a paused emulator is unpaused for the wait and re-paused after). No input is asserted during the wait. If the condition already holds at call time, returns immediately with frames_waited=0. If timeout_frames elapses without a match, returns matched=false (NOT an error) with the last observed value. Returns an error if the domain is unknown, the width is invalid, or emu.frameadvance is unavailable. " +
+      "RETURNS: Single line 'Condition met/NOT met after N frames. Value: VAL. Framecount: M'.",
+    inputSchema: {
+      type: "object",
+      required: ["address"],
+      properties: {
+        address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain to watch (0-based per-domain)." },
+        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+        width: {
+          type: "string",
+          enum: ["u8", "u16", "u32", "u16_be", "u32_be"],
+          default: "u8",
+          description: "Read width for the watched value ('_be' variants are big-endian — use on Genesis/Mega Drive). Default 'u8'.",
+        },
+        condition: {
+          type: "string",
+          enum: ["eq", "ne", "gt", "lt", "change"],
+          default: "ne",
+          description: "Predicate to wait for: 'eq' value == `value`, 'ne' value != `value`, 'gt' value > `value`, 'lt' value < `value`, 'change' value differs from what it was at call time (no `value` needed). Default 'ne'.",
+        },
+        value: {
+          type: "integer",
+          description: "Comparison operand for eq/ne/gt/lt. Required unless condition is 'change'.",
+        },
+        timeout_frames: {
+          type: "integer",
+          minimum: 1,
+          default: 600,
+          description: "Maximum frames to wait (default 600 ≈ 10 seconds of game time at 60Hz). On expiry the call returns matched=false rather than erroring. The RPC timeout scales with this value automatically.",
+        },
       },
       additionalProperties: false,
     },
@@ -491,15 +554,30 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
     const p = args as Record<string, unknown>;
     const a = () => p.address as number;
     const dom = () => p.domain ? { domain: p.domain } : {};
+    const bo  = () => p.byteorder ? { byteorder: p.byteorder } : {};
 
     switch (name) {
       case "bizhawk_ping": {
-        const r = await bh.call<string>("ping");
-        return ok(r);
+        // Always answer with the server identity, even with no BizHawk
+        // attached — so ping doubles as a "which build am I running?" check
+        // without needing the emulator up.
+        if (!bh.isConnected()) {
+          return ok(`mcp-bizhawk v${VERSION} — server up, BizHawk NOT connected (${bh.describeTarget()})`);
+        }
+        if (!bh.isBridgeReady()) {
+          return ok(`mcp-bizhawk v${VERSION} — BizHawk connected, but bridge_JD.lua is not polling yet (load it via Tools > Lua Console)`);
+        }
+        try {
+          const r = await bh.call<string>("ping");
+          return ok(`${r} (mcp-bizhawk v${VERSION}, bridge polling)`);
+        } catch (err) {
+          return ok(`mcp-bizhawk v${VERSION} — server up, but the bridge did not answer: ${(err as Error).message}`);
+        }
       }
 
       case "bizhawk_get_info": {
         const r = await bh.call<{
+          bridge?: { name?: string; version?: string; pause_safe?: boolean };
           rom_name?: string;
           rom_hash?: string;
           framecount?: number;
@@ -508,6 +586,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           capabilities?: Record<string, boolean>;
         }>("get_info");
         const lines = [
+          `Server:     mcp-bizhawk v${VERSION}`,
+          `Bridge:     ${r.bridge
+            ? `${r.bridge.name ?? "?"} v${r.bridge.version ?? "?"}${r.bridge.pause_safe ? " (pause-safe)" : ""}`
+            : "(legacy — no identity block; pause support unverified)"}`,
           `ROM:        ${r.rom_name ?? "(unavailable)"}`,
           `ROM hash:   ${r.rom_hash ?? "(unavailable)"}`,
           `Framecount: ${r.framecount ?? "(unavailable)"}`,
@@ -535,8 +617,8 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_read8":  return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read8", { address: a(), ...dom() }))}`);
-      case "bizhawk_read16": return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read16", { address: a(), ...dom() }))}`);
-      case "bizhawk_read32": return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read32", { address: a(), ...dom() }))}`);
+      case "bizhawk_read16": return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read16", { address: a(), ...dom(), ...bo() }))}`);
+      case "bizhawk_read32": return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read32", { address: a(), ...dom(), ...bo() }))}`);
 
       case "bizhawk_read_range": {
         const bytes = await bh.call<number[]>("read_range", { address: a(), length: p.length, ...dom() });
@@ -549,11 +631,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(`Wrote ${fmtHex(p.value)} → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
       case "bizhawk_write16": {
-        await bh.call("write16", { address: a(), value: p.value, ...dom() });
+        await bh.call("write16", { address: a(), value: p.value, ...dom(), ...bo() });
         return ok(`Wrote ${fmtHex(p.value)} → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
       case "bizhawk_write32": {
-        await bh.call("write32", { address: a(), value: p.value, ...dom() });
+        await bh.call("write32", { address: a(), value: p.value, ...dom(), ...bo() });
         return ok(`Wrote ${fmtHex(p.value)} → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
       case "bizhawk_write_range": {
@@ -575,6 +657,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         if (p.screenshot_prefix      !== undefined) params.screenshot_prefix      = p.screenshot_prefix;
         if (p.observe_memory         !== undefined) params.observe_memory         = p.observe_memory;
         if (p.stop_on_memory_change  !== undefined) params.stop_on_memory_change  = p.stop_on_memory_change;
+        // Total EMULATED frames (each entry's `hold` counts N) drives the timeout.
+        const totalFrames = (p.frames as { hold?: number }[]).reduce(
+          (sum, f) => sum + (f.hold ?? 1), 0,
+        );
         const r = await bh.call<{
           played: number;
           final_framecount?: number;
@@ -585,9 +671,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             path?: string;
             memory?: Record<string, number>;
           }[];
-        }>("play_input_sequence", params);
+        }>("play_input_sequence", params, { timeoutMs: frameTimeout(totalFrames) });
 
-        const obs = r.observations ?? [];
+        // Array.isArray guard: a bridge that captured zero observations may
+        // send JSON {} (Lua's empty-table ambiguity) instead of [] / omitted.
+        const obs = Array.isArray(r.observations) ? r.observations : [];
         const lines = [
           `Played ${r.played} frames. Final framecount: ${r.final_framecount ?? "(unavailable)"}.`,
         ];
@@ -635,8 +723,28 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       case "bizhawk_unpause":       await bh.call("unpause");        return ok("Emulation resumed");
       case "bizhawk_reset":         await bh.call("reset");          return ok("Core reset");
       case "bizhawk_frame_advance": {
-        const f = await bh.call<number>("frame_advance", { count: p.count ?? 1 });
-        return ok(`Advanced ${p.count ?? 1} frame(s). Framecount: ${f}`);
+        const count = (p.count as number) ?? 1;
+        const f = await bh.call<number>("frame_advance", { count }, { timeoutMs: frameTimeout(count) });
+        return ok(`Advanced ${count} frame(s). Framecount: ${f}`);
+      }
+
+      case "bizhawk_wait_for_memory": {
+        const timeoutFrames = (p.timeout_frames as number) ?? 600;
+        const params: Record<string, unknown> = { address: a(), ...dom() };
+        if (p.width          !== undefined) params.width          = p.width;
+        if (p.condition      !== undefined) params.condition      = p.condition;
+        if (p.value          !== undefined) params.value          = p.value;
+        if (p.timeout_frames !== undefined) params.timeout_frames = p.timeout_frames;
+        const r = await bh.call<{
+          matched: boolean;
+          frames_waited: number;
+          value: number;
+          final_framecount?: number;
+        }>("wait_for_memory", params, { timeoutMs: frameTimeout(timeoutFrames) });
+        return ok(
+          `Condition ${r.matched ? "met" : "NOT met (timeout)"} after ${r.frames_waited} frame(s). ` +
+          `Value: ${fmtHex(r.value)}. Framecount: ${r.final_framecount ?? "(unavailable)"}`,
+        );
       }
 
       case "bizhawk_screenshot": {
@@ -649,8 +757,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(`Saved state to ${r.path}`);
       }
       case "bizhawk_load_state": {
-        const r = await bh.call<{ path: string }>("load_state", { path: p.path });
-        return ok(`Loaded state from ${r.path}`);
+        const params: Record<string, unknown> = { path: p.path };
+        if (p.pause !== undefined) params.pause = p.pause;
+        const r = await bh.call<{ path: string; paused?: boolean }>("load_state", params);
+        return ok(`Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`);
       }
 
       default:

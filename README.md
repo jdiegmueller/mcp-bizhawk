@@ -24,14 +24,14 @@ One bridge, **many systems**: NES, SNES, Game Boy / GBC / GBA, Sega Master Syste
 ```
 +------------------+    stdio     +------------------+   TCP :8766   +------------------+
 |   MCP client     |   JSON-RPC   |    mcp-bizhawk   |  newline JSON |     BizHawk      |
-| (Claude / etc.)  | ===========> |     (Node.js)    | <============ |    bridge.lua    |
+| (Claude / etc.)  | ===========> |     (Node.js)    | <============ |  bridge_JD.lua   |
 +------------------+              +------------------+               +------------------+
 ```
 
 The transport is **inverted** compared to most other emulator-MCP bridges: BizHawk's Lua doesn't have native server sockets, only an outbound `comm.socketServer*` client. So `mcp-bizhawk` runs the TCP **listener**, and BizHawk's Lua bridge dials in once per frame to ferry commands and replies.
 
 Two pieces:
-- **`lua/bridge.lua`** — runs *inside* BizHawk's Lua Console, polls our TCP server once per frame
+- **`lua/bridge_JD.lua`** — runs *inside* BizHawk's Lua Console, polls our TCP server once per frame
 - **`dist/index.js`** — the Node.js MCP server, listens on `127.0.0.1:8766` by default, exposes tools over stdio
 
 Trade-off: this design adds **~one frame of latency** per call (≈16ms at 60Hz). Fine for interactive memory hunting, save-state experimentation, and frame-by-frame inspection. Less ideal for high-rate-of-fire scripting.
@@ -83,7 +83,7 @@ Alternative: configure persistently via **Settings → Customize → External To
 
 ### 2. Load the bridge script
 
-In BizHawk: **Tools → Lua Console → Open Script** → select `lua/bridge.lua` from this repo.
+In BizHawk: **Tools → Lua Console → Open Script** → select `lua/bridge_JD.lua` from this repo.
 
 You should see in the Lua Console:
 ```
@@ -95,8 +95,8 @@ You should see in the Lua Console:
 
 And in the `mcp-bizhawk` process's stderr:
 ```
-[mcp-bizhawk] BizHawk client connected (waiting for bridge.lua to start polling)
-[mcp-bizhawk] bridge.lua is polling — bridge ready
+[mcp-bizhawk] BizHawk client connected (waiting for bridge_JD.lua to start polling)
+[mcp-bizhawk] bridge_JD.lua is polling — bridge ready
 ```
 
 ## Register with your MCP client
@@ -201,7 +201,7 @@ If you're unsure, run a probe: `bizhawk_press_buttons {"A": true}` and watch the
 
 | Symptom | Cause / Fix |
 |---|---|
-| MCP tool calls hang for 10 seconds, then time out with "is the bridge.lua script still polling?" | bridge.lua isn't loaded. In BizHawk: **Tools → Lua Console → Open Script → bridge.lua**. Check the console for `frame loop active`. |
+| MCP tool calls hang for 10 seconds, then time out with "is the bridge_JD.lua script still polling?" | bridge_JD.lua isn't loaded. In BizHawk: **Tools → Lua Console → Open Script → bridge_JD.lua**. Check the console for `frame loop active`. |
 | BizHawk connects to the server but tool calls still time out | You're on BizHawk older than 2.6.2 — the socket wire format changed then. Upgrade BizHawk. |
 | `[mcp-bizhawk] FATAL: comm.socketServer* not available` in the Lua Console | BizHawk wasn't launched with `--socket_ip` / `--socket_port` flags, and no socket server is configured in **Settings → Customize → External Tools**. |
 | Tools missing in Claude after install | Restart your MCP client; Claude only enumerates servers on startup. |
@@ -232,7 +232,7 @@ Browse and call this server's tools interactively with the [MCP Inspector](https
 npm run inspector
 ```
 
-Build first if you've edited `src/` since your last `npm install` (`npm run build`, or keep `npm run dev` running). Override the listener with `BIZHAWK_HOST` / `BIZHAWK_PORT` (default `127.0.0.1:8766`). `tools/list` works even without BizHawk connected; *calling* a tool needs EmuHawk running with the socket flags and `lua/bridge.lua` loaded.
+Build first if you've edited `src/` since your last `npm install` (`npm run build`, or keep `npm run dev` running). Override the listener with `BIZHAWK_HOST` / `BIZHAWK_PORT` (default `127.0.0.1:8766`). `tools/list` works even without BizHawk connected; *calling* a tool needs EmuHawk running with the socket flags and `lua/bridge_JD.lua` loaded.
 
 ## License
 

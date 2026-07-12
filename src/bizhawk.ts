@@ -64,7 +64,7 @@ export class BizhawkServer {
   /**
    * True once we've received at least one message (READY or RESULT) from the
    * bridge. A bare TCP connection isn't enough — BizHawk's CLI flag opens the
-   * socket at process startup, but `bridge.lua` only starts polling after the
+   * socket at process startup, but `bridge_JD.lua` only starts polling after the
    * user loads it via Tools > Lua Console. Tools should wait for this before
    * issuing commands.
    */
@@ -100,7 +100,7 @@ export class BizhawkServer {
       sock.destroy();
       return;
     }
-    process.stderr.write("[mcp-bizhawk] BizHawk client connected (waiting for bridge.lua to start polling)\n");
+    process.stderr.write("[mcp-bizhawk] BizHawk client connected (waiting for bridge_JD.lua to start polling)\n");
     this.client = sock;
     this.buf = "";
     this.awaitingResult = false;
@@ -150,7 +150,7 @@ export class BizhawkServer {
   private handleMessage(line: string): void {
     if (!this.bridgeReady) {
       this.bridgeReady = true;
-      process.stderr.write("[mcp-bizhawk] bridge.lua is polling — bridge ready\n");
+      process.stderr.write("[mcp-bizhawk] bridge_JD.lua is polling — bridge ready\n");
     }
     if (line === "READY") {
       // Lua is asking for work; no result to deliver this round.
@@ -231,8 +231,18 @@ export class BizhawkServer {
     this.sendFramed(msg);
   }
 
-  /** Enqueue a command and return a promise that resolves when BizHawk replies. */
-  async call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  /**
+   * Enqueue a command and return a promise that resolves when BizHawk replies.
+   * Frame-locked commands (frame_advance, play_input_sequence, wait_for_memory)
+   * inherently take ~16ms per emulated frame, so callers pass a scaled
+   * `timeoutMs` for those instead of relying on the flat default.
+   */
+  async call<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    opts: { timeoutMs?: number } = {},
+  ): Promise<T> {
+    const timeoutMs = Math.max(opts.timeoutMs ?? this.timeoutMs, this.timeoutMs);
     return new Promise<T>((resolve, reject) => {
       const id = this.nextId++;
       const pending: PendingCmd = {
@@ -249,10 +259,10 @@ export class BizhawkServer {
         this.inflight.delete(id);
         if (this.inflight.size === 0) this.awaitingResult = false;
         reject(new Error(
-          `BizHawk call "${method}" timed out (${this.timeoutMs}ms) — ` +
-          `is the bridge.lua script still polling?`,
+          `BizHawk call "${method}" timed out (${timeoutMs}ms) — ` +
+          `is the bridge_JD.lua script still polling?`,
         ));
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       // Wrap so the timer always clears
       const origResolve = pending.resolve, origReject = pending.reject;
