@@ -18,6 +18,66 @@ test("bizhawk_freeze passes spec through and reports the count", async () => {
   }
 });
 
+test("bizhawk_freeze batch entries pass through with shared defaults", async () => {
+  const h = await startHarness({ freeze: () => ({ frozen_count: 3 }) });
+  try {
+    const res = await h.client.callTool({
+      name: "bizhawk_freeze",
+      arguments: {
+        width: "u16_be",
+        domain: "M68K BUS",
+        entries: [
+          { address: 0xffb44a, value: 0xff92 },
+          { address: 0xffb45e, value: 0x11d },
+          { address: 0xffb4ca, value: 10, width: "u8" },
+        ],
+      },
+    });
+    const text = textOf(res);
+    assert.match(text, /Froze 0xFFB44A \(M68K BUS\) = 65426 \(0xFF92\)/);
+    assert.match(text, /Froze 0xFFB45E \(M68K BUS\) = 285 \(0x11D\)/);
+    assert.match(text, /Froze 0xFFB4CA \(M68K BUS\) = 10 \(0xA\)/);
+    assert.match(text, /3 address\(es\) frozen\./);
+    const call = h.bridge.calls.find((c) => c.method === "freeze");
+    assert.equal(call.params.entries.length, 3);
+    assert.equal(call.params.width, "u16_be");
+    assert.equal(call.params.domain, "M68K BUS");
+    assert.equal(call.params.entries[2].width, "u8");
+  } finally {
+    await h.close();
+  }
+});
+
+test("bizhawk_freeze rejects a call with neither address/value nor entries", async () => {
+  const h = await startHarness({ freeze: () => ({ frozen_count: 0 }) });
+  try {
+    // Handler errors travel back as JSON-RPC errors, so callTool rejects.
+    await assert.rejects(
+      h.client.callTool({ name: "bizhawk_freeze", arguments: {} }),
+      /address\+value required \(or pass entries/,
+    );
+    assert.equal(h.bridge.calls.find((c) => c.method === "freeze"), undefined);
+  } finally {
+    await h.close();
+  }
+});
+
+test("bizhawk_unfreeze batch addresses pass through", async () => {
+  const h = await startHarness({ unfreeze: () => ({ frozen_count: 4 }) });
+  try {
+    const res = await h.client.callTool({
+      name: "bizhawk_unfreeze",
+      arguments: { addresses: [0xffb44a, 0xffb45e], domain: "M68K BUS" },
+    });
+    assert.match(textOf(res), /4 address\(es\) frozen/);
+    const call = h.bridge.calls.find((c) => c.method === "unfreeze");
+    assert.deepEqual(call.params.addresses, [0xffb44a, 0xffb45e]);
+    assert.equal(call.params.domain, "M68K BUS");
+  } finally {
+    await h.close();
+  }
+});
+
 test("bizhawk_unfreeze all=true", async () => {
   const h = await startHarness({ unfreeze: () => ({ frozen_count: 0 }) });
   try {

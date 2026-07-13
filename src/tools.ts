@@ -647,18 +647,33 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_freeze",
     description:
-      "PURPOSE: Pin a memory address to a fixed value — the bridge re-writes it after EVERY emulated frame until unfrozen (classic cheat freezing). " +
-      "USAGE: Infinite health/time cheats, and pinning state during experiments (freeze the game clock while testing collision). Freezing the same address+domain again just updates the value. Use bizhawk_unfreeze to release, bizhawk_list_frozen to inspect. For a one-shot write use bizhawk_write8/16/32 instead. " +
-      "BEHAVIOR: DESTRUCTIVE: overwrites the address every frame with no undo; the game's own writes are overridden one frame later at the latest. The first write happens immediately and validates domain/width/address (errors now, not silently later). Freezes live in the bridge — reloading the Lua script or restarting BizHawk clears them. Frozen values are re-asserted after each frame stepped by the bridge's own commands (frame_advance, play_input_sequence, wait_for_memory), but NOT for frames advanced inside a bizhawk_eval_lua chunk. " +
-      "RETURNS: 'Froze ADDR_HEX (DOMAIN) = VAL. N address(es) frozen.'",
+      "PURPOSE: Pin one or MANY memory addresses to fixed values — the bridge re-writes them after EVERY emulated frame until unfrozen (classic cheat freezing). " +
+      "USAGE: Infinite health/time cheats, and pinning state during experiments (freeze the game clock while testing collision). Single address: pass address+value. Batch: pass entries=[{address,value,...},...] — one call instead of N; top-level width/domain act as defaults for every entry. Freezing the same address+domain again just updates the value. Use bizhawk_unfreeze to release, bizhawk_list_frozen to inspect. For a one-shot write use bizhawk_write8/16/32; to MIX writes/freezes/unfreezes in one call use bizhawk_memory_ops. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites the address(es) every frame with no undo; the game's own writes are overridden one frame later at the latest. The first write happens immediately and validates domain/width/address (errors now, not silently later). Batch entries are applied in order; if one entry errors, earlier entries in the batch STAY frozen. Freezes live in the bridge — reloading the Lua script or restarting BizHawk clears them. Frozen values are re-asserted after each frame stepped by the bridge's own commands (frame_advance, play_input_sequence, wait_for_memory), but NOT for frames advanced inside a bizhawk_eval_lua chunk. " +
+      "RETURNS: One 'Froze ADDR_HEX (DOMAIN) = VAL' line per address, then 'N address(es) frozen.'",
     inputSchema: {
       type: "object",
-      required: ["address", "value"],
       properties: {
-        address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain (0-based per-domain)." },
-        value:   { type: "integer", minimum: 0, description: "Unsigned value to pin. For negative values pass the two's-complement unsigned form." },
-        width:   { type: "string", enum: WRITE_WIDTH_ENUM, default: "u8", description: "Write width. '_be' variants are big-endian (use on Genesis/Mega Drive). Default 'u8'." },
-        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+        address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain (0-based per-domain). Required unless entries is given." },
+        value:   { type: "integer", minimum: 0, description: "Unsigned value to pin. For negative values pass the two's-complement unsigned form. Required unless entries is given." },
+        width:   { type: "string", enum: WRITE_WIDTH_ENUM, default: "u8", description: "Write width. '_be' variants are big-endian (use on Genesis/Mega Drive). Default 'u8'. In batch mode this is the default width for entries that don't set their own." },
+        domain:  { type: "string", description: DOMAIN_PARAM_DESC + " In batch mode this is the default domain for entries that don't set their own." },
+        entries: {
+          type: "array",
+          minItems: 1,
+          description: "Batch mode: freeze all of these in one call. Mutually exclusive with address/value.",
+          items: {
+            type: "object",
+            required: ["address", "value"],
+            properties: {
+              address: { type: "integer", minimum: 0, description: "Byte offset within the entry's memory domain." },
+              value:   { type: "integer", minimum: 0, description: "Unsigned value to pin." },
+              width:   { type: "string", enum: WRITE_WIDTH_ENUM, description: "Overrides the top-level width for this entry." },
+              domain:  { type: "string", description: "Overrides the top-level domain for this entry." },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       additionalProperties: false,
     },
@@ -666,16 +681,17 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_unfreeze",
     description:
-      "PURPOSE: Release a frozen memory address (or all of them) so the game can write it again. " +
-      "USAGE: Counterpart to bizhawk_freeze. Pass the same address+domain used when freezing, or all=true to clear everything. Unfreezing an address that isn't frozen is a no-op. " +
+      "PURPOSE: Release one, several, or all frozen memory addresses so the game can write them again. " +
+      "USAGE: Counterpart to bizhawk_freeze. Pass the same address+domain used when freezing, addresses=[...] to release a batch in one call (all sharing the top-level domain), or all=true to clear everything. Unfreezing an address that isn't frozen is a no-op. To mix unfreezes with writes/freezes in one call use bizhawk_memory_ops. " +
       "BEHAVIOR: Stops the per-frame re-writes; does NOT restore any previous value — memory keeps whatever the freeze last wrote until the game overwrites it. " +
       "RETURNS: 'N address(es) frozen.' (the count remaining).",
     inputSchema: {
       type: "object",
       properties: {
-        address: { type: "integer", minimum: 0, description: "Address to release (required unless all=true). Must match the frozen entry's address." },
-        domain:  { type: "string", description: "Domain of the frozen entry (must match what was passed to bizhawk_freeze, including omission)." },
-        all:     { type: "boolean", default: false, description: "Release every frozen address." },
+        address:   { type: "integer", minimum: 0, description: "Address to release (required unless addresses or all=true). Must match the frozen entry's address." },
+        addresses: { type: "array", minItems: 1, items: { type: "integer", minimum: 0 }, description: "Batch mode: release all of these (each matched against the top-level domain). Mutually exclusive with address/all." },
+        domain:    { type: "string", description: "Domain of the frozen entry/entries (must match what was passed to bizhawk_freeze, including omission)." },
+        all:       { type: "boolean", default: false, description: "Release every frozen address." },
       },
       additionalProperties: false,
     },
@@ -688,6 +704,40 @@ const TOOLS: Tool[] = [
       "BEHAVIOR: No side effects — pure read of bridge state. " +
       "RETURNS: One line per entry: 'ADDR_HEX WIDTH = VALUE (DOMAIN)', or '(no frozen addresses)'.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_memory_ops",
+    description:
+      "PURPOSE: Apply a MIXED batch of memory operations — one-shot writes, freezes, and unfreezes — in ONE bridge round-trip, all landing within the same emulated frame. " +
+      "USAGE: Reconfigure a whole experiment in one call instead of one call per address: e.g. unfreeze two old cheat addresses, freeze four new ones, and poke a state variable, atomically from the game's point of view (the game never runs on a half-applied set). Top-level width/domain are per-op defaults. For a homogeneous batch, bizhawk_freeze entries / bizhawk_unfreeze addresses work too; for contiguous bytes use bizhawk_write_range. " +
+      "BEHAVIOR: DESTRUCTIVE: writes and freezes overwrite memory with no undo (freeze semantics are exactly bizhawk_freeze's: re-written every frame until unfrozen, validated on first write). Ops apply in order; if one op errors, earlier ops in the batch STAY applied. Unfreezing an address that isn't frozen is a no-op. " +
+      "RETURNS: One 'Wrote/Froze ADDR_HEX (DOMAIN) = VAL' or 'Unfroze ADDR_HEX (DOMAIN)' line per op, then 'N op(s) applied in one frame. M address(es) frozen.'",
+    inputSchema: {
+      type: "object",
+      required: ["ops"],
+      properties: {
+        ops: {
+          type: "array",
+          minItems: 1,
+          description: "Operations, applied in order within one frame.",
+          items: {
+            type: "object",
+            required: ["op", "address"],
+            properties: {
+              op:      { type: "string", enum: ["write", "freeze", "unfreeze"], description: "write = one-shot write; freeze = pin every frame until unfrozen; unfreeze = release a pinned address." },
+              address: { type: "integer", minimum: 0, description: "Byte offset within the op's memory domain (0-based per-domain)." },
+              value:   { type: "integer", minimum: 0, description: "Unsigned value to write/pin (required for write and freeze; ignored for unfreeze). For negative values pass the two's-complement unsigned form." },
+              width:   { type: "string", enum: WRITE_WIDTH_ENUM, description: "Overrides the top-level width for this op." },
+              domain:  { type: "string", description: "Overrides the top-level domain for this op." },
+            },
+            additionalProperties: false,
+          },
+        },
+        width:  { type: "string", enum: WRITE_WIDTH_ENUM, default: "u8", description: "Default width for ops that don't set their own. '_be' variants are big-endian (use on Genesis/Mega Drive)." },
+        domain: { type: "string", description: DOMAIN_PARAM_DESC + " Default domain for ops that don't set their own." },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "bizhawk_eval_lua",
@@ -1275,6 +1325,23 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_freeze": {
+        if (p.entries !== undefined) {
+          if (p.address !== undefined || p.value !== undefined) {
+            throw new Error("pass either address+value or entries, not both");
+          }
+          const entries = p.entries as { address: number; value: number; width?: string; domain?: string }[];
+          const params: Record<string, unknown> = { entries, ...dom() };
+          if (p.width !== undefined) params.width = p.width;
+          const r = await bh.call<{ frozen_count: number }>("freeze", params);
+          const lines = entries.map((e) => {
+            const d = e.domain ?? p.domain;
+            return `Froze ${addrHex(e.address)}${d ? ` (${d})` : ""} = ${fmtHex(e.value)}`;
+          });
+          return ok(`${lines.join("\n")}\n${r.frozen_count} address(es) frozen.`);
+        }
+        if (p.address === undefined || p.value === undefined) {
+          throw new Error("address+value required (or pass entries for a batch)");
+        }
         const params: Record<string, unknown> = { address: a(), value: p.value, ...dom() };
         if (p.width !== undefined) params.width = p.width;
         const r = await bh.call<{ frozen_count: number }>("freeze", params);
@@ -1285,9 +1352,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
       case "bizhawk_unfreeze": {
         const params: Record<string, unknown> = {};
-        if (p.address !== undefined) params.address = p.address;
-        if (p.domain  !== undefined) params.domain  = p.domain;
-        if (p.all     !== undefined) params.all     = p.all;
+        if (p.address   !== undefined) params.address   = p.address;
+        if (p.addresses !== undefined) params.addresses = p.addresses;
+        if (p.domain    !== undefined) params.domain    = p.domain;
+        if (p.all       !== undefined) params.all       = p.all;
         const r = await bh.call<{ frozen_count: number }>("unfreeze", params);
         return ok(`${r.frozen_count} address(es) frozen.`);
       }
@@ -1301,6 +1369,19 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(list
           .map((f) => `${addrHex(f.address)} ${f.width} = ${f.value}${f.domain ? ` (${f.domain})` : ""}`)
           .join("\n"));
+      }
+      case "bizhawk_memory_ops": {
+        const ops = p.ops as { op: string; address: number; value?: number; width?: string; domain?: string }[];
+        const params: Record<string, unknown> = { ops, ...dom() };
+        if (p.width !== undefined) params.width = p.width;
+        const r = await bh.call<{ applied: number; frozen_count: number }>("memory_ops", params);
+        const lines = ops.map((o) => {
+          const d = o.domain ?? p.domain;
+          const loc = `${addrHex(o.address)}${d ? ` (${d})` : ""}`;
+          if (o.op === "unfreeze") return `Unfroze ${loc}`;
+          return `${o.op === "freeze" ? "Froze" : "Wrote"} ${loc} = ${fmtHex(o.value)}`;
+        });
+        return ok(`${lines.join("\n")}\n${r.applied} op(s) applied in one frame. ${r.frozen_count} address(es) frozen.`);
       }
 
       case "bizhawk_eval_lua": {

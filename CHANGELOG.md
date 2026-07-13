@@ -9,6 +9,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [0.5.6-jd] - 2026-07-13
+
+> Version note: jumps from 0.5.2-jd directly to 0.5.6-jd. The numbers
+> 0.5.3–0.5.5 were historically used by the bridge script's own versioning
+> (bridge_JD v0.5.3 per-port trace, v0.5.4 animation OSD, v0.5.5 rename)
+> before it diverged onto its own line (0.10+); the server skips them so no
+> number ever refers to two different things.
+
+### Added
+
+- **`bizhawk_memory_ops`** — apply a mixed batch of memory operations
+  (`ops: [{op: "write"|"freeze"|"unfreeze", address, value?, width?,
+  domain?}, ...]`) in one bridge round-trip, all landing between the same
+  two frames so the game never runs on a half-applied set. Top-level
+  `width`/`domain` act as per-op defaults; ops apply in order, and an op
+  that errors aborts the rest but keeps earlier ops applied. Requires
+  bridge_JD.lua ≥ 0.12.0.
+
+### Changed
+
+- **Live OSD shows gameplay state in its own window** — the per-slot readout
+  now displays x/y position, facing direction, and x/y velocity (plus puck
+  position/velocity) instead of sprite/animation internals; the animation
+  fields remain available in the trace CSV (`s<n>_frame/anim/spanum/attr`).
+  When the BizHawk build supports `gui.createcanvas`, the OSD renders into a
+  separate LuaCanvas window instead of overlaying the game; it falls back to
+  the on-game `gui.text` overlay if the canvas can't be created or dies
+  mid-run. bridge_JD.lua 0.13.0.
+- **OSD 2x size + puck carrier and game globals** — the canvas window is
+  doubled (24pt font, 32px lines); a header line shows the game clock as
+  M:SS (0xFFC468 stores seconds remaining), the clock run/stop bit, and
+  which slot is carrying the puck (0xFFB7AA = slot index, negative when
+  loose — both verified against live gameplay); the carrier's row is
+  starred; a footer line shows shotplayer/lastplayer and pass
+  direction/speed. bridge_JD.lua 0.14.0. (0.14.1: the run/stop indicator
+  was reversed — `gmode` bit 0 set means the clock is *stopped*; note the
+  trace CSV's `clockrun` column records the raw bit and is therefore
+  actually a clock-stopped flag.)
+- **HELLO banner de-decorated** — the bridge's "connected to mcp server
+  vX.Y.Z" console line is no longer wrapped in `***`. bridge_JD.lua 0.14.2.
+
+### Fixed
+
+- **bridge_JD.lua no longer loops forever when BizHawk is launched without
+  `--socket_ip`/`--socket_port`** — the `comm.socketServer*` functions exist
+  even with no target configured, so the script used to pass its capability
+  check and then spin the auto-reconnect loop ("link dead — re-dialing...")
+  every ~5s indefinitely. It now detects the unconfigured target at startup
+  (reading GetIp/GetPort via pcall, since some builds throw when
+  uninitialized) and exits cleanly with a FATAL message. bridge_JD.lua
+  0.12.1.
+
+## [0.5.2-jd] - 2026-07-13
+
+### Added
+
+- **HELLO greeting** — the server now answers the first message of every
+  bridge connection with `HELLO {"server_version": "..."}` instead of `NONE`;
+  bridge_JD.lua (≥ 0.11.0) logs
+  `*** [mcp-bizhawk] bizhawk connected to mcp server vX.Y.Z ***` to the Lua
+  Console, including after auto-reconnect redials (a reprinted banner
+  doubles as reconnect confirmation). An older bridge meeting a new server
+  logs a one-time parse-error RESULT that the server safely ignores; a new
+  bridge meeting an older server simply never prints the banner.
+
+## [0.5.1-jd] - 2026-07-13
+
+### Added
+
+- **Batch freeze/unfreeze** — `bizhawk_freeze` accepts
+  `entries: [{address, value, width?, domain?}, ...]` to pin many addresses
+  in one call (top-level `width`/`domain` act as per-entry defaults), and
+  `bizhawk_unfreeze` accepts `addresses: [...]` to release a batch sharing
+  the top-level `domain`. Single-address calls are unchanged. Requires
+  bridge_JD.lua ≥ 0.10.0 (an older bridge errors with "address required"
+  on batch calls).
+
 ## [0.5.0-jd] - 2026-07-13
 
 ### Added

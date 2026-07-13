@@ -1,5 +1,74 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.9.0
+-- v0.14.1
+--
+-- v0.14.2 changes (banner cosmetics):
+--   * HELLO banner no longer wrapped in "***" — logs as a plain
+--     "[mcp-bizhawk] bizhawk connected to mcp server vX.Y.Z" line.
+--
+-- v0.14.1 changes (clock run/stop fix):
+--   * OSD run/stop indicator was reversed: gmode bit 0 SET means the clock
+--     is STOPPED (verified live: clock ticks while gmode==0). The trace
+--     CSV's "clockrun" column still records raw gmode&1 unchanged — beware
+--     it is actually a clock-stopped flag.
+--
+-- v0.14.0 changes (OSD: 2x size, puck carrier + game globals):
+--   * Canvas window doubled (640px wide, 32px lines, 24pt font).
+--   * New header line: game clock as M:SS (0xFFC468 holds SECONDS
+--     remaining — verified live against the scoreboard), clock run bit
+--     (gmode & 1 as run/stop), and the puck-carrier slot.
+--   * Puck carrier: 0xFFB7AA is the carrying slot's index (0-11), or
+--     negative (0xFF00) when the puck is loose — verified live by
+--     matching slot positions against the puck position. The carrier's
+--     s<n> line is starred.
+--   * New footer line: shotplayer/lastplayer slots and pass
+--     direction/speed globals.
+--
+-- v0.13.0 changes (OSD: position/facing/velocity + separate window):
+--   * The live OSD now shows gameplay state instead of sprite/animation
+--     internals: per slot x/y position, facing direction (+0x54) and x/y
+--     velocity (+0x28/+0x2A), plus puck position/velocity. The animation
+--     fields it used to show (frame/anim/spanum/attr) remain in the trace
+--     CSV, unchanged.
+--   * The OSD renders into a SEPARATE WINDOW when the build supports
+--     gui.createcanvas (LuaCanvas), keeping the game view clean. If the
+--     canvas can't be created — or dies mid-run (window closed, mono
+--     quirk) — it falls back to the old on-game gui.text overlay and says
+--     so on the console.
+--
+-- v0.12.1 changes (unconfigured-socket fix):
+--   * Loading the script WITHOUT --socket_ip/--socket_port no longer spins
+--     the reconnect loop forever ("link dead — re-dialing..." every ~5s):
+--     the comm.socketServer* functions exist even when no target was
+--     configured, so the old capability check passed and every send just
+--     failed. Startup now reads GetIp/GetPort defensively (pcall — some
+--     builds throw when uninitialized) and exits cleanly with a FATAL
+--     console message when the target is unset. A configured target whose
+--     server is merely down still enters the normal auto-reconnect loop.
+--
+-- v0.12.0 changes (mixed memory op batches):
+--   * cmd_memory_ops ops=[{op:"write"|"freeze"|"unfreeze",address,value?,
+--     width?,domain?},...] — apply one-shot writes, freezes, and unfreezes
+--     in ONE round-trip, all between the same two frames, so the game
+--     never runs on a half-applied set. Top-level width/domain are per-op
+--     defaults; ops apply in order; an error aborts the rest but keeps
+--     earlier ops applied.
+--
+-- v0.11.0 changes (HELLO greeting):
+--   * The server now answers the first message of every connection with
+--     `HELLO {"server_version":"..."}` instead of NONE; tick() recognizes
+--     it and logs "*** [mcp-bizhawk] bizhawk connected to mcp server
+--     vX.Y.Z ***" to the Lua Console — including on auto-reconnect
+--     redials, so a reprinted banner doubles as reconnect confirmation.
+--     Needs a HELLO-capable server (≥ 0.5.2-jd) to appear; an older
+--     server just never sends HELLO — no banner, everything else works.
+--
+-- v0.10.0 changes (batch freeze/unfreeze):
+--   * cmd_freeze entries=[{address,value,width?,domain?},...] — freeze many
+--     addresses in ONE round-trip instead of one call per address; the
+--     top-level width/domain act as per-entry defaults. Entries apply in
+--     order; an error aborts the rest but keeps earlier entries frozen.
+--   * cmd_unfreeze addresses=[...] — release a batch of addresses (all
+--     matched against the top-level domain) in one call.
 --
 -- v0.9.0 changes (get_input, disassemble, osd_message, get_info+, eval_lua unpause, command-echo):
 --   * cmd_get_input — reads the current joypad state for a player (held
@@ -162,12 +231,14 @@
 -- Each frame, this script does ONE round-trip with the external server:
 --   1. Lua sends "READY\n"  (or "RESULT <json>\n" if there's a pending result)
 --   2. Server responds with EITHER "NONE\n" OR a JSON command "{id,method,params}\n"
+--      (or, replying to the connection's FIRST message only, "HELLO <json>\n")
 --   3. If a command came back, execute it locally and stash the result so
 --      the next frame's send carries it back.
 --
 -- Wire format: newline-delimited UTF-8.
 --   - Lua → server: "READY\n" | "RESULT <json>\n"
---   - Server → Lua: "NONE\n"  | "<json command>\n"
+--   - Server → Lua: "NONE\n"  | "<json command>\n" | "HELLO <json>\n" (once,
+--     replying to the connection's first message, carrying server_version)
 --
 -- Setup in BizHawk:
 --   1. Tools → External Tool → Lua Console
@@ -186,7 +257,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.9.0",
+    version    = "0.14.2",
     pause_safe = true,
 }
 
@@ -353,11 +424,21 @@ local function trace_tick()
     if trace_frames % TRACE_FLUSH == 0 then trace_fh:flush() end
 end
 
--- ── Live animation OSD (v0.5.4) ─────────────────────────────────────────────
--- On-screen readout of the same animation state the trace records: one line
--- per player slot showing resolved frame (+0x06), SPA anim# (+0x58), SPAnum
--- slot (+0x5A, shown /4 as a slot index) and "x" when attribute bit 3
--- (x-flip) is set, plus the puck frame. Set TRACE_OSD = false to disable.
+-- ── Live state OSD ──────────────────────────────────────────────────────────
+-- Readout of gameplay state (was animation state until v0.13.0; that data is
+-- still in the trace CSV as s<n>_frame/anim/attr/spanum):
+--   header: game clock (seconds at 0xFFC468, shown M:SS), run/stop state
+--           (gmode bit 0 SET = stopped), and the puck-carrier slot
+--   s0-s11: x (+0x00), y (+0x14), facing direction (+0x54), x/y velocity
+--           (+0x28/+0x2A); the carrier slot is starred
+--   pk:     puck position/velocity (no facing)
+--   footer: shotplayer/lastplayer slots and pass direction/speed globals
+-- Set TRACE_OSD = false to disable, or toggle at runtime via
+-- trace_start/trace_stop's `osd` param.
+--
+-- Rendering prefers a SEPARATE WINDOW (gui.createcanvas LuaCanvas) so the
+-- game view stays clean; if the build can't create one (or the window dies
+-- — e.g. user closes it), it falls back to the on-game gui.text overlay.
 local TRACE_OSD = true
 
 -- gui.text (EmuHawk OSD renderer, window coords) — NOT gui.pixelText, whose
@@ -367,21 +448,105 @@ if gui and has(gui, "text") then
     osd_text = function(x, y, s) gui.text(x, y, s) end
 end
 
-local OSD_LINE_H = 16   -- gui.text line height in window pixels
+local OSD_LINE_H = 16   -- gui.text fallback line height (fixed OSD font)
+local OSD_LINES  = 16   -- header + 12 slots + puck + globals + version
 
-local function osd_tick()
-    if not TRACE_OSD or not osd_text then return end
+-- Canvas render metrics (v0.14.0: 2x the original size).
+local OSD_CANVAS_LINE_H = 32
+local OSD_CANVAS_FONT   = 24
+local OSD_CANVAS_W      = 640
+
+local osd_canvas = nil
+local osd_canvas_failed = false   -- don't retry a broken canvas every frame
+
+local function osd_get_canvas()
+    if osd_canvas or osd_canvas_failed then return osd_canvas end
+    if not (gui and has(gui, "createcanvas")) then
+        osd_canvas_failed = true
+        return nil
+    end
+    local ok, c = pcall(gui.createcanvas, OSD_CANVAS_W, 4 + OSD_LINES * OSD_CANVAS_LINE_H + 4)
+    if ok and c then
+        pcall(function() c.SetTitle(BRIDGE.name .. " — NHL94 state") end)
+        osd_canvas = c
+        console.log("[mcp-bizhawk] OSD rendering to separate LuaCanvas window")
+    else
+        osd_canvas_failed = true
+        console.log("[mcp-bizhawk] gui.createcanvas failed ("
+            .. tostring(c) .. ") — OSD falling back to on-game overlay")
+    end
+    return osd_canvas
+end
+
+-- Puck carrier (0xFFB7AA): slot index 0-11 while a player has the puck,
+-- negative (0xFF00) when nobody does (loose puck / faceoff). Verified live
+-- against slot-vs-puck positions, 2026-07-13.
+local function osd_carrier()
+    local c = tr_s16(TRACE_G.puckc)
+    if c >= 0 and c <= 11 then return c end
+    return nil
+end
+
+local function osd_lines()
+    local lines = {}
+    local clock   = tr_u16(TRACE_G.gameclock)   -- seconds remaining in period
+    -- gmode bit 0 SET means the clock is STOPPED (verified live 2026-07-13:
+    -- clock ticks down while gmode==0, holds while gmode==1). Note the trace
+    -- CSV's "clockrun" column records the raw gmode&1, i.e. it is actually
+    -- a clock-STOPPED flag.
+    local running = (tr_u8(TRACE_G.gmode) & 1) == 0
+    local carrier = osd_carrier()
+    lines[#lines + 1] = string.format("clk %d:%02d %s   carry %s",
+        clock // 60, clock % 60,
+        running and "run " or "stop",
+        carrier and ("s" .. carrier) or "--")
     for n = 0, 11 do
         local base = SORTCORDS + n * SCSIZE
-        osd_text(4, 4 + n * OSD_LINE_H, string.format("s%-2d f%-3d a%02X.%d%s",
+        lines[#lines + 1] = string.format("s%-2d%s x%-5d y%-5d d%-2d v %d,%d",
             n,
-            tr_u16(base + 0x06),
-            tr_u16(base + 0x58),
-            tr_u16(base + 0x5A) // 4,
-            (tr_u16(base + 0x04) & 0x8) ~= 0 and " x" or ""))
+            n == carrier and "*" or " ",
+            tr_s16(base + 0x00),
+            tr_s16(base + 0x14),
+            tr_u16(base + 0x54),
+            tr_s16(base + 0x28),
+            tr_s16(base + 0x2A))
     end
-    osd_text(4, 4 + 12 * OSD_LINE_H, string.format("pk f%-3d", tr_u16(PUCK_ADDR + 0x06)))
-    osd_text(4, 4 + 13 * OSD_LINE_H, string.format("%s v%s", BRIDGE.name, BRIDGE.version))
+    lines[#lines + 1] = string.format("pk   x%-5d y%-5d      v %d,%d",
+        tr_s16(PUCK_ADDR + 0x00),
+        tr_s16(PUCK_ADDR + 0x14),
+        tr_s16(PUCK_ADDR + 0x28),
+        tr_s16(PUCK_ADDR + 0x2A))
+    lines[#lines + 1] = string.format("shot s%d  last s%d  pass d%d,%d",
+        tr_s16(TRACE_G.shotplayer),
+        tr_s16(TRACE_G.lastplayer),
+        tr_s16(TRACE_G.passdir),
+        tr_s16(TRACE_G.passspeed))
+    lines[#lines + 1] = string.format("%s v%s", BRIDGE.name, BRIDGE.version)
+    return lines
+end
+
+local function osd_tick()
+    if not TRACE_OSD then return end
+    local canvas = osd_get_canvas()
+    if canvas then
+        local ok = pcall(function()
+            local lines = osd_lines()
+            canvas.Clear(0xFF101010)
+            for i, s in ipairs(lines) do
+                canvas.DrawText(4, 4 + (i - 1) * OSD_CANVAS_LINE_H, s,
+                    0xFFFFFFFF, nil, OSD_CANVAS_FONT, "Courier New")
+            end
+            canvas.Refresh()
+        end)
+        if ok then return end
+        -- Canvas died (window closed, mono quirk mid-run) — overlay from now on.
+        osd_canvas, osd_canvas_failed = nil, true
+        console.log("[mcp-bizhawk] LuaCanvas draw failed — OSD falling back to on-game overlay")
+    end
+    if not osd_text then return end
+    for i, s in ipairs(osd_lines()) do
+        osd_text(4, 4 + (i - 1) * OSD_LINE_H, s)
+    end
 end
 
 local CAPS = {
@@ -1037,14 +1202,27 @@ local function cmd_read_struct_array(p)
     end)
 end
 
-local function cmd_freeze(p)
-    local addr  = assert(p.address, "address required")
-    local value = assert(p.value,   "value required")
-    local width = p.width or "u8"
+local function freeze_one(addr, width, value, domain)
     -- Validate NOW (bad width/domain/address should error on this call, not
     -- silently every subsequent frame) — this also applies the first write.
-    in_domain(p.domain, function() write_width(addr, width, value) end)
-    frozen[freeze_key(p.domain, addr)] = { address = addr, width = width, value = value, domain = p.domain }
+    in_domain(domain, function() write_width(addr, width, value) end)
+    frozen[freeze_key(domain, addr)] = { address = addr, width = width, value = value, domain = domain }
+end
+
+local function cmd_freeze(p)
+    if p.entries then
+        -- Batch mode: top-level width/domain are per-entry defaults. Entries
+        -- apply in order; an error keeps the earlier entries frozen.
+        for i, e in ipairs(p.entries) do
+            local addr  = assert(e.address, "entry " .. i .. ": address required")
+            local value = assert(e.value,   "entry " .. i .. ": value required")
+            freeze_one(addr, e.width or p.width or "u8", value, e.domain or p.domain)
+        end
+    else
+        local addr  = assert(p.address, "address required")
+        local value = assert(p.value,   "value required")
+        freeze_one(addr, p.width or "u8", value, p.domain)
+    end
     return { frozen_count = frozen_count() }
 end
 
@@ -1053,7 +1231,13 @@ local function cmd_unfreeze(p)
         frozen = {}
         return { frozen_count = 0 }
     end
-    local addr = assert(p.address, "address required (or pass all=true)")
+    if p.addresses then
+        for _, addr in ipairs(p.addresses) do
+            frozen[freeze_key(p.domain, addr)] = nil
+        end
+        return { frozen_count = frozen_count() }
+    end
+    local addr = assert(p.address, "address required (or pass addresses / all=true)")
     frozen[freeze_key(p.domain, addr)] = nil
     return { frozen_count = frozen_count() }
 end
@@ -1063,6 +1247,34 @@ local function cmd_list_frozen(p)
     for _, f in pairs(frozen) do out[#out + 1] = f end
     -- omit the key when empty: {} would serialize as a JSON object
     return { count = #out, frozen = #out > 0 and out or nil }
+end
+
+-- Mixed batch of write/freeze/unfreeze ops, applied in order between two
+-- frames — the game never runs on a half-applied set. Top-level width/domain
+-- are per-op defaults. An op that errors aborts the rest but keeps earlier
+-- ops applied (freeze semantics identical to cmd_freeze).
+local function cmd_memory_ops(p)
+    local ops = assert(p.ops, "ops required")
+    local applied = 0
+    for i, o in ipairs(ops) do
+        local kind   = assert(o.op,      "op " .. i .. ": op required")
+        local addr   = assert(o.address, "op " .. i .. ": address required")
+        local width  = o.width or p.width or "u8"
+        local domain = o.domain or p.domain
+        if kind == "write" then
+            local value = assert(o.value, "op " .. i .. ": value required")
+            in_domain(domain, function() write_width(addr, width, value) end)
+        elseif kind == "freeze" then
+            local value = assert(o.value, "op " .. i .. ": value required")
+            freeze_one(addr, width, value, domain)
+        elseif kind == "unfreeze" then
+            frozen[freeze_key(domain, addr)] = nil
+        else
+            error("op " .. i .. ": unknown op '" .. tostring(kind) .. "' (write|freeze|unfreeze)")
+        end
+        applied = applied + 1
+    end
+    return { applied = applied, frozen_count = frozen_count() }
 end
 
 -- Arbitrary-Lua escape hatch. The chunk runs with the bridge's full
@@ -1501,6 +1713,7 @@ local HANDLERS = {
     freeze               = cmd_freeze,
     unfreeze             = cmd_unfreeze,
     list_frozen          = cmd_list_frozen,
+    memory_ops           = cmd_memory_ops,
     eval_lua             = cmd_eval_lua,
     search_begin         = cmd_search_begin,
     search_filter        = cmd_search_filter,
@@ -1600,7 +1813,14 @@ local function tick()
         -- alive. This is the heartbeat; command traffic is irrelevant.
         last_rx_tick = tick_count
         incoming = incoming:gsub("[\r\n]+$", "")
-        if incoming ~= "NONE" and #incoming > 0 then
+        local hello = incoming:match("^HELLO (.+)$")
+        if hello then
+            -- Server greets once per connection (including redials) with its
+            -- version, so the console shows WHICH server build we reached.
+            local ok, h = pcall(json.decode, hello)
+            local v = (ok and type(h) == "table" and h.server_version) or "(unknown)"
+            console.log("[mcp-bizhawk] bizhawk connected to mcp server v" .. tostring(v))
+        elseif incoming ~= "NONE" and #incoming > 0 then
             local parse_ok, cmd = pcall(json.decode, incoming)
             if parse_ok and type(cmd) == "table" then
                 local result, rpc_err = dispatch(cmd)
@@ -1639,9 +1859,34 @@ if not (comm and comm.socketServerSend and comm.socketServerResponse) then
     return
 end
 
-local ip   = comm.socketServerGetIp   and comm.socketServerGetIp()   or "(unknown)"
-local port = comm.socketServerGetPort and comm.socketServerGetPort() or "(unknown)"
-console.log(string.format("[mcp-bizhawk] socket server target: %s:%s", tostring(ip), tostring(port)))
+-- Read the configured target defensively: on some builds the getters THROW
+-- when the socket server was never initialized (no --socket_ip/--socket_port
+-- and no External Tool config), on others they return nil/"".
+local function safe_get(fn)
+    if not fn then return nil end
+    local ok, v = pcall(fn)
+    if ok then return v end
+    return nil
+end
+local ip   = safe_get(comm.socketServerGetIp)
+local port = tonumber(safe_get(comm.socketServerGetPort))
+
+-- Without a configured target the comm.socketServer* functions still EXIST,
+-- so the capability check above passes — but every send fails, and the
+-- watchdog would re-dial an unset address every ~5s forever. Detect the
+-- unconfigured state now and stop cleanly instead of looping. (Only when the
+-- getters are available and say so — a configured target whose server isn't
+-- up yet is the auto-reconnect loop's legitimate job.)
+if (comm.socketServerGetIp   and (ip == nil or ip == "")) or
+   (comm.socketServerGetPort and (port == nil or port <= 0)) then
+    console.log("[mcp-bizhawk] FATAL: socket server target not configured (ip="
+        .. tostring(ip) .. ", port=" .. tostring(port) .. ") — not polling.")
+    console.log("[mcp-bizhawk] Launch BizHawk with --socket_ip=127.0.0.1 --socket_port=8766 (matching a running mcp-bizhawk server), then reload this script.")
+    return
+end
+
+console.log(string.format("[mcp-bizhawk] socket server target: %s:%s",
+    tostring(ip or "(unknown)"), tostring(port or "(unknown)")))
 
 -- Receive timeout for socketServerResponse(). Default BizHawk timeout (5ms)
 -- is fine in steady state — replies are sitting in the socket buffer by the

@@ -1,0 +1,27 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { startHarness } from "./helpers/harness.mjs";
+import { VERSION } from "../dist/version.js";
+
+test("server greets the bridge with HELLO carrying its version, once per connection", async () => {
+  const h = await startHarness({ ping: () => ({ pong: true }) });
+  try {
+    // HELLO is the reply to the bridge's first READY; give it a few polls.
+    const deadline = Date.now() + 2000;
+    while (!h.bridge.hello) {
+      if (Date.now() > deadline) throw new Error("bridge never received HELLO");
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.deepEqual(h.bridge.hello, { server_version: VERSION });
+    assert.equal(h.bridge.helloCount, 1);
+
+    // Normal RPC still works after the greeting.
+    await h.client.callTool({ name: "bizhawk_ping", arguments: {} });
+
+    // Wait a few more polls: HELLO must NOT repeat on the same connection.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(h.bridge.helloCount, 1);
+  } finally {
+    await h.close();
+  }
+});

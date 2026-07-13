@@ -7,6 +7,9 @@
 //          OR  "RESULT <json>\n"      (carrying back the previous frame's result)
 //   us → Lua:  "NONE\n"               (nothing pending)
 //          OR  "<json command>\n"     (next queued command)
+//          OR  "HELLO <json>\n"       (once, replying to the connection's first
+//                                      message: {"server_version": "..."} so the
+//                                      bridge can log which build it reached)
 //
 // MCP tool calls land via call(method, params) → we enqueue the command and
 // resolve the returned promise once the matching RESULT comes back. Each
@@ -74,6 +77,11 @@ export class BizhawkServer {
     return this.bridgeReady;
   }
   private bridgeReady = false;
+  /** True once this connection's HELLO greeting (carrying our version) has
+   *  been sent. The greeting is the reply to the bridge's first message, so
+   *  the bridge can log which server build it reached — reset per connection
+   *  so a redial gets greeted again. */
+  private helloSent = false;
 
   /** Start listening. Resolves once the listen socket is bound. */
   async start(): Promise<void> {
@@ -107,6 +115,7 @@ export class BizhawkServer {
     this.buf = "";
     this.awaitingResult = false;
     this.bridgeReady = false;
+    this.helloSent = false;
 
     // CRITICAL: disable Nagle. Bridge's socketServerResponse has a 5ms timeout;
     // our 5-byte NONE replies get coalesced by Nagle for up to 200ms otherwise,
@@ -217,6 +226,13 @@ export class BizhawkServer {
    */
   private maybeDispatchNext(): void {
     if (!this.client || this.client.destroyed) return;
+    if (!this.helloSent) {
+      // Greet the bridge before any other traffic so it can log which server
+      // build it reached. Costs one round-trip (~1 frame) per connection.
+      this.helloSent = true;
+      this.sendFramed(`HELLO ${JSON.stringify({ server_version: VERSION })}`);
+      return;
+    }
     if (this.awaitingResult) {
       // a command is in flight; tell bridge to keep waiting
       this.sendFramed("NONE");
