@@ -1,5 +1,26 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.8.0
+-- v0.9.0
+--
+-- v0.9.0 changes (get_input, disassemble, osd_message, get_info+, eval_lua unpause, command-echo):
+--   * cmd_get_input — reads the current joypad state for a player (held
+--     buttons + analog axes) via joypad.get(), without advancing frames;
+--     complements cmd_record_input's per-frame sampling.
+--   * cmd_disassemble — thin wrapper over emu.disassemble() to decode one
+--     or more instructions at a given address or the current PC, for
+--     reading the code around a cmd_trap_memory hit.
+--   * cmd_osd_message — thin wrapper over gui.addmessage() to draw a
+--     short message in BizHawk's on-screen OSD area.
+--   * cmd_get_info extended — now reports system_id, paused,
+--     lag_count/is_lagged, and movie_loaded/movie_mode when the loaded
+--     core/build exposes them.
+--   * cmd_eval_lua unpause option — runs the submitted chunk via the
+--     pause-safe path, temporarily unpausing so emu.frameadvance() calls
+--     inside the chunk don't block forever, then restores the prior
+--     pause state afterward.
+--   * dispatch() now echoes every received command (and any handler
+--     error) to the Lua Console as a `[mcp-bizhawk] << <method> <params>`
+--     line, making it possible to watch exactly what the server is
+--     sending in real time from BizHawk's Lua Console.
 --
 -- v0.8.0 changes (registers, traps, input recording, movies, trace control):
 --   * cmd_get_registers/cmd_set_register — thin wrappers over
@@ -165,7 +186,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.8.0",
+    version    = "0.9.0",
     pause_safe = true,
 }
 
@@ -369,6 +390,10 @@ local CAPS = {
     frameadvance = emu and has(emu, "frameadvance"),
     getregisters = emu and has(emu, "getregisters"),
     setregister  = emu and has(emu, "setregister"),
+    disassemble  = emu and has(emu, "disassemble"),
+    lagcount     = emu and has(emu, "lagcount"),
+    islagged     = emu and has(emu, "islagged"),
+    getsystemid  = emu and has(emu, "getsystemid"),
     -- event hooks are core-dependent (available on Genesis/NES/SNES-class
     -- cores, absent on some others) — probe, don't assume
     on_bus_write     = event and has(event, "on_bus_write"),
@@ -388,6 +413,8 @@ local CAPS = {
     -- savestate
     savestate_save = savestate and has(savestate, "save"),
     savestate_load = savestate and has(savestate, "load"),
+    -- gui (OSD)
+    gui_addmessage = gui and has(gui, "addmessage"),
     -- joypad
     joypad_set = joypad and has(joypad, "set"),
     joypad_get = joypad and has(joypad, "get"),
@@ -427,6 +454,18 @@ local CAPS = {
 
 -- ── Command handlers ────────────────────────────────────────────────────────
 
+-- Draw a transient message in BizHawk's OSD message area (gui.addmessage).
+-- Fire-and-forget: BizHawk renders and auto-fades it, so it appears on
+-- screenshots taken shortly after and in recordings. Position/duration are
+-- fixed by BizHawk. Use it to annotate what the agent is doing during demos.
+local function cmd_osd_message(p)
+    if not CAPS.gui_addmessage then error("gui.addmessage not available") end
+    local msg = p.message
+    if type(msg) ~= "string" or #msg == 0 then error("message (non-empty string) required") end
+    gui.addmessage(msg)
+    return { message = msg }
+end
+
 local function cmd_ping(p) return "pong" end
 
 -- BizHawk's memory.getmemorydomainlist() hands us a 0-indexed Lua table. The
@@ -448,11 +487,14 @@ local function memory_domain_list()
 end
 
 local function cmd_get_info(p)
-    return {
+    local t = {
         bridge        = BRIDGE,
         rom_name      = CAPS.gameinfo_getromname and gameinfo.getromname() or nil,
         rom_hash      = CAPS.gameinfo_getromhash and gameinfo.getromhash() or nil,
         framecount    = CAPS.framecount and emu.framecount() or nil,
+        system_id     = CAPS.getsystemid and emu.getsystemid() or nil,
+        lag_count     = CAPS.lagcount and emu.lagcount() or nil,
+        movie_mode    = (movie and has(movie, "mode")) and movie.mode() or nil,
         memory_domains = memory_domain_list(),
         -- Which domain is read/written when a memory tool call omits `domain`.
         -- Useful because BizHawk's "current" domain can drift after savestate
@@ -461,6 +503,13 @@ local function cmd_get_info(p)
             and memory.getcurrentmemorydomain() or nil,
         capabilities  = CAPS,
     }
+    -- mode() is safe when inactive ("INACTIVE"); isloaded() is safe.
+    -- Do NOT call filename()/length() here (crash when no movie loaded).
+    -- booleans: explicit assignment so a real `false` is transmitted (not collapsed to nil)
+    if CAPS.ispaused       then t.paused       = client.ispaused()   end
+    if CAPS.islagged       then t.is_lagged    = emu.islagged()      end
+    if CAPS.movie_isloaded then t.movie_loaded = movie.isloaded()    end
+    return t
 end
 
 -- Memory r/w. By default operates on the current "main memory" domain;
@@ -1025,13 +1074,21 @@ local function cmd_eval_lua(p)
     local code = assert(p.code, "code required")
     local chunk, err = load(code, "=eval_lua")
     if not chunk then error("Lua parse error: " .. tostring(err)) end
-    local results = table.pack(pcall(chunk))
-    if not results[1] then error("Lua runtime error: " .. tostring(results[2])) end
-    if results.n <= 1 then return nil end          -- no return value
-    if results.n == 2 then return results[2] end   -- single return value
-    local out = {}                                  -- multiple returns → array
-    for i = 2, results.n do out[i - 1] = results[i] end
-    return out
+    local function body()
+        local results = table.pack(pcall(chunk))
+        if not results[1] then error("Lua runtime error: " .. tostring(results[2])) end
+        if results.n <= 1 then return nil end          -- no return value
+        if results.n == 2 then return results[2] end   -- single return value
+        local out = {}                                  -- multiple returns → array
+        for i = 2, results.n do out[i - 1] = results[i] end
+        return out
+    end
+    -- With unpause=true, run the chunk via run_unpaused so a chunk that steps
+    -- frames (emu.frameadvance) gets frames even when the frontend is paused,
+    -- then the prior pause state is restored. Without it, frameadvance inside a
+    -- chunk BLOCKS until something unpauses the emulator (a known footgun).
+    if p.unpause then return run_unpaused(body) end
+    return body()
 end
 
 -- ── RAM search (Cheat-Engine-style) ─────────────────────────────────────────
@@ -1175,6 +1232,38 @@ local function cmd_set_register(p)
     return true
 end
 
+-- Disassemble `count` instructions from `address` (default: current PC via
+-- emu.getregisters). emu.disassemble(pc[,domain]) returns {disasm, length};
+-- walk forward by `length` for successive instructions. Core-dependent.
+local function cmd_disassemble(p)
+    if not CAPS.disassemble then error("emu.disassemble not available on this core") end
+    local addr = p.address
+    if addr == nil then
+        if not CAPS.getregisters then
+            error("no address given and emu.getregisters unavailable to read PC")
+        end
+        local regs = emu.getregisters()
+        addr = regs.PC or regs.pc or regs["M68K PC"]
+        if addr == nil then error("could not determine PC from registers; pass address explicitly") end
+    end
+    local count = p.count or 1
+    if count < 1 then error("count must be >= 1") end
+    if count > 128 then error("count must be <= 128") end
+    local domain = p.domain
+    local out = {}
+    for _ = 1, count do
+        local d = domain and emu.disassemble(addr, domain) or emu.disassemble(addr)
+        if type(d) ~= "table" then
+            error("emu.disassemble returned no result at " .. string.format("0x%X", addr))
+        end
+        local len = d.length or 0
+        out[#out + 1] = { address = addr, disasm = d.disasm or "?", length = len }
+        if len <= 0 then break end   -- guard against an infinite loop on a zero-length decode
+        addr = addr + len
+    end
+    return { instructions = out }
+end
+
 -- Run frames until the CPU writes/reads/executes `address`, or a frame
 -- budget expires. Registers a scoped event callback, steps, unregisters.
 -- Answers "WHO writes this address?" — the callback snapshots the CPU
@@ -1285,6 +1374,26 @@ local function cmd_record_input(p)
         recorded = recorded,
         stopped_early = stopped,
         frames = #entries > 0 and entries or nil,
+    }
+end
+
+-- Snapshot the CURRENT joypad state for a player: which buttons are held right
+-- now (booleans) plus any analog axes (numbers). Complements record_input
+-- (samples over frames) and press_buttons (writes) — lets an agent CONFIRM
+-- what the emulator sees this instant. Does not advance frames.
+local function cmd_get_input(p)
+    if not CAPS.joypad_get then error("joypad.get not available") end
+    local player = p.player or 1
+    local j = joypad.get(player)
+    local buttons, axes = {}, {}
+    for k, v in pairs(j) do
+        if v == true then buttons[k] = true
+        elseif type(v) == "number" then axes[k] = v end
+    end
+    return {
+        player  = player,
+        buttons = next(buttons) and buttons or nil,
+        axes    = next(axes) and axes or nil,
     }
 end
 
@@ -1399,26 +1508,37 @@ local HANDLERS = {
     search_end           = cmd_search_end,
     get_registers        = cmd_get_registers,
     set_register         = cmd_set_register,
+    disassemble          = cmd_disassemble,
     trap_memory          = cmd_trap_memory,
     record_input         = cmd_record_input,
+    get_input            = cmd_get_input,
     movie_status         = cmd_movie_status,
     movie_play           = cmd_movie_play,
     movie_stop           = cmd_movie_stop,
     trace_start          = cmd_trace_start,
     trace_stop           = cmd_trace_stop,
     trace_status         = cmd_trace_status,
+    osd_message          = cmd_osd_message,
 }
 
 local function dispatch(cmd)
     if not cmd.method then
+        console.log("[mcp-bizhawk] << (malformed: missing method field)")
         return nil, { code = -32600, message = "missing method field" }
     end
+    -- Echo every received command to the Lua console for visibility.
+    local ok_enc, ps = pcall(json.encode, cmd.params or {})
+    if not ok_enc then ps = "?" end
+    if #ps > 200 then ps = ps:sub(1, 197) .. "..." end
+    console.log(string.format("[mcp-bizhawk] << %s %s", cmd.method, ps))
     local handler = HANDLERS[cmd.method]
     if not handler then
+        console.log("[mcp-bizhawk] !! unknown method: " .. tostring(cmd.method))
         return nil, { code = -32601, message = "unknown method: " .. cmd.method }
     end
     local ok, result = pcall(handler, cmd.params or {})
     if not ok then
+        console.log(string.format("[mcp-bizhawk] !! %s error: %s", cmd.method, tostring(result)))
         return nil, { code = -32603, message = tostring(result) }
     end
     return result, nil

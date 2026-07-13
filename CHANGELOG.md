@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [0.5.0-jd] - 2026-07-13
+
+### Added
+
+- **`bizhawk_get_input`** — read the current joypad state for a player
+  (held buttons + analog axes) without advancing frames; complements
+  `bizhawk_record_input`'s per-frame sampling.
+- **`bizhawk_disassemble`** — decode one or more machine instructions at a
+  given address or the current PC (`emu.disassemble`), for reading the
+  code around a `bizhawk_trap_memory` hit.
+- **`bizhawk_osd_message`** — draw a short message in BizHawk's on-screen
+  OSD area (`gui.addmessage`), for annotating recorded GIFs/demos or
+  marking progress during a live session.
+- **`unpause` option on `bizhawk_eval_lua`** — runs the chunk via the
+  bridge's pause-safe path, temporarily unpausing so `emu.frameadvance()`
+  calls inside the chunk don't block forever, then restores the prior
+  pause state afterward.
+
+### Changed
+
+- **`bizhawk_get_info` reports more emulator state** — `system_id`,
+  `paused`, `lag_count`/`is_lagged`, and `movie_loaded`/`movie_mode` are
+  now included when the loaded core/build exposes them.
+- **Bridge echoes received commands to the Lua Console** — every
+  dispatched RPC (and any handler error) now logs a
+  `[mcp-bizhawk] << <method> <params>` line, making it possible to watch
+  exactly what the server is sending in real time from BizHawk's Lua
+  Console.
+- Bridge bumped to v0.9.0 for this release (get_info+, get_input,
+  disassemble, osd_message, eval_lua unpause, console command-echo).
+
 ## [0.4.0-jd] - 2026-07-13
 
 ### Added
@@ -287,7 +318,8 @@ bridge instead of a 12-fps stuttery crawl.
   `play_input_sequence`. The per-batch progress log now reports
   `final_framecount` for verification.
 
-[Unreleased]: https://github.com/dmang-dev/mcp-bizhawk/compare/v0.4.0-jd...HEAD
+[Unreleased]: https://github.com/dmang-dev/mcp-bizhawk/compare/v0.5.0-jd...HEAD
+[0.5.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.5.0-jd
 [0.4.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.4.0-jd
 [0.3.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.3.0-jd
 [0.2.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.2.0-jd

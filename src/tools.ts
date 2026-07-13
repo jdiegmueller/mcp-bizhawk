@@ -482,6 +482,22 @@ const TOOLS: Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "bizhawk_osd_message",
+    description:
+      "PURPOSE: Draw a short message in BizHawk's on-screen OSD message area. " +
+      "USAGE: Annotate what the agent is doing during a recorded GIF/demo, or mark progress during a live session. Fire-and-forget — BizHawk renders and auto-fades the message, so it appears on screenshots taken shortly after. " +
+      "BEHAVIOR: Calls gui.addmessage(message). Position and fade duration are fixed by BizHawk (not configurable). Errors if gui.addmessage is unavailable. " +
+      "RETURNS: Confirmation echoing the message.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", minLength: 1, description: "Text to display in the OSD message area." },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    },
+  },
 
   // ── Save state ─────────────────────────────────────────────────────────
 
@@ -678,7 +694,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Execute an arbitrary Lua chunk inside the BizHawk bridge and return its result — the escape hatch for anything the other tools don't cover. " +
       "USAGE: Prototype new capabilities (custom loops, gui drawing, APIs like tastudio/genesis-specific calls) before promoting them to real tools. The chunk sees BizHawk's Lua globals: memory, emu, client, joypad, savestate, movie, gui, event, comm. Return a value with `return ...` — it comes back JSON-encoded. If the chunk steps frames itself, pass timeout_ms scaled to the work. " +
-      "BEHAVIOR: DESTRUCTIVE (potentially): the chunk can write memory, load states, reboot the core — anything the Lua API allows, with no sandbox. Runs synchronously inside the bridge's poll loop; a chunk that never returns wedges the bridge until the RPC times out (and possibly beyond — avoid unbounded loops; use emu.frameadvance-bounded loops). Errors in the chunk (parse or runtime) return as tool errors without harming the bridge. The return value must be JSON-encodable: nil/boolean/number/string, array-like or string-keyed tables. Frames advanced INSIDE the chunk (e.g. calling emu.frameadvance) do NOT run the bridge's per-frame hooks: frozen addresses are not re-asserted and no trace rows are written for those frames. " +
+      "BEHAVIOR: DESTRUCTIVE (potentially): the chunk can write memory, load states, reboot the core — anything the Lua API allows, with no sandbox. Runs synchronously inside the bridge's poll loop; a chunk that never returns wedges the bridge until the RPC times out (and possibly beyond — avoid unbounded loops; use emu.frameadvance-bounded loops). Errors in the chunk (parse or runtime) return as tool errors without harming the bridge. The return value must be JSON-encodable: nil/boolean/number/string, array-like or string-keyed tables. Frames advanced INSIDE the chunk (e.g. calling emu.frameadvance) do NOT run the bridge's per-frame hooks: frozen addresses are not re-asserted and no trace rows are written for those frames. If the chunk steps frames (emu.frameadvance) while the emulator is paused it will block until unpaused — pass unpause:true to run the chunk via the bridge's pause-safe path (or use bizhawk_frame_advance instead). " +
       "RETURNS: The chunk's return value as pretty-printed JSON, '(nil)' if it returned nothing, or a JSON array when the chunk returns multiple values. Multiple return values with an embedded nil (e.g. return 1, nil, 3) produce a hole in the JSON array and may be truncated — return a table instead if you need to preserve nils.",
     inputSchema: {
       type: "object",
@@ -686,6 +702,7 @@ const TOOLS: Tool[] = [
       properties: {
         code: { type: "string", description: "Lua 5.4 chunk to execute, e.g. \"return emu.framecount()\" or \"memory.write_u16_be(0xC468, 0x0300, '68K RAM') return true\"." },
         timeout_ms: { type: "integer", minimum: 10000, description: "RPC timeout override in milliseconds. Only EXTENDS the timeout — values at or below the server's 10s default have no effect. Set this when the chunk advances many frames (~20ms per frame)." },
+        unpause: { type: "boolean", description: "If true, run the chunk with the emulator temporarily unpaused (restoring the prior pause state afterward). Set this when the chunk calls emu.frameadvance — otherwise frame-stepping inside the chunk BLOCKS until something unpauses the emulator. Default false." },
       },
       additionalProperties: false,
     },
@@ -780,6 +797,23 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "bizhawk_disassemble",
+    description:
+      "PURPOSE: Disassemble one or more machine instructions at an address (or at the current PC). " +
+      "USAGE: Pair with bizhawk_trap_memory (which reports the PC of a trapped access) and bizhawk_get_registers to inspect the code the CPU is about to run — the core loop for reverse-engineering a game routine. " +
+      "BEHAVIOR: Calls emu.disassemble(address[, domain]) and walks forward by each instruction's byte length to decode `count` instructions. Defaults to the current PC (from emu.getregisters) when `address` is omitted. Reads from the System Bus domain unless `domain` is given. Core-dependent: errors if the loaded core exposes no disassembler. " +
+      "RETURNS: One line per instruction — `0xADDR: <mnemonic>  (<len> bytes)`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "integer", minimum: 0, description: "Start address. Omit to disassemble from the current PC." },
+        count: { type: "integer", minimum: 1, maximum: 128, description: "Number of instructions to decode (default 1, max 128)." },
+        domain: { type: "string", description: "Memory domain to read code from (default: System Bus)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "bizhawk_trap_memory",
     description:
       "PURPOSE: Run emulation until the CPU writes / reads / executes a specific address, then report the access — including the CPU registers (PC!) at that instant — or time out after a frame budget. " +
@@ -821,6 +855,21 @@ const TOOLS: Tool[] = [
             width:   { type: "string", enum: WIDTH_ENUM, default: "u8", description: WIDTH_PARAM_DESC },
           },
         },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_get_input",
+    description:
+      "PURPOSE: Read the CURRENT joypad state for a player — which buttons are held this instant, plus any analog axis values. " +
+      "USAGE: Confirm that buttons you sent via bizhawk_press_buttons / bizhawk_play_input_sequence actually landed, or observe live human input. Complements bizhawk_record_input (which samples across frames). " +
+      "BEHAVIOR: Calls joypad.get(player) and splits the result into held buttons (booleans that are true) and analog axes (numbers). Does NOT advance frames. Returns an error if joypad.get is unavailable — check capabilities.joypad_get in bizhawk_get_info. " +
+      "RETURNS: A text summary of held buttons (or '(none)') and any axes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        player: { type: "integer", minimum: 1, description: "Controller port to read (default 1)." },
       },
       additionalProperties: false,
     },
@@ -1019,6 +1068,12 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           rom_name?: string;
           rom_hash?: string;
           framecount?: number;
+          system_id?: string;
+          lag_count?: number;
+          is_lagged?: boolean;
+          paused?: boolean;
+          movie_loaded?: boolean;
+          movie_mode?: string;
           memory_domains?: string[];
           current_memory_domain?: string;
           capabilities?: Record<string, boolean>;
@@ -1031,7 +1086,15 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           `ROM:        ${r.rom_name ?? "(unavailable)"}`,
           `ROM hash:   ${r.rom_hash ?? "(unavailable)"}`,
           `Framecount: ${r.framecount ?? "(unavailable)"}`,
+          `System:     ${r.system_id ?? "(unavailable)"}`,
         ];
+        if (r.paused !== undefined) lines.push(`Paused:     ${r.paused ? "yes" : "no"}`);
+        if (r.lag_count !== undefined) {
+          lines.push(`Lag frames: ${r.lag_count}${r.is_lagged ? " (current frame IS a lag frame)" : ""}`);
+        }
+        if (r.movie_mode) {
+          lines.push(`Movie:      ${r.movie_loaded ? "loaded" : "not loaded"} (${r.movie_mode})`);
+        }
         if (r.memory_domains?.length) {
           lines.push("");
           lines.push(`Memory domains: ${r.memory_domains.join(", ")}`);
@@ -1242,7 +1305,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
 
       case "bizhawk_eval_lua": {
         const opts = p.timeout_ms !== undefined ? { timeoutMs: p.timeout_ms as number } : {};
-        const r = await bh.call<unknown>("eval_lua", { code: p.code }, opts);
+        const params: Record<string, unknown> = { code: p.code };
+        if (p.unpause !== undefined) params.unpause = p.unpause;
+        const r = await bh.call<unknown>("eval_lua", params, opts);
         return ok(r === undefined || r === null ? "(nil)" : JSON.stringify(r, null, 2));
       }
 
@@ -1298,6 +1363,21 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(`Set register ${p.name} = ${p.value}`);
       }
 
+      case "bizhawk_disassemble": {
+        const params: Record<string, unknown> = {};
+        if (p.address !== undefined) params.address = p.address;
+        if (p.count !== undefined) params.count = p.count;
+        if (p.domain !== undefined) params.domain = p.domain;
+        const r = await bh.call<{ instructions: { address: number; disasm: string; length: number }[] }>(
+          "disassemble",
+          params,
+        );
+        const lines = r.instructions.map(
+          (i) => `0x${i.address.toString(16).toUpperCase()}: ${i.disasm}  (${i.length} bytes)`,
+        );
+        return ok(lines.join("\n"));
+      }
+
       case "bizhawk_trap_memory": {
         const timeoutFrames = (p.timeout_frames as number) ?? 600;
         const kind = (p.kind as string) ?? "write";
@@ -1340,6 +1420,28 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           `Recorded ${r.recorded} frame(s) in ${frames.length} ${frames.length === 1 ? "entry" : "entries"}` +
           `${r.stopped_early ? ", stopped early (memory changed)" : ""}.`;
         return ok(`${header}\n${JSON.stringify(frames)}`);
+      }
+
+      case "bizhawk_get_input": {
+        const params: Record<string, unknown> = {};
+        if (p.player !== undefined) params.player = p.player;
+        const r = await bh.call<{
+          player: number;
+          buttons?: Record<string, boolean>;
+          axes?: Record<string, number>;
+        }>("get_input", params);
+        const held = r.buttons ? Object.keys(r.buttons).sort() : [];
+        const lines = [`Player ${r.player} held buttons: ${held.length ? held.join(", ") : "(none)"}`];
+        if (r.axes && Object.keys(r.axes).length) {
+          lines.push(
+            "Axes: " +
+              Object.entries(r.axes)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([k, v]) => `${k}=${v}`)
+                .join(", "),
+          );
+        }
+        return ok(lines.join("\n"));
       }
 
       case "bizhawk_movie_play": {
@@ -1443,6 +1545,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             { type: "image" as const, data: bytes.toString("base64"), mimeType: "image/png" },
           ],
         };
+      }
+
+      case "bizhawk_osd_message": {
+        const r = await bh.call<{ message: string }>("osd_message", { message: p.message });
+        return ok(`OSD message shown: ${r.message}`);
       }
 
       case "bizhawk_save_state": {

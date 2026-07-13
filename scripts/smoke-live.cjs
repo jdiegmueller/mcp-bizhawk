@@ -95,6 +95,32 @@ async function main() {
   console.log("[smoke] trace_stop:", JSON.stringify(await bh.call("trace_stop")));
   console.log("[smoke] trace restored:", JSON.stringify(await bh.call("trace_start", {})));
 
+  // Batch 4 — get_info new fields
+  const info4 = await bh.call("get_info");
+  console.log(`[smoke] get_info: system=${info4.system_id} paused=${info4.paused} ` +
+    `lag=${info4.lag_count} movie=${info4.movie_mode}`);
+
+  // get_input (nothing held during automated smoke is fine)
+  console.log("[smoke] get_input:", JSON.stringify(await bh.call("get_input", { player: 1 })));
+
+  // disassemble at current PC
+  console.log("[smoke] disassemble @PC:", JSON.stringify(await bh.call("disassemble", { count: 3 })));
+
+  // osd_message
+  console.log("[smoke] osd_message:", JSON.stringify(await bh.call("osd_message", { message: "batch4 smoke" })));
+  await bh.call("frame_advance", { count: 30 }, { timeoutMs: 30000 }); // let the toast render
+
+  // eval_lua unpause: pause, then step frames INSIDE the chunk with unpause:true.
+  // Without unpause this would block until manually unpaused; with it, it advances and re-pauses.
+  await bh.call("pause");
+  const fcBefore = await bh.call("eval_lua", { code: "return emu.framecount()" });
+  const fcAfter = await bh.call("eval_lua", {
+    code: "for i=1,10 do emu.frameadvance() end return emu.framecount()",
+    unpause: true,
+  }, { timeoutMs: 30000 });
+  console.log(`[smoke] eval_lua unpause: framecount ${fcBefore} -> ${fcAfter} (expect +~10, no wedge)`);
+  await bh.call("unpause");
+
   console.log("[smoke] ALL OK");
   bh.stop();
 }

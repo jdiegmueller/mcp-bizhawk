@@ -151,7 +151,7 @@ The server speaks standard MCP over stdio. Run `mcp-bizhawk` and connect any MCP
 | Tool | Description |
 |------|-------------|
 | `bizhawk_ping` | Verify bridge connectivity (returns `pong`) |
-| `bizhawk_get_info` | ROM name, ROM hash, framecount, memory domains, capabilities |
+| `bizhawk_get_info` | ROM name, ROM hash, framecount, memory domains, capabilities — plus system id, paused state, lag count, and movie status where the loaded core/build exposes them |
 | `bizhawk_list_memory_domains` | List available memory domains for the loaded core |
 | `bizhawk_read8` / `bizhawk_read16` / `bizhawk_read32` | Read u8 / u16-LE / u32-LE from memory |
 | `bizhawk_write8` / `bizhawk_write16` / `bizhawk_write32` | Write to memory |
@@ -160,13 +160,19 @@ The server speaks standard MCP over stdio. Run `mcp-bizhawk` and connect any MCP
 | `bizhawk_read_many` | Labeled batch reads (`{name, address, width, domain}` specs) in one round-trip |
 | `bizhawk_read_struct_array` | Decode N fixed-stride records (entity tables) into labeled fields in one call |
 | `bizhawk_press_buttons` | Set joypad state for one player; keys are button names, values booleans |
+| `bizhawk_get_input` | Read the current joypad state for a player — held buttons + analog axes, no frame advance |
 | `bizhawk_frame_advance` | Step the emulator by N frames |
 | `bizhawk_pause` / `bizhawk_unpause` | Pause / resume emulation |
 | `bizhawk_reset` | Reset the loaded core |
 | `bizhawk_screenshot` | Capture the current display — returns the PNG inline as an image block; optional path to also choose where it's saved |
 | `bizhawk_save_state` / `bizhawk_load_state` | Save / load emulator state to a file path |
+| `bizhawk_eval_lua` | Run an arbitrary Lua chunk in the bridge (JSON-encoded result); `unpause: true` runs it via the pause-safe path so `emu.frameadvance()` inside the chunk doesn't block forever |
+| `bizhawk_disassemble` | Decode one or more machine instructions at an address (or the current PC) |
+| `bizhawk_osd_message` | Draw a short message in BizHawk's on-screen OSD area |
 
 All memory r/w tools take an optional `domain` parameter — if omitted, the active "current" memory domain is used. Use `bizhawk_list_memory_domains` to discover the names available on the loaded core.
+
+The bridge also echoes every command it receives (and any handler error) to BizHawk's Lua Console as a `[mcp-bizhawk] << <method> <params>` line, so you can watch exactly what the server is sending in real time.
 
 See [`docs/RECIPES.md`](docs/RECIPES.md) for end-to-end examples (RAM hunting on SNES/NES/N64, frame-precise input, snapshot-experiment-restore, cross-system regression testing) and [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
