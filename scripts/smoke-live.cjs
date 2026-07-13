@@ -65,6 +65,36 @@ async function main() {
   console.log(`[smoke] then unchanged: ${f2.count} candidates (expect < ${f1.count})`);
   await bh.call("search_end");
 
+  // Batch 3: registers / trap / movie / trace
+  try {
+    const regs = await bh.call("get_registers");
+    console.log("[smoke] registers:", JSON.stringify(regs).slice(0, 200));
+  } catch (e) {
+    console.log("[smoke] registers unsupported on this core:", e.message);
+  }
+
+  try {
+    // NHL94: 0xFFC468 (game clock, system bus) is written constantly in play.
+    const trap = await bh.call("trap_memory",
+      { kind: "write", address: 0xffc468, timeout_frames: 300, turbo: true },
+      { timeoutMs: 60000 });
+    console.log("[smoke] trap:", trap.hit
+      ? `hit after ${trap.frames_waited} frames, PC=${trap.hit.registers?.PC?.toString(16)}`
+      : `no hit in ${trap.frames_waited} frames (paused game/menu?)`);
+  } catch (e) {
+    console.log("[smoke] trap unsupported on this core:", e.message);
+  }
+
+  console.log("[smoke] movie_status:", JSON.stringify(await bh.call("movie_status")));
+
+  console.log("[smoke] trace_status:", JSON.stringify(await bh.call("trace_status")));
+  console.log("[smoke] trace rotate:", JSON.stringify(
+    await bh.call("trace_start", { path: "/tmp/smoke-trace.csv" })));
+  await bh.call("frame_advance", { count: 30 }, { timeoutMs: 30000 });
+  console.log("[smoke] trace after 30 frames:", JSON.stringify(await bh.call("trace_status")));
+  console.log("[smoke] trace_stop:", JSON.stringify(await bh.call("trace_stop")));
+  console.log("[smoke] trace restored:", JSON.stringify(await bh.call("trace_start", {})));
+
   console.log("[smoke] ALL OK");
   bh.stop();
 }

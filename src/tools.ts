@@ -245,8 +245,14 @@ const TOOLS: Tool[] = [
           type: "array",
           items: { type: "integer", minimum: 0, maximum: 255 },
           minItems: 1,
-          maxItems: 4096,
-          description: "Byte values to write, one per element (each 0-255). Length 1-4096 (hard caps from BizHawk's serialization limit). Written sequentially from `address`.",
+          // NOTE: deliberately NO `maxItems` here. The 4096 upper bound is enforced
+          // at runtime (bridge cmd_write_range errors if #bytes > 4096) and stated in
+          // the description. A schema `maxItems: 4096` makes llama.cpp's
+          // json-schema-to-grammar emit a {0,4095} repetition, which exceeds its
+          // hardcoded MAX_REPETITION_THRESHOLD (2000, src/llama-grammar.cpp) and fails
+          // the ENTIRE tool-call grammar → HTTP 500 for any client (e.g. opencode) that
+          // compiles the full tool list against a llama.cpp server. Keep it code-enforced.
+          description: "Byte values to write, one per element (each 0-255). Length 1-4096 — the upper cap is enforced by the server, not this schema (see code note). Written sequentially from `address`.",
         },
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
       },
@@ -747,6 +753,202 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Search ended.'",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  {
+    name: "bizhawk_get_registers",
+    description:
+      "PURPOSE: Read every CPU register of the emulated system (PC, data/address registers, flags — names vary per core; 68K cores expose PC/D0-D7/A0-A7 etc.). " +
+      "USAGE: Reverse-engineering entry point — read PC to see where execution is, correlate with a disassembly, inspect state at a trap hit (bizhawk_trap_memory embeds registers automatically). Pair with bizhawk_pause for a stable readout. " +
+      "BEHAVIOR: No side effects — pure read. Register support varies by core; returns an error if emu.getregisters is unavailable on the loaded core. " +
+      "RETURNS: One line per register, sorted by name: 'NAME = VAL_DEC (0xVAL_HEX)'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_set_register",
+    description:
+      "PURPOSE: Write a value into a CPU register of the emulated system. " +
+      "USAGE: Advanced RE surgery — redirect PC, patch a data register mid-experiment. Get valid register names from bizhawk_get_registers first (they're core-specific and case-sensitive). " +
+      "BEHAVIOR: DESTRUCTIVE: alters live CPU state with no undo (snapshot via bizhawk_save_state first); wrong values typically crash the emulated program. Returns an error if emu.setregister is unavailable on the loaded core; unknown register names are silently ignored by some cores. " +
+      "RETURNS: 'Set register NAME = VALUE'.",
+    inputSchema: {
+      type: "object",
+      required: ["name", "value"],
+      properties: {
+        name:  { type: "string", description: "Register name exactly as reported by bizhawk_get_registers (core-specific, case-sensitive), e.g. 'PC', 'D0', 'A7'." },
+        value: { type: "integer", description: "Value to write (unsigned; width per register)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_trap_memory",
+    description:
+      "PURPOSE: Run emulation until the CPU writes / reads / executes a specific address, then report the access — including the CPU registers (PC!) at that instant — or time out after a frame budget. " +
+      "USAGE: THE 'who writes this address?' tool for reverse engineering: trap kind='write' on a game-state variable, poke the game (or just let it run), and the returned PC points at the writing instruction in the disassembly. kind='exec' answers 'does this routine run?'. Registers hooks only for the duration of the call. " +
+      "BEHAVIOR: Advances emulation (game time passes) until the first matching access or timeout_frames elapses; a timeout returns normally (NOT an error). Event hooks are CORE-DEPENDENT — returns an error naming the missing capability on cores without event.on_bus_*. The trap monitors the exact address only (not a range) on the system bus. Pause state is preserved; turbo is supported. " +
+      "RETURNS: On hit: 'TRAPPED KIND @ ADDR_HEX after N frame(s). value: V' plus one 'NAME = DEC (HEX)' line per CPU register at the moment of access. On timeout: 'No KIND to ADDR_HEX within N frame(s).'",
+    inputSchema: {
+      type: "object",
+      required: ["address"],
+      properties: {
+        address: { type: "integer", minimum: 0, description: "SYSTEM BUS address to monitor (event hooks address the bus, not per-domain offsets — on Genesis use the 0xFFxxxx form of a RAM address)." },
+        kind: { type: "string", enum: ["write", "read", "exec"], default: "write", description: "Access type to trap. Default 'write'." },
+        timeout_frames: { type: "integer", minimum: 1, default: 600, description: "Maximum frames to run (default 600 ≈ 10s game time). Timeout returns a result, not an error. RPC timeout scales automatically." },
+        turbo: { type: "boolean", default: false, description: "Run at maximum emulation speed with rendering disabled while waiting; restores 100% + visible afterwards." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_record_input",
+    description:
+      "PURPOSE: Record the HUMAN player's controller input frame-by-frame for up to max_frames (or until a memory value changes), returning a run-length-encoded frame list that can be replayed verbatim via bizhawk_play_input_sequence. " +
+      "USAGE: 'Show me the move' workflow — ask the user to perform the maneuver while this records, then replay/modify it programmatically. Set stop_on_memory_change to a room/level/state address to end the recording exactly at a transition. Emulation runs at normal speed during recording (the human must be able to play!). " +
+      "BEHAVIOR: Advances emulation for the duration (game time passes; the bridge is blocked, like play_input_sequence). No input is injected — it purely samples joypad.get each frame. Buttons come back with the active core's names. A timeout (max_frames reached) is a normal result. " +
+      "RETURNS: 'Recorded N frame(s) in K entr(y/ies)[, stopped early (memory changed)].' followed by the frames as a JSON array of {buttons, hold} — paste directly into bizhawk_play_input_sequence.frames. Entries capture buttons only; on playback player defaults to 1, so for a non-player-1 recording add `player` to each entry before replay.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        max_frames: { type: "integer", minimum: 1, default: 600, description: "Maximum frames to record (default 600 ≈ 10 seconds at 60Hz). RPC timeout scales automatically." },
+        player: { type: "integer", minimum: 1, default: 1, description: "Player/controller number to sample. Default 1." },
+        stop_on_memory_change: {
+          type: "object",
+          required: ["address"],
+          additionalProperties: false,
+          description: "Optional. End the recording the moment this memory value changes from its value at call time (e.g. a room ID at a door transition).",
+          properties: {
+            address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain to monitor." },
+            domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+            width:   { type: "string", enum: WIDTH_ENUM, default: "u8", description: WIDTH_PARAM_DESC },
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_movie_play",
+    description:
+      "PURPOSE: Load and play a BizHawk .bk2 movie from frame 0 (power-on), using BizHawk's native movie engine. " +
+      "USAGE: Deterministic replay of TAS movies / recorded runs without the bridge shipping inputs (native playback is frame-perfect and fast). Omit `path` to restart the currently loaded movie. Check progress with bizhawk_movie_status; detach with bizhawk_movie_stop. " +
+      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: resets the core to power-on before playback — current game state is lost (savestate first if needed). The .bk2 must match the loaded ROM and the authoring CORE (header records it; mismatches fail to load or desync). Returns an error if movie.play_from_start is unavailable or the file fails to load. " +
+      "RETURNS: 'Movie: PATH (loaded, mode: MODE, length: N)'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute path to a .bk2 movie file. Omit to restart the currently loaded movie from frame 0." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_movie_stop",
+    description:
+      "PURPOSE: Stop the active movie (playback or recording) and return to normal emulation. " +
+      "USAGE: Detach from a movie started with bizhawk_movie_play, e.g. to take manual/bridge control at an interesting frame. " +
+      "BEHAVIOR: Emulation continues from the current frame; the movie file is not modified by stopping playback. Returns an error if movie.stop is unavailable. " +
+      "RETURNS: 'Movie stopped.'",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_movie_status",
+    description:
+      "PURPOSE: Report the movie engine's state: whether a movie is loaded, its mode (PLAY/RECORD/FINISHED/INACTIVE), filename, and length in frames. " +
+      "USAGE: Poll during bizhawk_movie_play to see progress (compare bizhawk_get_info framecount to length); confirm mode before issuing inputs (inputs are ignored during PLAY). " +
+      "BEHAVIOR: No side effects — pure read. " +
+      "RETURNS: 'Movie: FILE (loaded, mode: MODE, length: N)' or 'No movie loaded.'",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_save_slot",
+    description:
+      "PURPOSE: Save the full emulator state under a NAME (no filesystem paths needed) — the server stores it in a managed directory, namespaced by ROM hash. " +
+      "USAGE: The convenient form of bizhawk_save_state for bookmarks and experiment rollback points ('before-boss', 'baseline'). Use bizhawk_load_slot to restore and bizhawk_list_slots to browse. Use bizhawk_save_state instead when you need the file at a specific path. " +
+      "BEHAVIOR: DESTRUCTIVE TO SLOT: overwrites an existing slot of the same name for this ROM. Requires the MCP server and BizHawk to share a filesystem (true for local setups; the state directory is $MCP_BIZHAWK_STATE_DIR or ~/.mcp-bizhawk/states). State files are core-version-bound like all BizHawk states. " +
+      "RETURNS: 'Saved slot 'NAME' → PATH'.",
+    inputSchema: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string", description: "Slot name: 1-64 chars of letters, digits, dot, underscore, hyphen. Namespaced per ROM hash automatically." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_load_slot",
+    description:
+      "PURPOSE: Restore the emulator from a named slot previously saved with bizhawk_save_slot for the currently loaded ROM. " +
+      "USAGE: Counterpart to bizhawk_save_slot — the snapshot/experiment/rollback loop without path bookkeeping. Pass pause=true to freeze immediately after restoring. " +
+      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces all current emulator state. Slots are looked up by the CURRENT ROM's hash — a slot saved under a different ROM won't be found (this is a safety feature: cross-ROM state loads crash cores). A missing name returns an error listing available slots. " +
+      "RETURNS: 'Loaded slot 'NAME' (paused|running)'.",
+    inputSchema: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name:  { type: "string", description: "Slot name as given to bizhawk_save_slot." },
+        pause: { type: "boolean", default: false, description: "Leave the emulator paused after the load (zero frames run in between)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_list_slots",
+    description:
+      "PURPOSE: List the named savestate slots stored for the currently loaded ROM. " +
+      "USAGE: Browse rollback points before choosing what to load; check what a previous session left behind. " +
+      "BEHAVIOR: No side effects. Slots are per-ROM (matched by hash); slots of other ROMs are not shown. " +
+      "RETURNS: One line per slot: 'NAME  (SIZE bytes, MTIME_ISO)', or '(no slots saved for this ROM)'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_trace_start",
+    description:
+      "PURPOSE: Start (or rotate) the bridge's per-frame trace CSV — a game-specific dump of entity/game state written after every emulated frame (as configured in the bridge script; the stock bridge_JD.lua traces NHL94 player structs, puck, RNG, and pad state). " +
+      "USAGE: Rotate to a fresh file before an experiment so the CSV covers exactly that run; re-enable after bizhawk_trace_stop. The osd flag also toggles the on-screen overlay. NOTE: the trace layout is defined in the bridge script for a specific game — on other ROMs it records garbage; stop it or ignore it there. " +
+      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: opens `path` in write mode (truncates). Closes any previously open trace file first. Tracing costs a few hundred memory reads per frame. " +
+      "RETURNS: 'Trace started → PATH (osd: on|off)'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path for the CSV. Omit to reuse the bridge's default (per-port /tmp/nhl94_trace_<port>.csv)." },
+        osd:  { type: "boolean", description: "Also enable/disable the on-screen animation overlay. Omit to leave unchanged." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_trace_stop",
+    description:
+      "PURPOSE: Stop the per-frame trace CSV and flush/close the file. " +
+      "USAGE: End-of-experiment bookend for bizhawk_trace_start; also use to eliminate tracing overhead or stop garbage traces on non-supported ROMs. " +
+      "BEHAVIOR: Flushes buffered rows and closes the file; the CSV remains on disk for analysis. Calling with no active trace is a no-op. " +
+      "RETURNS: 'Trace stopped after N rows (PATH)'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_trace_status",
+    description:
+      "PURPOSE: Report whether the per-frame trace is active, its file path, row count, and OSD state. " +
+      "USAGE: Find the CSV path before reading it (bizhawk_trace_tail or direct file access); sanity-check that a trace is running before an experiment. " +
+      "BEHAVIOR: No side effects. " +
+      "RETURNS: 'Trace active|inactive: PATH, N rows, osd: on|off'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_trace_tail",
+    description:
+      "PURPOSE: Return the trace CSV's header line plus its last N rows — a quick look at recent frame-by-frame game state without leaving the tool interface. " +
+      "USAGE: Spot-check what the game did during the last action (animation frames, positions, RNG) right after a play_input_sequence. For bulk analysis read the CSV file directly instead — rows are wide (~250 columns on NHL94). " +
+      "BEHAVIOR: No side effects. Reads the file from the server's filesystem (requires server and BizHawk to share one — true locally). Buffered rows are flushed every 60 frames, so the very newest rows may lag slightly. Returns an error if the trace file has never been started or the file is unreadable. " +
+      "RETURNS: 'PATH (N rows, active: yes|no)' + the CSV header + the last N data rows.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rows: { type: "integer", minimum: 1, maximum: 200, default: 10, description: "How many trailing data rows to return. Default 10 (rows are ~800 chars wide on NHL94)." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 function ok(text: string) {
@@ -758,6 +960,28 @@ function fmtHex(n: unknown): string {
 }
 function addrHex(n: number): string {
   return `0x${n.toString(16).toUpperCase().padStart(4, "0")}`;
+}
+function fmtMovieStatus(r: { loaded: boolean; mode?: string; filename?: string; length?: number }): string {
+  if (!r.loaded && !r.filename) return "No movie loaded.";
+  return `Movie: ${r.filename ?? "(unnamed)"} (${r.loaded ? "loaded" : "not loaded"}, mode: ${r.mode ?? "?"}, length: ${r.length ?? "?"})`;
+}
+
+// Named savestate slots, managed server-side under
+// $MCP_BIZHAWK_STATE_DIR or ~/.mcp-bizhawk/states, namespaced per ROM hash.
+// Read at call time so the env var can change (and tests can override it).
+function stateDir(): string {
+  return process.env.MCP_BIZHAWK_STATE_DIR ?? path.join(os.homedir(), ".mcp-bizhawk", "states");
+}
+function slotPath(hash: string, name: string): string {
+  if (typeof name !== "string") throw new Error("slot name must be a string");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+    throw new Error("slot name must be 1-64 chars of letters, digits, dot, underscore, hyphen");
+  }
+  return path.join(stateDir(), hash, `${name}.State`);
+}
+async function currentRomHash(bh: BizhawkServer): Promise<string> {
+  const info = await bh.call<{ rom_hash?: string }>("get_info");
+  return info.rom_hash && info.rom_hash !== "unavailable" ? info.rom_hash : "unknown-rom";
 }
 
 export function registerTools(server: Server, bh: BizhawkServer): void {
@@ -1063,6 +1287,144 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       case "bizhawk_search_end": {
         await bh.call("search_end");
         return ok("Search ended.");
+      }
+      case "bizhawk_get_registers": {
+        const r = await bh.call<Record<string, number>>("get_registers");
+        const lines = Object.keys(r).sort().map((k) => `${k} = ${fmtHex(r[k])}`);
+        return ok(lines.join("\n"));
+      }
+      case "bizhawk_set_register": {
+        await bh.call("set_register", { name: p.name, value: p.value });
+        return ok(`Set register ${p.name} = ${p.value}`);
+      }
+
+      case "bizhawk_trap_memory": {
+        const timeoutFrames = (p.timeout_frames as number) ?? 600;
+        const kind = (p.kind as string) ?? "write";
+        const params: Record<string, unknown> = { address: a(), kind };
+        if (p.timeout_frames !== undefined) params.timeout_frames = p.timeout_frames;
+        if (p.turbo          !== undefined) params.turbo          = p.turbo;
+        const r = await bh.call<{
+          hit?: { address: number; value?: number; registers?: Record<string, number>; framecount?: number };
+          frames_waited: number;
+          final_framecount?: number;
+        }>("trap_memory", params, { timeoutMs: frameTimeout(timeoutFrames) });
+        if (!r.hit) {
+          return ok(`No ${kind} to ${addrHex(a())} within ${r.frames_waited} frame(s). Framecount: ${r.final_framecount ?? "(unavailable)"}`);
+        }
+        const lines = [
+          `TRAPPED ${kind} @ ${addrHex(r.hit.address)} after ${r.frames_waited} frame(s). ` +
+          `value: ${r.hit.value ?? "(n/a)"}. Framecount: ${r.hit.framecount ?? "(unavailable)"}`,
+        ];
+        if (r.hit.registers) {
+          for (const k of Object.keys(r.hit.registers).sort()) {
+            lines.push(`  ${k} = ${fmtHex(r.hit.registers[k])}`);
+          }
+        }
+        return ok(lines.join("\n"));
+      }
+
+      case "bizhawk_record_input": {
+        const maxFrames = (p.max_frames as number) ?? 600;
+        const params: Record<string, unknown> = {};
+        if (p.max_frames            !== undefined) params.max_frames            = p.max_frames;
+        if (p.player                !== undefined) params.player                = p.player;
+        if (p.stop_on_memory_change !== undefined) params.stop_on_memory_change = p.stop_on_memory_change;
+        const r = await bh.call<{
+          recorded: number;
+          stopped_early?: boolean;
+          frames?: { buttons: Record<string, boolean>; hold: number }[];
+        }>("record_input", params, { timeoutMs: frameTimeout(maxFrames) });
+        const frames = Array.isArray(r.frames) ? r.frames : [];
+        const header =
+          `Recorded ${r.recorded} frame(s) in ${frames.length} ${frames.length === 1 ? "entry" : "entries"}` +
+          `${r.stopped_early ? ", stopped early (memory changed)" : ""}.`;
+        return ok(`${header}\n${JSON.stringify(frames)}`);
+      }
+
+      case "bizhawk_movie_play": {
+        const params: Record<string, unknown> = {};
+        if (p.path !== undefined) params.path = p.path;
+        const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>(
+          "movie_play", params, { timeoutMs: 30000 });
+        return ok(fmtMovieStatus(r));
+      }
+      case "bizhawk_movie_stop": {
+        await bh.call("movie_stop");
+        return ok("Movie stopped.");
+      }
+      case "bizhawk_movie_status": {
+        const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>("movie_status");
+        return ok(fmtMovieStatus(r));
+      }
+
+      case "bizhawk_save_slot": {
+        const hash = await currentRomHash(bh);
+        const file = slotPath(hash, p.name as string);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        await bh.call("save_state", { path: file });
+        return ok(`Saved slot '${p.name}' → ${file}`);
+      }
+      case "bizhawk_load_slot": {
+        const hash = await currentRomHash(bh);
+        const file = slotPath(hash, p.name as string);
+        if (!fs.existsSync(file)) {
+          const dir = path.join(stateDir(), hash);
+          const have = fs.existsSync(dir)
+            ? fs.readdirSync(dir).filter((f) => f.endsWith(".State")).map((f) => f.slice(0, -6))
+            : [];
+          throw new Error(
+            `no slot '${p.name}' for this ROM. Available: ${have.length ? have.join(", ") : "(none)"}`,
+          );
+        }
+        const params: Record<string, unknown> = { path: file };
+        if (p.pause !== undefined) params.pause = p.pause;
+        const r = await bh.call<{ paused?: boolean }>("load_state", params);
+        return ok(`Loaded slot '${p.name}' (${r.paused ? "paused" : "running"})`);
+      }
+      case "bizhawk_list_slots": {
+        const hash = await currentRomHash(bh);
+        const dir = path.join(stateDir(), hash);
+        if (!fs.existsSync(dir)) return ok("(no slots saved for this ROM)");
+        const entries = fs.readdirSync(dir).filter((f) => f.endsWith(".State")).sort()
+          .map((f) => {
+            const st = fs.statSync(path.join(dir, f));
+            return `${f.slice(0, -6)}  (${st.size} bytes, ${st.mtime.toISOString()})`;
+          });
+        return ok(entries.length ? entries.join("\n") : "(no slots saved for this ROM)");
+      }
+
+      case "bizhawk_trace_start": {
+        const params: Record<string, unknown> = {};
+        if (p.path !== undefined) params.path = p.path;
+        if (p.osd  !== undefined) params.osd  = p.osd;
+        const r = await bh.call<{ path: string; osd: boolean }>("trace_start", params);
+        return ok(`Trace started → ${r.path} (osd: ${r.osd ? "on" : "off"})`);
+      }
+      case "bizhawk_trace_stop": {
+        const r = await bh.call<{ path?: string; frames: number }>("trace_stop");
+        return ok(`Trace stopped after ${r.frames} rows${r.path ? ` (${r.path})` : ""}`);
+      }
+      case "bizhawk_trace_status": {
+        const r = await bh.call<{ active: boolean; path?: string; frames: number; osd: boolean }>("trace_status");
+        return ok(
+          `Trace ${r.active ? "active" : "inactive"}: ${r.path ?? "(no file)"}, ${r.frames} rows, ` +
+          `osd: ${r.osd ? "on" : "off"}`,
+        );
+      }
+      case "bizhawk_trace_tail": {
+        const st = await bh.call<{ active: boolean; path?: string }>("trace_status");
+        if (!st.path) throw new Error("no trace file — the trace has never been started on this bridge");
+        const rows = (p.rows as number) ?? 10;
+        const text = fs.readFileSync(st.path, "utf8");
+        const lines = text.trimEnd().split("\n");
+        const header = lines[0];
+        const tail = lines.slice(Math.max(1, lines.length - rows));
+        return ok([
+          `${st.path} (${lines.length - 1} rows, active: ${st.active ? "yes" : "no"})`,
+          header,
+          ...tail,
+        ].join("\n"));
       }
 
       case "bizhawk_screenshot": {

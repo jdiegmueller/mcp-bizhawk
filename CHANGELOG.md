@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [0.4.0-jd] - 2026-07-13
+
+### Added
+
+- **`bizhawk_get_registers` / `bizhawk_set_register`** — CPU register
+  access (core-dependent; 68K cores expose PC/D0-D7/A0-A7).
+- **`bizhawk_trap_memory`** — run until the CPU writes/reads/executes an
+  address (event.on_bus_*, core-dependent) and report the registers (PC)
+  at the moment of access. Timeout is a result, not an error.
+- **`bizhawk_record_input`** — sample the human's joypad per frame (RLE,
+  optional stop-on-memory-change) into a play_input_sequence-ready list.
+- **Native movie control** — `bizhawk_movie_play` / `movie_stop` /
+  `movie_status` wrap BizHawk's movie engine for deterministic .bk2
+  playback (recording new movies from Lua is not exposed; out of scope).
+- **Named savestate slots** — `bizhawk_save_slot` / `load_slot` /
+  `list_slots`, stored server-side under $MCP_BIZHAWK_STATE_DIR (default
+  ~/.mcp-bizhawk/states) namespaced by ROM hash. No path bookkeeping.
+- **Trace control** — `bizhawk_trace_start` / `trace_stop` /
+  `trace_status` manage the bridge's per-frame CSV at runtime;
+  `bizhawk_trace_tail` returns the header + last N rows.
+
+### Changed
+
+- Bridge bumped to v0.8.0 for this release (registers, trap_memory,
+  record_input, movie control, trace control).
+
 ## [0.3.0-jd] - 2026-07-13
 
 ### Added
@@ -261,7 +287,8 @@ bridge instead of a 12-fps stuttery crawl.
   `play_input_sequence`. The per-batch progress log now reports
   `final_framecount` for verification.
 
-[Unreleased]: https://github.com/dmang-dev/mcp-bizhawk/compare/v0.3.0-jd...HEAD
+[Unreleased]: https://github.com/dmang-dev/mcp-bizhawk/compare/v0.4.0-jd...HEAD
+[0.4.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.4.0-jd
 [0.3.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.3.0-jd
 [0.2.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.2.0-jd
 [0.1.4]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.1.4

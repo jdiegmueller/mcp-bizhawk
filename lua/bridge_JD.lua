@@ -1,5 +1,31 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.7.0
+-- v0.8.0
+--
+-- v0.8.0 changes (registers, traps, input recording, movies, trace control):
+--   * cmd_get_registers/cmd_set_register — thin wrappers over
+--     emu.getregisters()/emu.setregister(), capability-guarded (core
+--     dependent; 68K cores expose PC/D0-D7/A0-A7).
+--   * cmd_trap_memory — registers a scoped event.on_bus_write/read/exec
+--     callback on an address, then frame-advances (turbo-eligible) until
+--     it fires or a frame budget expires, snapshotting the CPU registers
+--     (PC) at the moment of access before unregistering. Timeout is a
+--     result (hit = nil), not an error.
+--   * cmd_record_input — samples joypad.get(player) every frame (pressed
+--     buttons only) into the same {buttons, hold} RLE shape
+--     play_input_sequence consumes, optionally stopping early via
+--     stop_on_memory_change. Lets a human demonstrate a move once and
+--     hand the agent a replayable sequence.
+--   * cmd_movie_play/cmd_movie_stop/cmd_movie_status — wrap movie.play_
+--     from_start/movie.stop/movie.isloaded+mode+filename+length for
+--     deterministic .bk2 playback. Recording new movies from Lua is not
+--     exposed by BizHawk's movie API; out of scope.
+--   * cmd_trace_start/cmd_trace_stop/cmd_trace_status — runtime control
+--     of the per-frame trace CSV (rotate to a new path, stop and report
+--     frame count, or query {active, path, frames, osd}) instead of only
+--     configuring TRACE_PATH at launch. (bizhawk_trace_tail and the
+--     named savestate slots added this release are server-side only —
+--     tail reads the CSV directly, slots wrap existing save_state/
+--     load_state — no bridge changes needed for either.)
 --
 -- v0.7.0 changes (freeze, eval_lua, RAM search):
 --   * cmd_freeze/cmd_unfreeze/cmd_list_frozen — cheat-style pinned writes
@@ -139,7 +165,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.7.0",
+    version    = "0.8.0",
     pause_safe = true,
 }
 
@@ -241,6 +267,7 @@ local TRACE_BTN_CHAR  = {"U","D","L","R","A","B","C","S"}
 local trace_fh = nil
 local trace_frames = 0
 local trace_last_frame = -1
+local trace_current_path = nil   -- path of the open (or last) trace file
 
 local function trace_pad_string(port)
     local j = joypad.get(port)
@@ -340,6 +367,14 @@ local CAPS = {
     -- emu
     framecount   = emu and has(emu, "framecount"),
     frameadvance = emu and has(emu, "frameadvance"),
+    getregisters = emu and has(emu, "getregisters"),
+    setregister  = emu and has(emu, "setregister"),
+    -- event hooks are core-dependent (available on Genesis/NES/SNES-class
+    -- cores, absent on some others) — probe, don't assume
+    on_bus_write     = event and has(event, "on_bus_write"),
+    on_bus_read      = event and has(event, "on_bus_read"),
+    on_bus_exec      = event and has(event, "on_bus_exec"),
+    unregisterbyid   = event and has(event, "unregisterbyid"),
     yield        = emu and has(emu, "yield"),
     -- client (pause control lives here, NOT on emu — emu.pause doesn't exist
     -- in BizHawk; that's an mGBA-ism)
@@ -383,6 +418,11 @@ local CAPS = {
     -- Connect(), which re-creates the socket before dialing).
     socket_redial = comm and has(comm, "socketServerSetIp")
                          and has(comm, "socketServerGetIp"),
+    -- movies (.bk2) — playback only; recording NEW movies isn't reliably
+    -- exposed by BizHawk 2.11's Lua API, so it's out of scope here.
+    movie_isloaded        = movie and has(movie, "isloaded"),
+    movie_play_from_start = movie and has(movie, "play_from_start"),
+    movie_stop            = movie and has(movie, "stop"),
 }
 
 -- ── Command handlers ────────────────────────────────────────────────────────
@@ -1123,6 +1163,206 @@ local function cmd_search_end(p)
     return true
 end
 
+-- ── CPU registers ───────────────────────────────────────────────────────────
+local function cmd_get_registers(p)
+    if not CAPS.getregisters then error("emu.getregisters not available on this core") end
+    return emu.getregisters()
+end
+
+local function cmd_set_register(p)
+    if not CAPS.setregister then error("emu.setregister not available on this core") end
+    emu.setregister(assert(p.name, "name required"), assert(p.value, "value required"))
+    return true
+end
+
+-- Run frames until the CPU writes/reads/executes `address`, or a frame
+-- budget expires. Registers a scoped event callback, steps, unregisters.
+-- Answers "WHO writes this address?" — the callback snapshots the CPU
+-- registers (PC!) at the moment of access.
+local function cmd_trap_memory(p)
+    local kind = p.kind or "write"
+    local reg_name = ({ write = "on_bus_write", read = "on_bus_read", exec = "on_bus_exec" })[kind]
+    if not reg_name then error("kind must be 'write', 'read', or 'exec'") end
+    if not CAPS[reg_name] then
+        error("event." .. reg_name .. " not available on this core")
+    end
+    if not CAPS.frameadvance then error("emu.frameadvance not available") end
+    local address = assert(p.address, "address required")
+    local timeout = p.timeout_frames or 600
+
+    local hit = nil
+    local guid = event[reg_name](function(addr, val, flags)
+        if not hit then
+            hit = {
+                address    = addr,
+                value      = val,
+                registers  = CAPS.getregisters and emu.getregisters() or nil,
+                framecount = CAPS.framecount and emu.framecount() or nil,
+            }
+        end
+    end, address, "mcp_trap_" .. kind)
+
+    local waited = 0
+    local ok, err = pcall(function()
+        run_unpaused(function()
+            maybe_turbo(p.turbo, false, function()
+                while waited < timeout and not hit do
+                    emu.frameadvance()
+                    frame_hooks()
+                    waited = waited + 1
+                end
+            end)
+        end)
+    end)
+    if CAPS.unregisterbyid then pcall(function() event.unregisterbyid(guid) end) end
+    if not ok then error(err, 0) end
+
+    return {
+        hit = hit,
+        frames_waited = waited,
+        final_framecount = CAPS.framecount and emu.framecount() or nil,
+    }
+end
+
+-- Record the HUMAN's joypad for up to max_frames (or until a memory value
+-- changes), returning a play_input_sequence-compatible RLE frame list.
+-- Lets a user demonstrate a move once, then hand the agent a replayable
+-- sequence.
+local function cmd_record_input(p)
+    if not CAPS.joypad_get   then error("joypad.get not available") end
+    if not CAPS.frameadvance then error("emu.frameadvance not available") end
+    local max_frames = p.max_frames or 600
+    local player     = p.player or 1
+    local stop_spec  = p.stop_on_memory_change
+    local stop_initial = stop_spec
+        and read_memory_widthed(stop_spec.domain, stop_spec.address, stop_spec.width or "u8")
+        or nil
+
+    local entries  = {}
+    local recorded = 0
+    local stopped  = false
+
+    -- joypad.get returns every input incl. axes (numbers) and released
+    -- buttons (false) — keep only pressed booleans.
+    local function pressed_now()
+        local j = joypad.get(player)
+        local out = {}
+        for k, v in pairs(j) do
+            if v == true then out[k] = true end
+        end
+        return out
+    end
+
+    local function same_buttons(a, b)
+        for k in pairs(a) do if not b[k] then return false end end
+        for k in pairs(b) do if not a[k] then return false end end
+        return true
+    end
+
+    run_unpaused(function()
+        while recorded < max_frames do
+            emu.frameadvance()
+            frame_hooks()
+            recorded = recorded + 1
+            local now = pressed_now()
+            local last = entries[#entries]
+            if last and same_buttons(last.buttons, now) then
+                last.hold = last.hold + 1
+            else
+                entries[#entries + 1] = { buttons = now, hold = 1 }
+            end
+            if stop_spec then
+                local cur = read_memory_widthed(stop_spec.domain, stop_spec.address, stop_spec.width or "u8")
+                if cur ~= stop_initial then
+                    stopped = true
+                    break
+                end
+            end
+        end
+    end)
+
+    return {
+        recorded = recorded,
+        stopped_early = stopped,
+        frames = #entries > 0 and entries or nil,
+    }
+end
+
+-- ── Movies (.bk2) ───────────────────────────────────────────────────────────
+local function movie_status_table()
+    local loaded = CAPS.movie_isloaded and movie.isloaded() or false
+    local t = { loaded = loaded }
+    -- mode() is safe even when inactive (returns "INACTIVE"); filename()/length()
+    -- throw a .NET exception (→ native crash) when no movie is loaded, so only
+    -- call them once a movie is actually loaded.
+    if movie and has(movie, "mode") then t.mode = movie.mode() end
+    if loaded then
+        if movie and has(movie, "filename") then t.filename = movie.filename() end
+        if movie and has(movie, "length")   then t.length   = movie.length()   end
+    end
+    return t
+end
+
+local function cmd_movie_status(p)
+    if not movie then error("movie API not available on this build") end
+    return movie_status_table()
+end
+
+local function cmd_movie_play(p)
+    if not CAPS.movie_play_from_start then error("movie.play_from_start not available on this build") end
+    local ok
+    if p.path then ok = movie.play_from_start(p.path)
+    else ok = movie.play_from_start() end
+    if ok == false then
+        error("movie failed to load" .. (p.path and (": " .. tostring(p.path)) or "") ..
+              " (check ROM/core match — the .bk2 header records the authoring core)")
+    end
+    return movie_status_table()
+end
+
+local function cmd_movie_stop(p)
+    if not CAPS.movie_stop then error("movie.stop not available on this build") end
+    movie.stop()
+    return true
+end
+
+-- ── Trace control ───────────────────────────────────────────────────────────
+-- Runtime start/stop of the per-frame trace CSV (default-on at startup when
+-- TRACE_PATH resolves; these commands let a session rotate/disable it).
+local function trace_close()
+    if trace_fh then
+        trace_fh:flush()
+        trace_fh:close()
+        trace_fh = nil
+    end
+end
+
+local function cmd_trace_start(p)
+    local path = p.path or TRACE_PATH
+    if not path then error("no path given and no default TRACE_PATH configured") end
+    local fh, open_err = io.open(path, "w")
+    if not fh then error("could not open trace file: " .. tostring(open_err)) end
+    trace_close()
+    trace_fh = fh
+    trace_fh:write(trace_header() .. "\n")
+    trace_current_path = path
+    trace_frames = 0
+    trace_last_frame = -1
+    if p.osd ~= nil then TRACE_OSD = p.osd end
+    return { path = path, osd = TRACE_OSD }
+end
+
+local function cmd_trace_stop(p)
+    local frames = trace_frames
+    trace_close()
+    return { path = trace_current_path, frames = frames }
+end
+
+local function cmd_trace_status(p)
+    return { active = trace_fh ~= nil, path = trace_current_path,
+             frames = trace_frames, osd = TRACE_OSD }
+end
+
 -- ── Dispatch table ──────────────────────────────────────────────────────────
 
 local HANDLERS = {
@@ -1157,6 +1397,16 @@ local HANDLERS = {
     search_filter        = cmd_search_filter,
     search_results       = cmd_search_results,
     search_end           = cmd_search_end,
+    get_registers        = cmd_get_registers,
+    set_register         = cmd_set_register,
+    trap_memory          = cmd_trap_memory,
+    record_input         = cmd_record_input,
+    movie_status         = cmd_movie_status,
+    movie_play           = cmd_movie_play,
+    movie_stop           = cmd_movie_stop,
+    trace_start          = cmd_trace_start,
+    trace_stop           = cmd_trace_stop,
+    trace_status         = cmd_trace_status,
 }
 
 local function dispatch(cmd)
@@ -1297,6 +1547,7 @@ if TRACE_PATH then
     if fh then
         trace_fh = fh
         trace_fh:write(trace_header() .. "\n")
+        trace_current_path = TRACE_PATH
         console.log("[mcp-bizhawk] NHL94 trace writing to " .. TRACE_PATH)
     else
         console.log("[mcp-bizhawk] WARNING: trace disabled — could not open "

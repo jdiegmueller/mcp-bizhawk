@@ -5,3 +5,7 @@ dist/
 .rstk/
 .scratch/
 *.png
+
+# Local planning/scratch — not for publication
+.superpowers/
+docs/superpowers/
