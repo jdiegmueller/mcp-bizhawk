@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<!-- No unreleased changes yet. -->
+
+## [0.3.0-jd] - 2026-07-13
+
+### Added
+
+- **`bizhawk_freeze` / `bizhawk_unfreeze` / `bizhawk_list_frozen`** —
+  cheat-style pinned writes re-asserted after every emulated frame
+  (including frames inside batched commands). Freeze runs before the trace
+  hook, so the trace records enforced values.
+- **`bizhawk_eval_lua`** — arbitrary-Lua escape hatch; the chunk runs in
+  the bridge with BizHawk's full Lua API, result comes back JSON-encoded.
+- **RAM search sessions** (`bizhawk_search_begin` / `search_filter` /
+  `search_results` / `search_end`) — Cheat-Engine-style two-snapshot
+  hunting with the snapshot held bridge-side. Conditions:
+  eq/ne/gt/lt/changed/unchanged/increased/decreased. Window cap 2 MiB.
+
+### Changed
+
+- **Version visibility.** The server version now appears on the
+  `bizhawk.ts` client-lifecycle log lines (`[mcp-bizhawk vX.Y.Z-jd] ...`),
+  and the bridge version appears on the in-game OSD overlay
+  (`bridge_JD vX.Y.Z`), so both sides of the connection are identifiable
+  at a glance. Bridge bumped to v0.7.0 for this release (freeze, eval_lua,
+  RAM search).
+
+### Fixed
+
+- **Bridge trace-open can no longer crash the poll loop.** A failed
+  trace-file open (e.g. a stale path) previously threw from `assert()`
+  before the main loop started, leaving the bridge TCP-connected but
+  never polling (silent-dead). It now warns and disables the trace
+  instead of throwing.
+
+## [0.2.0-jd] - 2026-07-13
+
 ### Added
 
 - **Inline screenshots.** `bizhawk_screenshot` now returns the PNG as an
@@ -225,7 +261,9 @@ bridge instead of a 12-fps stuttery crawl.
   `play_input_sequence`. The per-batch progress log now reports
   `final_framecount` for verification.
 
-[Unreleased]: https://github.com/dmang-dev/mcp-bizhawk/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/dmang-dev/mcp-bizhawk/compare/v0.3.0-jd...HEAD
+[0.3.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.3.0-jd
+[0.2.0-jd]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.2.0-jd
 [0.1.4]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.1.4
 [0.1.3]: https://github.com/dmang-dev/mcp-bizhawk/releases/tag/v0.1.3
 

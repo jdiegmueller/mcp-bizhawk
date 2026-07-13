@@ -14,6 +14,8 @@
 
 import net from "node:net";
 
+import { VERSION } from "./version.js";
+
 interface PendingCmd {
   id:      number;
   method:  string;
@@ -100,7 +102,7 @@ export class BizhawkServer {
       sock.destroy();
       return;
     }
-    process.stderr.write("[mcp-bizhawk] BizHawk client connected (waiting for bridge_JD.lua to start polling)\n");
+    process.stderr.write(`[mcp-bizhawk v${VERSION}] BizHawk client connected (waiting for bridge_JD.lua to start polling)\n`);
     this.client = sock;
     this.buf = "";
     this.awaitingResult = false;
@@ -150,7 +152,7 @@ export class BizhawkServer {
   private handleMessage(line: string): void {
     if (!this.bridgeReady) {
       this.bridgeReady = true;
-      process.stderr.write("[mcp-bizhawk] bridge_JD.lua is polling — bridge ready\n");
+      process.stderr.write(`[mcp-bizhawk v${VERSION}] bridge_JD.lua is polling — bridge ready\n`);
     }
     if (line === "READY") {
       // Lua is asking for work; no result to deliver this round.

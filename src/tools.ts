@@ -50,6 +50,7 @@ const BYTEORDER_PARAM_DESC =
   "Requires the bridge's memory_read/write_*_be capability (present on standard BizHawk builds).";
 
 const WIDTH_ENUM = ["u8", "s8", "u16", "s16", "u32", "s32", "u16_be", "s16_be", "u32_be", "s32_be"];
+const WRITE_WIDTH_ENUM = ["u8", "u16", "u32", "u16_be", "u32_be"];
 const WIDTH_PARAM_DESC =
   "Read width and signedness: u/s 8/16/32 bits. Plain u16/u32/s16/s32 are little-endian; " +
   "'_be' variants are big-endian (use these on Genesis/Mega Drive 68K). Default 'u8'.";
@@ -621,6 +622,131 @@ const TOOLS: Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "bizhawk_freeze",
+    description:
+      "PURPOSE: Pin a memory address to a fixed value — the bridge re-writes it after EVERY emulated frame until unfrozen (classic cheat freezing). " +
+      "USAGE: Infinite health/time cheats, and pinning state during experiments (freeze the game clock while testing collision). Freezing the same address+domain again just updates the value. Use bizhawk_unfreeze to release, bizhawk_list_frozen to inspect. For a one-shot write use bizhawk_write8/16/32 instead. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites the address every frame with no undo; the game's own writes are overridden one frame later at the latest. The first write happens immediately and validates domain/width/address (errors now, not silently later). Freezes live in the bridge — reloading the Lua script or restarting BizHawk clears them. Frozen values are re-asserted after each frame stepped by the bridge's own commands (frame_advance, play_input_sequence, wait_for_memory), but NOT for frames advanced inside a bizhawk_eval_lua chunk. " +
+      "RETURNS: 'Froze ADDR_HEX (DOMAIN) = VAL. N address(es) frozen.'",
+    inputSchema: {
+      type: "object",
+      required: ["address", "value"],
+      properties: {
+        address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain (0-based per-domain)." },
+        value:   { type: "integer", minimum: 0, description: "Unsigned value to pin. For negative values pass the two's-complement unsigned form." },
+        width:   { type: "string", enum: WRITE_WIDTH_ENUM, default: "u8", description: "Write width. '_be' variants are big-endian (use on Genesis/Mega Drive). Default 'u8'." },
+        domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_unfreeze",
+    description:
+      "PURPOSE: Release a frozen memory address (or all of them) so the game can write it again. " +
+      "USAGE: Counterpart to bizhawk_freeze. Pass the same address+domain used when freezing, or all=true to clear everything. Unfreezing an address that isn't frozen is a no-op. " +
+      "BEHAVIOR: Stops the per-frame re-writes; does NOT restore any previous value — memory keeps whatever the freeze last wrote until the game overwrites it. " +
+      "RETURNS: 'N address(es) frozen.' (the count remaining).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "integer", minimum: 0, description: "Address to release (required unless all=true). Must match the frozen entry's address." },
+        domain:  { type: "string", description: "Domain of the frozen entry (must match what was passed to bizhawk_freeze, including omission)." },
+        all:     { type: "boolean", default: false, description: "Release every frozen address." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_list_frozen",
+    description:
+      "PURPOSE: List the addresses currently being re-written every frame by bizhawk_freeze. " +
+      "USAGE: Inspect freeze state before/after experiments, or to find the exact address+domain pair needed to unfreeze. " +
+      "BEHAVIOR: No side effects — pure read of bridge state. " +
+      "RETURNS: One line per entry: 'ADDR_HEX WIDTH = VALUE (DOMAIN)', or '(no frozen addresses)'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_eval_lua",
+    description:
+      "PURPOSE: Execute an arbitrary Lua chunk inside the BizHawk bridge and return its result — the escape hatch for anything the other tools don't cover. " +
+      "USAGE: Prototype new capabilities (custom loops, gui drawing, APIs like tastudio/genesis-specific calls) before promoting them to real tools. The chunk sees BizHawk's Lua globals: memory, emu, client, joypad, savestate, movie, gui, event, comm. Return a value with `return ...` — it comes back JSON-encoded. If the chunk steps frames itself, pass timeout_ms scaled to the work. " +
+      "BEHAVIOR: DESTRUCTIVE (potentially): the chunk can write memory, load states, reboot the core — anything the Lua API allows, with no sandbox. Runs synchronously inside the bridge's poll loop; a chunk that never returns wedges the bridge until the RPC times out (and possibly beyond — avoid unbounded loops; use emu.frameadvance-bounded loops). Errors in the chunk (parse or runtime) return as tool errors without harming the bridge. The return value must be JSON-encodable: nil/boolean/number/string, array-like or string-keyed tables. Frames advanced INSIDE the chunk (e.g. calling emu.frameadvance) do NOT run the bridge's per-frame hooks: frozen addresses are not re-asserted and no trace rows are written for those frames. " +
+      "RETURNS: The chunk's return value as pretty-printed JSON, '(nil)' if it returned nothing, or a JSON array when the chunk returns multiple values. Multiple return values with an embedded nil (e.g. return 1, nil, 3) produce a hole in the JSON array and may be truncated — return a table instead if you need to preserve nils.",
+    inputSchema: {
+      type: "object",
+      required: ["code"],
+      properties: {
+        code: { type: "string", description: "Lua 5.4 chunk to execute, e.g. \"return emu.framecount()\" or \"memory.write_u16_be(0xC468, 0x0300, '68K RAM') return true\"." },
+        timeout_ms: { type: "integer", minimum: 10000, description: "RPC timeout override in milliseconds. Only EXTENDS the timeout — values at or below the server's 10s default have no effect. Set this when the chunk advances many frames (~20ms per frame)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_search_begin",
+    description:
+      "PURPOSE: Start a Cheat-Engine-style RAM search: snapshot a memory window bridge-side so subsequent bizhawk_search_filter calls can narrow candidate addresses by how their values change. " +
+      "USAGE: THE way to find an unknown address holding a visible quantity (HP, missiles, timer). Workflow: search_begin → cause a change in-game → search_filter(condition) → repeat until few candidates remain → search_results. Replaces reading 4KiB hex dumps into context and diffing manually. One session at a time; calling again discards the previous session. " +
+      "BEHAVIOR: No game-state side effects — reads a snapshot into bridge memory (window capped at 2 MiB; the snapshot lives in the Lua VM until search_end or script reload). Omitting length uses the whole domain from `start`. Returns an error on unknown domain, invalid width, or an oversize window. " +
+      "RETURNS: 'Search started: N bytes @ START_HEX (WIDTH, DOMAIN) — M potential candidates.'",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: { type: "string", description: DOMAIN_PARAM_DESC },
+        start:  { type: "integer", minimum: 0, default: 0, description: "Byte offset where the search window begins. Default 0." },
+        length: { type: "integer", minimum: 1, description: "Window size in bytes (max 2097152). Omit to search the whole domain from `start`." },
+        width:  { type: "string", enum: WRITE_WIDTH_ENUM, default: "u8", description: "Value width candidates are compared at. '_be' variants big-endian (Genesis). Every byte offset is considered (unaligned values are found)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_search_filter",
+    description:
+      "PURPOSE: Narrow the active RAM search: keep only candidate addresses whose CURRENT value satisfies the condition versus either a literal value (eq/ne/gt/lt) or the previous snapshot (changed/unchanged/increased/decreased), then re-snapshot. " +
+      "USAGE: After search_begin, alternate game actions with filters: fire a missile → filter 'decreased'; stand still → filter 'unchanged'; know the exact value → filter 'eq' with value. Each filter compares against the state at the PREVIOUS filter (or begin), then the current state becomes the new baseline. " +
+      "BEHAVIOR: No game-state side effects. The candidate list only ever shrinks. Returns an error if no search is active or a comparison value is missing. " +
+      "RETURNS: 'N candidate(s) remain.' plus up to 20 sample lines 'ADDR_HEX = VALUE'.",
+    inputSchema: {
+      type: "object",
+      required: ["condition"],
+      properties: {
+        condition: {
+          type: "string",
+          enum: ["eq", "ne", "gt", "lt", "changed", "unchanged", "increased", "decreased"],
+          description: "eq/ne/gt/lt compare against `value`; changed/unchanged/increased/decreased compare against each address's value at the previous filter (or search_begin).",
+        },
+        value: { type: "integer", description: "Comparison operand — required for eq/ne/gt/lt, ignored otherwise." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_search_results",
+    description:
+      "PURPOSE: List the surviving candidate addresses of the active RAM search with their CURRENT values. " +
+      "USAGE: Call once filtering has narrowed the field (≲100 candidates) to get the full list; verify a candidate by writing to it (bizhawk_write8/16) and observing the game. " +
+      "BEHAVIOR: No side effects. Values are re-read fresh (they may differ from the last filter's sample). Returns an error if no search is active or no filter has run yet. " +
+      "RETURNS: 'N candidate(s):' plus up to `limit` lines 'ADDR_HEX = VALUE'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 500, default: 100, description: "Maximum candidates to list. Default 100." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_search_end",
+    description:
+      "PURPOSE: End the active RAM search and free the bridge-side snapshot memory. " +
+      "USAGE: After the target address is found, or to abandon a search. Optional but polite — search_begin also discards any previous session. " +
+      "BEHAVIOR: No game-state side effects. Never errors, even with no active search. " +
+      "RETURNS: 'Search ended.'",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
 ];
 
 function ok(text: string) {
@@ -859,6 +985,84 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(
           `${r.length} records @ base ${addrHex(p.base as number)} stride ${p.stride}:\n${lines.join("\n")}`,
         );
+      }
+
+      case "bizhawk_freeze": {
+        const params: Record<string, unknown> = { address: a(), value: p.value, ...dom() };
+        if (p.width !== undefined) params.width = p.width;
+        const r = await bh.call<{ frozen_count: number }>("freeze", params);
+        return ok(
+          `Froze ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""} = ${fmtHex(p.value)}. ` +
+          `${r.frozen_count} address(es) frozen.`,
+        );
+      }
+      case "bizhawk_unfreeze": {
+        const params: Record<string, unknown> = {};
+        if (p.address !== undefined) params.address = p.address;
+        if (p.domain  !== undefined) params.domain  = p.domain;
+        if (p.all     !== undefined) params.all     = p.all;
+        const r = await bh.call<{ frozen_count: number }>("unfreeze", params);
+        return ok(`${r.frozen_count} address(es) frozen.`);
+      }
+      case "bizhawk_list_frozen": {
+        const r = await bh.call<{
+          count: number;
+          frozen?: { address: number; width: string; value: number; domain?: string }[];
+        }>("list_frozen");
+        const list = Array.isArray(r.frozen) ? r.frozen : [];
+        if (list.length === 0) return ok("(no frozen addresses)");
+        return ok(list
+          .map((f) => `${addrHex(f.address)} ${f.width} = ${f.value}${f.domain ? ` (${f.domain})` : ""}`)
+          .join("\n"));
+      }
+
+      case "bizhawk_eval_lua": {
+        const opts = p.timeout_ms !== undefined ? { timeoutMs: p.timeout_ms as number } : {};
+        const r = await bh.call<unknown>("eval_lua", { code: p.code }, opts);
+        return ok(r === undefined || r === null ? "(nil)" : JSON.stringify(r, null, 2));
+      }
+
+      case "bizhawk_search_begin": {
+        const params: Record<string, unknown> = { ...dom() };
+        if (p.start  !== undefined) params.start  = p.start;
+        if (p.length !== undefined) params.length = p.length;
+        if (p.width  !== undefined) params.width  = p.width;
+        const r = await bh.call<{
+          start: number; length: number; width: string; potential_candidates: number;
+        }>("search_begin", params);
+        return ok(
+          `Search started: ${r.length} bytes @ ${addrHex(r.start)} (${r.width}${p.domain ? `, ${p.domain}` : ""}) — ` +
+          `${r.potential_candidates} potential candidates.`,
+        );
+      }
+      case "bizhawk_search_filter": {
+        const params: Record<string, unknown> = { condition: p.condition };
+        if (p.value !== undefined) params.value = p.value;
+        const r = await bh.call<{
+          count: number; sample?: { address: number; value: number }[];
+        }>("search_filter", params);
+        const sample = Array.isArray(r.sample) ? r.sample : [];
+        const lines = [`${r.count} candidate(s) remain.`];
+        for (const s of sample) lines.push(`  ${addrHex(s.address)} = ${s.value}`);
+        if (r.count > sample.length && sample.length > 0) {
+          lines.push(`  ... (${r.count - sample.length} more — use bizhawk_search_results)`);
+        }
+        return ok(lines.join("\n"));
+      }
+      case "bizhawk_search_results": {
+        const params: Record<string, unknown> = {};
+        if (p.limit !== undefined) params.limit = p.limit;
+        const r = await bh.call<{
+          count: number; results?: { address: number; value: number }[];
+        }>("search_results", params);
+        const results = Array.isArray(r.results) ? r.results : [];
+        const lines = [`${r.count} candidate(s):`];
+        for (const s of results) lines.push(`  ${addrHex(s.address)} = ${s.value}`);
+        return ok(lines.join("\n"));
+      }
+      case "bizhawk_search_end": {
+        await bh.call("search_end");
+        return ok("Search ended.");
       }
 
       case "bizhawk_screenshot": {

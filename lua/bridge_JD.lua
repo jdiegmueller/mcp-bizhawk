@@ -1,5 +1,23 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.6.0
+-- v0.7.0
+--
+-- v0.7.0 changes (freeze, eval_lua, RAM search):
+--   * cmd_freeze/cmd_unfreeze/cmd_list_frozen — cheat-style pinned writes
+--     that are re-asserted after every emulated frame (including frames
+--     inside batched commands like frame_advance/play_input_sequence/
+--     wait_for_memory). Freeze enforcement runs before trace_tick(), so
+--     the trace CSV records the enforced (post-freeze) values, not the
+--     game's own write. frame_hooks refactor: the per-frame "after
+--     emu.frameadvance()" work (freeze enforcement, trace_tick, osd_tick)
+--     is now centralized in one frame_hooks() called from every stepping
+--     site, instead of being duplicated per handler.
+--   * cmd_eval_lua — arbitrary-Lua escape hatch. The submitted chunk runs
+--     bridge-side with BizHawk's full Lua API in scope (memory, emu, gui,
+--     client, ...); its return value comes back JSON-encoded.
+--   * cmd_search_begin/cmd_search_filter/cmd_search_results/cmd_search_end
+--     — Cheat-Engine-style two-snapshot RAM search sessions held
+--     bridge-side. Conditions: eq/ne/gt/lt/changed/unchanged/increased/
+--     decreased. Snapshot window capped at 2 MiB.
 --
 -- v0.6.0 changes (batch reads, signed/BE widths, turbo):
 --   * WIDTH_READ_FN is now a capability-guarded lookup table mapping each
@@ -121,7 +139,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.6.0",
+    version    = "0.7.0",
     pause_safe = true,
 }
 
@@ -315,6 +333,7 @@ local function osd_tick()
             (tr_u16(base + 0x04) & 0x8) ~= 0 and " x" or ""))
     end
     osd_text(4, 4 + 12 * OSD_LINE_H, string.format("pk f%-3d", tr_u16(PUCK_ADDR + 0x06)))
+    osd_text(4, 4 + 13 * OSD_LINE_H, string.format("%s v%s", BRIDGE.name, BRIDGE.version))
 end
 
 local CAPS = {
@@ -352,6 +371,8 @@ local CAPS = {
     memory_get_memorydomain_list   = memory and has(memory, "getmemorydomainlist"),
     memory_get_current_memorydomain = memory and has(memory, "getcurrentmemorydomain"),
     memory_use_memory_domain       = memory and has(memory, "usememorydomain"),
+    memory_read_bytes_as_array = memory and has(memory, "read_bytes_as_array"),
+    memory_get_memorydomain_size = memory and has(memory, "getmemorydomainsize"),
     -- mainmemory (subset of memory, scoped to system main RAM)
     mainmemory_read_u8 = mainmemory and has(mainmemory, "read_u8"),
     -- gameinfo
@@ -571,6 +592,68 @@ local function read_width(address, width)
     return memory[fn_name](address)
 end
 
+-- Write counterpart of read_width. Unsigned widths only — callers writing a
+-- negative value must pass its two's-complement unsigned form. Same
+-- capability-guarded lookup-table style as read_width above.
+local WIDTH_WRITE_FN = {
+    u8 = "write_u8",
+    u16 = "write_u16_le",
+    u32 = "write_u32_le",
+    u16_be = "write_u16_be",
+    u32_be = "write_u32_be",
+}
+local function write_width(address, width, value)
+    local fn_name = WIDTH_WRITE_FN[width]
+    if not fn_name then
+        error("width must be one of u8,u16,u32,u16_be,u32_be (got " .. tostring(width) .. ")")
+    end
+    if not has(memory, fn_name) then
+        error("memory." .. fn_name .. " not available on this build")
+    end
+    memory[fn_name](address, value)
+end
+
+-- ── Frozen addresses (cheat-style) ──────────────────────────────────────────
+-- Re-written after every emulated frame by frame_hooks(). Keyed by
+-- "<domain or ''>:<address>" so the same offset in two domains can coexist.
+local frozen = {}
+
+local function freeze_key(domain, address)
+    return (domain or "") .. ":" .. tostring(address)
+end
+
+local function frozen_count()
+    local n = 0
+    for _ in pairs(frozen) do n = n + 1 end
+    return n
+end
+
+local function freeze_tick()
+    for _, f in pairs(frozen) do
+        -- pcall: a stale entry (domain gone after core switch) must never
+        -- kill the poll loop.
+        pcall(function()
+            if f.domain then
+                local prev = memory.getcurrentmemorydomain and memory.getcurrentmemorydomain() or nil
+                if not memory.usememorydomain(f.domain) then error("unknown domain") end
+                write_width(f.address, f.width, f.value)
+                if prev then memory.usememorydomain(prev) end
+            else
+                write_width(f.address, f.width, f.value)
+            end
+        end)
+    end
+end
+
+-- The ONE per-frame hook. Called from the main yield loop and after every
+-- emu.frameadvance() inside command handlers. Freeze runs FIRST so the trace
+-- records the enforced value.
+local function frame_hooks()
+    freeze_tick()
+    trace_tick()
+    osd_tick()
+end
+
 local function read_memory_widthed(domain, address, width)
     if domain then
         if not CAPS.memory_use_memory_domain then
@@ -679,8 +762,7 @@ local function cmd_play_input_sequence(p)
             -- of the hold.
             joypad.set(buttons, player)
             emu.frameadvance()
-            trace_tick()
-            osd_tick()
+            frame_hooks()
             count = count + 1
 
             -- Check stop condition AFTER the frame advances
@@ -733,8 +815,7 @@ local function cmd_frame_advance(p)
         maybe_turbo(p.turbo, false, function()
             for _ = 1, n do
                 emu.frameadvance()
-                trace_tick()
-                osd_tick()
+                frame_hooks()
             end
         end)
     end)
@@ -808,8 +889,7 @@ local function cmd_wait_for_memory(p)
             maybe_turbo(p.turbo, false, function()
                 while waited < timeout do
                     emu.frameadvance()
-                    trace_tick()
-                    osd_tick()
+                    frame_hooks()
                     waited = waited + 1
                     current = read_memory_widthed(p.domain, address, width)
                     if satisfied(current) then
@@ -868,6 +948,181 @@ local function cmd_read_struct_array(p)
     end)
 end
 
+local function cmd_freeze(p)
+    local addr  = assert(p.address, "address required")
+    local value = assert(p.value,   "value required")
+    local width = p.width or "u8"
+    -- Validate NOW (bad width/domain/address should error on this call, not
+    -- silently every subsequent frame) — this also applies the first write.
+    in_domain(p.domain, function() write_width(addr, width, value) end)
+    frozen[freeze_key(p.domain, addr)] = { address = addr, width = width, value = value, domain = p.domain }
+    return { frozen_count = frozen_count() }
+end
+
+local function cmd_unfreeze(p)
+    if p.all then
+        frozen = {}
+        return { frozen_count = 0 }
+    end
+    local addr = assert(p.address, "address required (or pass all=true)")
+    frozen[freeze_key(p.domain, addr)] = nil
+    return { frozen_count = frozen_count() }
+end
+
+local function cmd_list_frozen(p)
+    local out = {}
+    for _, f in pairs(frozen) do out[#out + 1] = f end
+    -- omit the key when empty: {} would serialize as a JSON object
+    return { count = #out, frozen = #out > 0 and out or nil }
+end
+
+-- Arbitrary-Lua escape hatch. The chunk runs with the bridge's full
+-- environment in scope (memory, emu, client, joypad, savestate, gui, comm,
+-- plus this script's helpers are NOT exposed — chunks see globals only).
+-- Whatever it returns must be JSON-encodable: nil/boolean/number/string,
+-- or a table that is either array-like or string-keyed.
+local function cmd_eval_lua(p)
+    local code = assert(p.code, "code required")
+    local chunk, err = load(code, "=eval_lua")
+    if not chunk then error("Lua parse error: " .. tostring(err)) end
+    local results = table.pack(pcall(chunk))
+    if not results[1] then error("Lua runtime error: " .. tostring(results[2])) end
+    if results.n <= 1 then return nil end          -- no return value
+    if results.n == 2 then return results[2] end   -- single return value
+    local out = {}                                  -- multiple returns → array
+    for i = 2, results.n do out[i - 1] = results[i] end
+    return out
+end
+
+-- ── RAM search (Cheat-Engine-style) ─────────────────────────────────────────
+-- One session at a time. The snapshot and candidate list live bridge-side;
+-- only counts and capped candidate samples cross the wire. This replaces the
+-- old "read_range twice and diff hex dumps in the client" workflow.
+local search = nil
+local MAX_SEARCH_BYTES = 2 * 1024 * 1024
+
+local function search_read_bytes()
+    return in_domain(search.domain, function()
+        if CAPS.memory_read_bytes_as_array then
+            return memory.read_bytes_as_array(search.start, search.length)
+        end
+        local bytes = {}
+        for i = 0, search.length - 1 do bytes[i + 1] = memory.read_u8(search.start + i) end
+        return bytes
+    end)
+end
+
+-- Value at 0-based byte offset `off` in a bytes array, per the session width.
+local function search_value_at(bytes, off)
+    local w, be = search.width_bytes, search.be
+    if w == 1 then return bytes[off + 1] end
+    if w == 2 then
+        local a, b = bytes[off + 1], bytes[off + 2]
+        if be then return a * 256 + b else return b * 256 + a end
+    end
+    local a, b, c, d = bytes[off + 1], bytes[off + 2], bytes[off + 3], bytes[off + 4]
+    if be then return ((a * 256 + b) * 256 + c) * 256 + d
+    else return ((d * 256 + c) * 256 + b) * 256 + a end
+end
+
+local function cmd_search_begin(p)
+    local width = p.width or "u8"
+    local wb = ({ u8 = 1, u16 = 2, u32 = 4, u16_be = 2, u32_be = 4 })[width]
+    if not wb then error("width must be u8, u16, u32, u16_be, or u32_be") end
+    local start  = p.start or 0
+    local length = p.length
+    if not length then
+        if not CAPS.memory_get_memorydomain_size then
+            error("length required (memory.getmemorydomainsize not available on this build)")
+        end
+        local name = p.domain
+            or (CAPS.memory_get_current_memorydomain and memory.getcurrentmemorydomain())
+            or error("length required (cannot determine current domain size)")
+        length = memory.getmemorydomainsize(name) - start
+    end
+    if length < wb or length > MAX_SEARCH_BYTES then
+        error("search window must be " .. wb .. ".." .. MAX_SEARCH_BYTES .. " bytes (got " .. tostring(length) .. ")")
+    end
+    search = {
+        domain = p.domain, start = start, length = length,
+        width = width, width_bytes = wb, be = width:sub(-3) == "_be",
+        candidates = nil,  -- nil = "every offset" until the first filter
+    }
+    local snap_ok, snap = pcall(search_read_bytes)
+    if not snap_ok then
+        search = nil
+        error(snap, 0)
+    end
+    search.snap = snap
+    return { start = start, length = length, width = width,
+             potential_candidates = length - wb + 1 }
+end
+
+local function cmd_search_filter(p)
+    if not search then error("no active search — call search_begin first") end
+    local cond  = assert(p.condition,
+        "condition required (eq/ne/gt/lt/changed/unchanged/increased/decreased)")
+    local value = p.value
+    if (cond == "eq" or cond == "ne" or cond == "gt" or cond == "lt") and value == nil then
+        error("value required for condition '" .. cond .. "'")
+    end
+    local VALID_COND = { eq=true, ne=true, gt=true, lt=true, changed=true, unchanged=true, increased=true, decreased=true }
+    if not VALID_COND[cond] then error("unknown condition: " .. tostring(cond)) end
+    local cur, snap = search_read_bytes(), search.snap
+
+    local function pass(off)
+        local now = search_value_at(cur, off)
+        local was = search_value_at(snap, off)
+        if     cond == "eq"        then return now == value
+        elseif cond == "ne"        then return now ~= value
+        elseif cond == "gt"        then return now >  value
+        elseif cond == "lt"        then return now <  value
+        elseif cond == "changed"   then return now ~= was
+        elseif cond == "unchanged" then return now == was
+        elseif cond == "increased" then return now >  was
+        elseif cond == "decreased" then return now <  was
+        else error("unknown condition: " .. tostring(cond)) end
+    end
+
+    local passed = {}
+    if search.candidates then
+        for _, off in ipairs(search.candidates) do
+            if pass(off) then passed[#passed + 1] = off end
+        end
+    else
+        for off = 0, search.length - search.width_bytes do
+            if pass(off) then passed[#passed + 1] = off end
+        end
+    end
+    search.candidates = passed
+    search.snap = cur   -- next filter's changed/increased compare against NOW
+
+    local sample = {}
+    for i = 1, math.min(#passed, 20) do
+        local off = passed[i]
+        sample[i] = { address = search.start + off, value = search_value_at(cur, off) }
+    end
+    return { count = #passed, sample = #sample > 0 and sample or nil }
+end
+
+local function cmd_search_results(p)
+    if not search then error("no active search — call search_begin first") end
+    if not search.candidates then error("no filter applied yet — call search_filter first") end
+    local limit = p.limit or 100
+    local cur = search_read_bytes()
+    local out = {}
+    for i = 1, math.min(#search.candidates, limit) do
+        local off = search.candidates[i]
+        out[i] = { address = search.start + off, value = search_value_at(cur, off) }
+    end
+    return { count = #search.candidates, results = #out > 0 and out or nil }
+end
+
+local function cmd_search_end(p)
+    search = nil
+    return true
+end
+
 -- ── Dispatch table ──────────────────────────────────────────────────────────
 
 local HANDLERS = {
@@ -894,6 +1149,14 @@ local HANDLERS = {
     wait_for_memory      = cmd_wait_for_memory,
     read_many            = cmd_read_many,
     read_struct_array    = cmd_read_struct_array,
+    freeze               = cmd_freeze,
+    unfreeze             = cmd_unfreeze,
+    list_frozen          = cmd_list_frozen,
+    eval_lua             = cmd_eval_lua,
+    search_begin         = cmd_search_begin,
+    search_filter        = cmd_search_filter,
+    search_results       = cmd_search_results,
+    search_end           = cmd_search_end,
 }
 
 local function dispatch(cmd)
@@ -1030,9 +1293,15 @@ else
 end
 
 if TRACE_PATH then
-    trace_fh = assert(io.open(TRACE_PATH, "w"))
-    trace_fh:write(trace_header() .. "\n")
-    console.log("[mcp-bizhawk] NHL94 trace writing to " .. TRACE_PATH)
+    local fh, open_err = io.open(TRACE_PATH, "w")
+    if fh then
+        trace_fh = fh
+        trace_fh:write(trace_header() .. "\n")
+        console.log("[mcp-bizhawk] NHL94 trace writing to " .. TRACE_PATH)
+    else
+        console.log("[mcp-bizhawk] WARNING: trace disabled — could not open "
+            .. tostring(TRACE_PATH) .. ": " .. tostring(open_err))
+    end
 end
 
 -- Per-frame poll. Run forever.
@@ -1067,8 +1336,7 @@ while true do
     end
 
     tick()
-    trace_tick()
-    osd_tick()
+    frame_hooks()
     -- ALWAYS yield here, never frameadvance. emu.frameadvance() blocks until
     -- a frame actually emulates, so if the emulator gets paused (keyboard
     -- Pause, or our own client.pause() engaging at end-of-frame) while the
