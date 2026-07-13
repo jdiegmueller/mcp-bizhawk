@@ -1,5 +1,27 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.5.5
+-- v0.6.0
+--
+-- v0.6.0 changes (batch reads, signed/BE widths, turbo):
+--   * WIDTH_READ_FN is now a capability-guarded lookup table mapping each
+--     width name (u8/s8/u16/s16/u32/s32 plus _be big-endian variants) to
+--     the matching memory.read_* function name — a missing memory.read_*
+--     on this build now errors cleanly instead of "attempt to call a nil
+--     value". Signed and big-endian widths are accepted everywhere a width
+--     is accepted: read_many, read_struct_array, observe_memory,
+--     stop_on_memory_change, wait_for_memory.
+--   * cmd_read_many — labeled batch reads: one call takes a list of
+--     {name, address, width, domain} specs and returns name=value results
+--     in request order, in a single bridge round-trip.
+--   * cmd_read_struct_array — decodes N fixed-stride records (e.g. entity
+--     tables) into labeled fields in one call, capped at count * fields <=
+--     4096.
+--   * maybe_turbo(turbo, keep_video, fn) — optionally runs fn at maximum
+--     emulation speed by cranking client.speedmode(6400) and disabling
+--     rendering via client.invisibleemulation(true), then restoring
+--     speedmode(100) and visible rendering afterwards. keep_video leaves
+--     rendering ON (used when screenshots are captured mid-run, since an
+--     invisible frame captures blank). Wired into frame_advance,
+--     wait_for_memory, and play_input_sequence via a turbo option.
 --
 -- v0.5.5 changes (trace continuity through batched frame stepping):
 --   * trace_tick()/osd_tick() are now called after every emu.frameadvance()
@@ -99,7 +121,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.5.5",
+    version    = "0.6.0",
     pause_safe = true,
 }
 
@@ -307,6 +329,8 @@ local CAPS = {
     ispaused     = client and has(client, "ispaused"),
     reboot_core  = client and has(client, "reboot_core"),
     screenshot   = client and has(client, "screenshot"),
+    speedmode          = client and has(client, "speedmode"),
+    invisibleemulation = client and has(client, "invisibleemulation"),
     -- savestate
     savestate_save = savestate and has(savestate, "save"),
     savestate_load = savestate and has(savestate, "load"),
@@ -516,7 +540,7 @@ end
 -- Optional observation params (since v0.1.5):
 --   p.observe_memory    — array of {name, domain, address, width} reads
 --                         to perform at each observation point. width is
---                         "u8" | "u16" | "u32" | "u16_be" | "u32_be"
+--                         u8/s8/u16/s16/u32/s32 (LE) plus u16_be/s16_be/u32_be/s32_be
 --                         (the _be widths since v0.3.0). Results land in each
 --                         observation as `memory = { name = value, ... }`.
 --   p.stop_on_memory_change — {domain, address, width} — record this
@@ -525,14 +549,26 @@ end
 --                         stop_reason='memory_changed'. The final
 --                         observation (if screenshot/memory enabled) is
 --                         always captured at the stop frame.
--- width: "u8" | "u16" | "u32" (little-endian) | "u16_be" | "u32_be"
+-- width: unsigned/signed 8/16/32, LE by default, _be variants big-endian.
+-- Readers are looked up by name so each width is capability-guarded: a
+-- missing memory.read_* on this build errors cleanly instead of "attempt
+-- to call a nil value".
+local WIDTH_READ_FN = {
+    u8 = "read_u8", s8 = "read_s8",
+    u16 = "read_u16_le", s16 = "read_s16_le",
+    u32 = "read_u32_le", s32 = "read_s32_le",
+    u16_be = "read_u16_be", s16_be = "read_s16_be",
+    u32_be = "read_u32_be", s32_be = "read_s32_be",
+}
 local function read_width(address, width)
-    if     width == "u8"     then return memory.read_u8(address)
-    elseif width == "u16"    then return memory.read_u16_le(address)
-    elseif width == "u32"    then return memory.read_u32_le(address)
-    elseif width == "u16_be" then return memory.read_u16_be(address)
-    elseif width == "u32_be" then return memory.read_u32_be(address)
-    else error("width must be 'u8', 'u16', 'u32', 'u16_be', or 'u32_be' (got " .. tostring(width) .. ")") end
+    local fn_name = WIDTH_READ_FN[width]
+    if not fn_name then
+        error("width must be one of u8,s8,u16,s16,u32,s32,u16_be,s16_be,u32_be,s32_be (got " .. tostring(width) .. ")")
+    end
+    if not has(memory, fn_name) then
+        error("memory." .. fn_name .. " not available on this build")
+    end
+    return memory[fn_name](address)
 end
 
 local function read_memory_widthed(domain, address, width)
@@ -560,6 +596,25 @@ local function run_unpaused(fn)
     if was_paused then client.unpause() end
     local ok, result = pcall(fn)
     if was_paused and CAPS.pause then client.pause() end
+    if not ok then error(result, 0) end
+    return result
+end
+
+-- Optionally run fn at maximum emulation speed: crank client.speedmode and
+-- disable rendering, then restore. keep_video leaves rendering ON — required
+-- when screenshots are captured mid-run (an invisible frame captures blank).
+-- BizHawk has no getters for either setting, so "restore" means the defaults
+-- (100%, visible), not whatever the user had dialed in — documented in the
+-- tool descriptions.
+local function maybe_turbo(turbo, keep_video, fn)
+    if not turbo then return fn() end
+    local can_speed = CAPS.speedmode
+    local can_invis = CAPS.invisibleemulation and not keep_video
+    if can_speed then client.speedmode(6400) end
+    if can_invis then client.invisibleemulation(true) end
+    local ok, result = pcall(fn)
+    if can_invis then client.invisibleemulation(false) end
+    if can_speed then client.speedmode(100) end
     if not ok then error(result, 0) end
     return result
 end
@@ -614,6 +669,7 @@ local function cmd_play_input_sequence(p)
     end
 
     run_unpaused(function()
+    maybe_turbo(p.turbo, screenshot_every ~= nil, function()
     for i, frame in ipairs(frames) do
         local buttons = (type(frame) == "table" and frame.buttons) or {}
         local player  = (type(frame) == "table" and frame.player) or 1
@@ -649,6 +705,7 @@ local function cmd_play_input_sequence(p)
         if stopped then break end
     end
     end)
+    end)
 
     return {
         played = count,
@@ -673,11 +730,13 @@ local function cmd_frame_advance(p)
     if not CAPS.frameadvance then error("emu.frameadvance not available") end
     local n = p.count or 1
     run_unpaused(function()
-        for _ = 1, n do
-            emu.frameadvance()
-            trace_tick()
-            osd_tick()
-        end
+        maybe_turbo(p.turbo, false, function()
+            for _ = 1, n do
+                emu.frameadvance()
+                trace_tick()
+                osd_tick()
+            end
+        end)
     end)
     return CAPS.framecount and emu.framecount() or nil
 end
@@ -746,17 +805,19 @@ local function cmd_wait_for_memory(p)
     local matched = satisfied(current)
     if not matched then
         run_unpaused(function()
-            while waited < timeout do
-                emu.frameadvance()
-                trace_tick()
-                osd_tick()
-                waited = waited + 1
-                current = read_memory_widthed(p.domain, address, width)
-                if satisfied(current) then
-                    matched = true
-                    break
+            maybe_turbo(p.turbo, false, function()
+                while waited < timeout do
+                    emu.frameadvance()
+                    trace_tick()
+                    osd_tick()
+                    waited = waited + 1
+                    current = read_memory_widthed(p.domain, address, width)
+                    if satisfied(current) then
+                        matched = true
+                        break
+                    end
                 end
-            end
+            end)
         end)
     end
     return {
@@ -765,6 +826,46 @@ local function cmd_wait_for_memory(p)
         value = current,
         final_framecount = CAPS.framecount and emu.framecount() or nil,
     }
+end
+
+-- Batch of labeled reads in one round-trip. p.reads = array of
+-- {name, address, width?, domain?}. Returns { [name] = value, ... }.
+local function cmd_read_many(p)
+    local reads = assert(p.reads, "reads required (array of {name, address, width?, domain?})")
+    if type(reads) ~= "table" then error("reads must be an array") end
+    local out = {}
+    for _, spec in ipairs(reads) do
+        local name = assert(spec.name, "each read needs a name")
+        local addr = assert(spec.address, "address required for read '" .. tostring(name) .. "'")
+        out[name] = read_memory_widthed(spec.domain, addr, spec.width or "u8")
+    end
+    return out
+end
+
+-- Decode `count` fixed-stride records into labeled field tables.
+-- p = {base, stride, count, fields = {{name, offset, width?}, ...}, domain?}
+local function cmd_read_struct_array(p)
+    local base   = assert(p.base,   "base required")
+    local stride = assert(p.stride, "stride required")
+    local count  = assert(p.count,  "count required")
+    if count < 1 then error("count must be >= 1 (got " .. tostring(count) .. ")") end
+    if stride < 1 then error("stride must be >= 1 (got " .. tostring(stride) .. ")") end
+    local fields = assert(p.fields, "fields required (array of {name, offset, width?})")
+    if count * #fields > 4096 then
+        error("count * #fields exceeds 4096 values per call — chunk the request")
+    end
+    return in_domain(p.domain, function()
+        local out = {}
+        for i = 0, count - 1 do
+            local rec = { _index = i }
+            for _, f in ipairs(fields) do
+                local name = assert(f.name, "each field needs a name")
+                rec[name] = read_width(base + i * stride + assert(f.offset, "offset required"), f.width or "u8")
+            end
+            out[i + 1] = rec
+        end
+        return out
+    end)
 end
 
 -- ── Dispatch table ──────────────────────────────────────────────────────────
@@ -791,6 +892,8 @@ local HANDLERS = {
     save_state           = cmd_save_state,
     load_state           = cmd_load_state,
     wait_for_memory      = cmd_wait_for_memory,
+    read_many            = cmd_read_many,
+    read_struct_array    = cmd_read_struct_array,
 }
 
 local function dispatch(cmd)

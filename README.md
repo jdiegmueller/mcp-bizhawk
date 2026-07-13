@@ -157,11 +157,13 @@ The server speaks standard MCP over stdio. Run `mcp-bizhawk` and connect any MCP
 | `bizhawk_write8` / `bizhawk_write16` / `bizhawk_write32` | Write to memory |
 | `bizhawk_read_range` | Read up to 4096 bytes as a byte array |
 | `bizhawk_write_range` | Write up to 4096 bytes from a byte array |
+| `bizhawk_read_many` | Labeled batch reads (`{name, address, width, domain}` specs) in one round-trip |
+| `bizhawk_read_struct_array` | Decode N fixed-stride records (entity tables) into labeled fields in one call |
 | `bizhawk_press_buttons` | Set joypad state for one player; keys are button names, values booleans |
 | `bizhawk_frame_advance` | Step the emulator by N frames |
 | `bizhawk_pause` / `bizhawk_unpause` | Pause / resume emulation |
 | `bizhawk_reset` | Reset the loaded core |
-| `bizhawk_screenshot` | Save a PNG of the current display to a path |
+| `bizhawk_screenshot` | Capture the current display — returns the PNG inline as an image block; optional path to also choose where it's saved |
 | `bizhawk_save_state` / `bizhawk_load_state` | Save / load emulator state to a file path |
 
 All memory r/w tools take an optional `domain` parameter — if omitted, the active "current" memory domain is used. Use `bizhawk_list_memory_domains` to discover the names available on the loaded core.

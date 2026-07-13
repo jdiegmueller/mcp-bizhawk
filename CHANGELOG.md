@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Inline screenshots.** `bizhawk_screenshot` now returns the PNG as an
+  inline image content block (and `path` is optional — defaults to a temp
+  file). Agents see the screen in the tool response, no filesystem access
+  needed.
+- **`bizhawk_read_many`** — labeled batch reads (`{name, address, width,
+  domain}` specs) in one bridge round-trip; output is `name = value` lines
+  in request order.
+- **`bizhawk_read_struct_array`** — decode N fixed-stride records (entity
+  tables) into labeled fields in one call. Cap: count × fields ≤ 4096.
+- **Signed + big-endian widths everywhere** — the width set is now
+  u8/s8/u16/s16/u32/s32 plus `_be` variants, accepted by `read_many`,
+  `read_struct_array`, `observe_memory`, `stop_on_memory_change`, and
+  `wait_for_memory`.
+- **`turbo` option** on `bizhawk_frame_advance`, `bizhawk_wait_for_memory`,
+  and `bizhawk_play_input_sequence` — runs the batch at max speed with
+  rendering disabled (rendering stays on when screenshots are requested);
+  restores 100% speed + visible rendering afterwards.
+- **Test suite** — `npm test` drives the real tool layer through an MCP
+  in-memory client against a `FakeBridge` that speaks the Lua bridge's TCP
+  protocol; plus `scripts/smoke-live.cjs` for verification against a live
+  BizHawk.
 - **Genesis-friendly big-endian memory access.** `bizhawk_read16`/`read32`/
   `write16`/`write32` take an optional `byteorder: "le" | "be"` parameter
   (default `"le"`, backward compatible), mapped to BizHawk's native

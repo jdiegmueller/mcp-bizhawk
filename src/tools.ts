@@ -6,6 +6,9 @@ import {
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { BizhawkServer } from "./bizhawk.js";
 import { VERSION } from "./version.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const VALID_BUTTONS = [
   "A", "B", "X", "Y",                 // Face buttons
@@ -45,6 +48,11 @@ const BYTEORDER_PARAM_DESC =
   "Use 'be' on big-endian systems — notably the Genesis/Mega Drive 68K, where game values " +
   "are stored big-endian and a little-endian read returns byte-swapped garbage. " +
   "Requires the bridge's memory_read/write_*_be capability (present on standard BizHawk builds).";
+
+const WIDTH_ENUM = ["u8", "s8", "u16", "s16", "u32", "s32", "u16_be", "s16_be", "u32_be", "s32_be"];
+const WIDTH_PARAM_DESC =
+  "Read width and signedness: u/s 8/16/32 bits. Plain u16/u32/s16/s32 are little-endian; " +
+  "'_be' variants are big-endian (use these on Genesis/Mega Drive 68K). Default 'u8'.";
 
 // Frame-locked commands take ~16.7ms per emulated frame at 60Hz. Scale the
 // RPC timeout with the requested frame count (20ms/frame headroom + fixed
@@ -363,8 +371,8 @@ const TOOLS: Tool[] = [
               },
               width: {
                 type: "string",
-                enum: ["u8", "u16", "u32", "u16_be", "u32_be"],
-                description: "Read width. 'u16'/'u32' are little-endian; 'u16_be'/'u32_be' are big-endian (use these on Genesis/Mega Drive).",
+                enum: WIDTH_ENUM,
+                description: WIDTH_PARAM_DESC,
               },
             },
           },
@@ -388,10 +396,15 @@ const TOOLS: Tool[] = [
             },
             width: {
               type: "string",
-              enum: ["u8", "u16", "u32", "u16_be", "u32_be"],
-              description: "Read width for the monitored value ('_be' variants are big-endian — use on Genesis/Mega Drive). Must match the underlying field's actual width (a u8 watch on a u16 field will only trigger on low-byte changes).",
+              enum: WIDTH_ENUM,
+              description: WIDTH_PARAM_DESC,
             },
           },
+        },
+        turbo: {
+          type: "boolean",
+          default: false,
+          description: "Run at maximum emulation speed with rendering disabled (rendering stays ON if screenshots are requested). Restores 100% speed + visible rendering afterwards — note this resets any custom speed the user had set. Wall-clock speedup is typically 10-50×.",
         },
       },
       additionalProperties: false,
@@ -429,6 +442,11 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         count: { type: "integer", minimum: 1, default: 1, description: "Number of frames to advance (≥1, default 1). Latency scales linearly: ~16ms per frame at 60Hz. New framecount = previous framecount + count." },
+        turbo: {
+          type: "boolean",
+          default: false,
+          description: "Run at maximum emulation speed with rendering disabled (rendering stays ON if screenshots are requested). Restores 100% speed + visible rendering afterwards — note this resets any custom speed the user had set. Wall-clock speedup is typically 10-50×.",
+        },
       },
       additionalProperties: false,
     },
@@ -445,15 +463,14 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_screenshot",
     description:
-      "PURPOSE: Save a PNG screenshot of the current emulator display to the given file path. " +
-      "USAGE: Use to capture visible game state for inspection, comparison across savestates, or sequence documentation. The image captures whatever the emulator is currently rendering — to capture a specific game state, pause / advance frames / load state first to get the frame you want, then call this. BizHawk's underlying client.screenshot requires an explicit path (no temp-file fallback). " +
-      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists, with no prompt or backup. Returns an error if the parent directory doesn't exist, the path isn't writable, or the loaded core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info first. " +
-      "RETURNS: Single line 'Screenshot saved: PATH'.",
+      "PURPOSE: Capture a PNG screenshot of the current emulator display and return it INLINE as an image content block (also saved to disk). " +
+      "USAGE: The primary 'look at the screen' tool — call it whenever you need visual confirmation of game state. To capture a specific state, pause / advance frames / load state first. Pass `path` only if you want the PNG at a specific location; otherwise a temp file is used. For screenshots DURING an input sequence use bizhawk_play_input_sequence's screenshot_every instead. " +
+      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists. The image is read back from disk and inlined; if the file can't be read (e.g. BizHawk runs on a different filesystem than this server), the tool still succeeds and returns the path with a note instead of the image. Returns an error if the parent directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info. " +
+      "RETURNS: A text block 'Screenshot saved: PATH' followed by an inline PNG image content block.",
     inputSchema: {
       type: "object",
-      required: ["path"],
       properties: {
-        path: { type: "string", description: "Absolute filesystem path to write the PNG to (e.g. C:/temp/snap.png on Windows, /tmp/snap.png on Linux/macOS). Parent directory must exist. File is overwritten without prompt if present." },
+        path: { type: "string", description: "Optional absolute filesystem path for the PNG (e.g. /tmp/snap.png). Omit to use an auto-generated temp file. Parent directory must exist. Overwritten without prompt if present." },
       },
       additionalProperties: false,
     },
@@ -509,9 +526,9 @@ const TOOLS: Tool[] = [
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
         width: {
           type: "string",
-          enum: ["u8", "u16", "u32", "u16_be", "u32_be"],
+          enum: WIDTH_ENUM,
           default: "u8",
-          description: "Read width for the watched value ('_be' variants are big-endian — use on Genesis/Mega Drive). Default 'u8'.",
+          description: WIDTH_PARAM_DESC,
         },
         condition: {
           type: "string",
@@ -529,6 +546,77 @@ const TOOLS: Tool[] = [
           default: 600,
           description: "Maximum frames to wait (default 600 ≈ 10 seconds of game time at 60Hz). On expiry the call returns matched=false rather than erroring. The RPC timeout scales with this value automatically.",
         },
+        turbo: {
+          type: "boolean",
+          default: false,
+          description: "Run at maximum emulation speed with rendering disabled (rendering stays ON if screenshots are requested). Restores 100% speed + visible rendering afterwards — note this resets any custom speed the user had set. Wall-clock speedup is typically 10-50×.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_read_many",
+    description:
+      "PURPOSE: Read a labeled set of memory values in ONE bridge round-trip and return them as 'name = value' lines. " +
+      "USAGE: The default way to poll game state (HP, coordinates, timers, flags) between actions — one call instead of N sequential read8/read16 calls, and the labels keep the output self-documenting. For values laid out as fixed-stride records use bizhawk_read_struct_array; for observation DURING an input sequence use play_input_sequence's observe_memory. " +
+      "BEHAVIOR: No side effects — pure reads, all performed within the same emulated frame. Returns an error if any entry names an unknown domain, an invalid width, or an out-of-range address (the whole call fails — no partial results). " +
+      "RETURNS: One line per read, in request order: 'NAME = VAL_DEC (0xVAL_HEX)' (hex omitted for negative signed values).",
+    inputSchema: {
+      type: "object",
+      required: ["reads"],
+      properties: {
+        reads: {
+          type: "array",
+          minItems: 1,
+          maxItems: 128,
+          description: "Reads to perform. Each: {name, address, width?, domain?}.",
+          items: {
+            type: "object",
+            required: ["name", "address"],
+            additionalProperties: false,
+            properties: {
+              name:    { type: "string", description: "Label for this value in the output. Choose something semantic (e.g. 'hp', 'puck_x')." },
+              address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain (0-based per-domain)." },
+              width:   { type: "string", enum: WIDTH_ENUM, default: "u8", description: WIDTH_PARAM_DESC },
+              domain:  { type: "string", description: DOMAIN_PARAM_DESC },
+            },
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_read_struct_array",
+    description:
+      "PURPOSE: Decode an array of fixed-stride records (entity tables, object lists) from emulator memory into labeled per-record values, in ONE round-trip. " +
+      "USAGE: For game entity tables laid out as N consecutive structs — e.g. 12 player structs of 0x80 bytes each starting at a base address. Define each field once ({name, offset, width}) and get every record decoded. For scattered unrelated addresses use bizhawk_read_many instead. " +
+      "BEHAVIOR: No side effects — pure reads within one emulated frame. Hard cap: count × fields ≤ 4096 values per call (chunk larger tables). Returns an error on unknown domain, invalid width, or any out-of-range read. " +
+      "RETURNS: Header 'N records @ base ADDR_HEX stride S:' then one line per record: '[i] name=value name=value ...' with fields in request order.",
+    inputSchema: {
+      type: "object",
+      required: ["base", "stride", "count", "fields"],
+      properties: {
+        base:   { type: "integer", minimum: 0, description: "Byte offset of record 0 within the chosen memory domain." },
+        stride: { type: "integer", minimum: 1, description: "Bytes between consecutive records (record i starts at base + i*stride)." },
+        count:  { type: "integer", minimum: 1, description: "Number of records to decode. count × fields must be ≤ 4096." },
+        fields: {
+          type: "array",
+          minItems: 1,
+          description: "Fields to decode from each record.",
+          items: {
+            type: "object",
+            required: ["name", "offset"],
+            additionalProperties: false,
+            properties: {
+              name:   { type: "string", description: "Label for this field in the output." },
+              offset: { type: "integer", minimum: 0, description: "Byte offset of the field within each record." },
+              width:  { type: "string", enum: WIDTH_ENUM, default: "u8", description: WIDTH_PARAM_DESC },
+            },
+          },
+        },
+        domain: { type: "string", description: DOMAIN_PARAM_DESC },
       },
       additionalProperties: false,
     },
@@ -657,6 +745,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         if (p.screenshot_prefix      !== undefined) params.screenshot_prefix      = p.screenshot_prefix;
         if (p.observe_memory         !== undefined) params.observe_memory         = p.observe_memory;
         if (p.stop_on_memory_change  !== undefined) params.stop_on_memory_change  = p.stop_on_memory_change;
+        if (p.turbo                  !== undefined) params.turbo                  = p.turbo;
         // Total EMULATED frames (each entry's `hold` counts N) drives the timeout.
         const totalFrames = (p.frames as { hold?: number }[]).reduce(
           (sum, f) => sum + (f.hold ?? 1), 0,
@@ -699,7 +788,6 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [
           { type: "text", text: lines.join("\n") },
         ];
-        const fs = await import("node:fs");
         for (const o of obs) {
           if (!o.path) continue;
           try {
@@ -724,7 +812,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       case "bizhawk_reset":         await bh.call("reset");          return ok("Core reset");
       case "bizhawk_frame_advance": {
         const count = (p.count as number) ?? 1;
-        const f = await bh.call<number>("frame_advance", { count }, { timeoutMs: frameTimeout(count) });
+        const faParams: Record<string, unknown> = { count };
+        if (p.turbo !== undefined) faParams.turbo = p.turbo;
+        const f = await bh.call<number>("frame_advance", faParams, { timeoutMs: frameTimeout(count) });
         return ok(`Advanced ${count} frame(s). Framecount: ${f}`);
       }
 
@@ -735,6 +825,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         if (p.condition      !== undefined) params.condition      = p.condition;
         if (p.value          !== undefined) params.value          = p.value;
         if (p.timeout_frames !== undefined) params.timeout_frames = p.timeout_frames;
+        if (p.turbo          !== undefined) params.turbo          = p.turbo;
         const r = await bh.call<{
           matched: boolean;
           frames_waited: number;
@@ -747,9 +838,45 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         );
       }
 
+      case "bizhawk_read_many": {
+        const reads = p.reads as { name: string }[];
+        const r = await bh.call<Record<string, number>>("read_many", { reads });
+        const lines = reads.map((s) => {
+          const v = r[s.name];
+          return `${s.name} = ${typeof v === "number" && v < 0 ? v : fmtHex(v)}`;
+        });
+        return ok(lines.join("\n"));
+      }
+
+      case "bizhawk_read_struct_array": {
+        const fields = p.fields as { name: string }[];
+        const r = await bh.call<Record<string, number>[]>("read_struct_array", {
+          base: p.base, stride: p.stride, count: p.count, fields, ...dom(),
+        });
+        const lines = r.map(
+          (rec) => `[${rec._index}] ` + fields.map((f) => `${f.name}=${rec[f.name]}`).join(" "),
+        );
+        return ok(
+          `${r.length} records @ base ${addrHex(p.base as number)} stride ${p.stride}:\n${lines.join("\n")}`,
+        );
+      }
+
       case "bizhawk_screenshot": {
-        const path = await bh.call<string>("screenshot", { path: p.path });
-        return ok(`Screenshot saved: ${path}`);
+        const target = (p.path as string | undefined)
+          ?? path.join(os.tmpdir(), `mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
+        const saved = await bh.call<string>("screenshot", { path: target });
+        let bytes: Buffer;
+        try {
+          bytes = fs.readFileSync(saved);
+        } catch (err) {
+          return ok(`Screenshot saved: ${saved} (could not inline image: ${(err as Error).message})`);
+        }
+        return {
+          content: [
+            { type: "text" as const, text: `Screenshot saved: ${saved}` },
+            { type: "image" as const, data: bytes.toString("base64"), mimeType: "image/png" },
+          ],
+        };
       }
 
       case "bizhawk_save_state": {
