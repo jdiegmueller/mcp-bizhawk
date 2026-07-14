@@ -1,5 +1,35 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.14.1
+-- v0.15.1
+--
+-- v0.15.1 changes (drop phys_trace eval_lua workaround):
+--   * Removed the `_G.phys_trace_start/stop/status` global aliases. They existed
+--     only so eval_lua chunks could reach the physics-sync trace before it had
+--     dedicated MCP tools; the server now exposes first-class
+--     `bizhawk_phys_trace_*` tools (server ≥ 0.5.7-jd) that drive the same
+--     HANDLERS entries directly. Hook logic, addresses, and CSV format unchanged.
+--
+-- v0.15.0 changes (NHL94 physics-sync trace — dup-free per-tick capture):
+--   * New phys_trace_start/phys_trace_stop/phys_trace_status commands. On
+--     retail nhl94.gen ONLY (MD5 8356B3F0…, hash-guarded), these register two
+--     event.on_bus_exec hooks in the Gameloop and write ONE CSV row per
+--     updateplayers PASS (= one physics tick), NOT per video frame:
+--       - @0x7958 (the `move.w $B03E,$B040` snapshot): latch D7 = elapsed
+--         vblanks = $B03E-$B040, read BEFORE the snapshot zeroes it. This is
+--         the per-pass step multiplier updateplayers applies (`mulu D7,D4` at
+--         0xAC06). Verified 2026-07-13: reg D7 here == the applied multiplier
+--         on 40/40 fully-captured passes; reading it at the emit point instead
+--         gives the NEXT pass's pending count (off-by-one).
+--       - @0x7966 (first insn after `bsr updateplayers` returns): write the
+--         POST-update slot-2 16.16 pos (x/xsub,y/ysub) + vel (xv,yv) + fdir +
+--         P1 pad + the latched D7 + a monotonic tick counter.
+--     Why: video frames != physics ticks. A lag pass (D7=2) runs two physics
+--     updates but renders one frame, so the per-video-frame trace_tick()
+--     under-samples it. This hook is frame-exact for trace-diffing the sim.
+--   * While a phys-sync trace is active, the per-video-frame trace_tick() is a
+--     no-op — the exec hook is the oracle; trace_tick() remains the fallback
+--     when phys-sync is off or the core lacks event.on_bus_exec.
+--   * Default file /tmp/nhl94_phys_<port>.csv (own file, does not touch the
+--     rich 12-slot /tmp/nhl94_trace_<port>.csv).
 --
 -- v0.14.2 changes (banner cosmetics):
 --   * HELLO banner no longer wrapped in "***" — logs as a plain
@@ -257,7 +287,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.14.2",
+    version    = "0.15.1",
     pause_safe = true,
 }
 
@@ -301,7 +331,7 @@ end
 -- BizHawk instances — one per mcp-bizhawk server (opencode 8766, Claude Code
 -- 8767) — each get their own trace instead of clobbering a shared file.
 
-local TRACE_PATH
+local TRACE_PATH, PHYS_PATH
 do
     local port = nil
     if comm and has(comm, "socketServerGetPort") then
@@ -310,6 +340,8 @@ do
     end
     TRACE_PATH = port and ("/tmp/nhl94_trace_" .. port .. ".csv")
                       or  "/tmp/nhl94_trace.csv"
+    PHYS_PATH  = port and ("/tmp/nhl94_phys_"  .. port .. ".csv")
+                      or  "/tmp/nhl94_phys.csv"
 end
 local TRACE_FLUSH = 60
 
@@ -360,6 +392,21 @@ local trace_fh = nil
 local trace_frames = 0
 local trace_last_frame = -1
 local trace_current_path = nil   -- path of the open (or last) trace file
+
+-- ── NHL94 physics-sync trace state (v0.15.0) ─────────────────────────────────
+-- Declared here (before trace_tick) so trace_tick can read phys_fh as an
+-- upvalue and no-op while a phys-sync capture owns the CSV. See the phys
+-- callbacks/commands further down for the full explanation.
+local RETAIL_MD5    = "8356B3F0D091B9CC441E2FF8721AD063"
+local PHYS_SLOT2    = SORTCORDS + 2 * SCSIZE   -- 0xFFB14A: home C (fixture skater)
+local PHYS_ADDR_LATCH = 0x7958   -- `move.w $B03E,$B040` — D7 still live here
+local PHYS_ADDR_EMIT  = 0x7966   -- first insn after `bsr updateplayers` returns
+local phys_fh          = nil
+local phys_path        = nil
+local phys_tick        = 0       -- monotonic physics-tick counter (1 per pass)
+local phys_latch_d7    = 0       -- D7 latched at 0x7958 for the current pass
+local phys_guid_latch  = nil
+local phys_guid_emit   = nil
 
 local function trace_pad_string(port)
     local j = joypad.get(port)
@@ -412,6 +459,10 @@ end
 
 local function trace_tick()
     if not trace_fh then return end
+    -- While a physics-sync capture is active, its exec hook is the oracle
+    -- (one row per physics tick, not per video frame) — the per-video-frame
+    -- writer no-ops so the two can't interleave. This is the fallback path.
+    if phys_fh then return end
     -- One row per emulated frame, no matter how many call sites fire: the
     -- main loop's emu.yield() re-enters more than once per frame (and spins
     -- while paused), and command handlers now call this after each
@@ -422,6 +473,47 @@ local function trace_tick()
     trace_fh:write(trace_row(fc) .. "\n")
     trace_frames = trace_frames + 1
     if trace_frames % TRACE_FLUSH == 0 then trace_fh:flush() end
+end
+
+-- ── NHL94 physics-sync trace hooks (v0.15.0) ─────────────────────────────────
+-- Two exec hooks in the Gameloop turn a per-VIDEO-FRAME trace into a per-
+-- PHYSICS-TICK trace. Retail nhl94.gen Gameloop (0x794E..0x7966):
+--   0x794E  move.w ($B03E),D7      ; D7 = vblank counter
+--   0x7952  sub.w  ($B040),D7      ; D7 = elapsed vblanks (the step multiplier)
+--   0x7956  beq    $794E           ; spin until D7 != 0
+--   0x7958  move.w ($B03E),($B040) ; snapshot — after this, $B03E-$B040 == 0
+--   0x795E  bsr    periodicevents  ; preserves D7
+--   0x7962  bsr    updateplayers   ; applies D7 (`mulu D7,D4` @0xAC06)
+--   0x7966  tst.w  ($DECC)         ; <- back in Gameloop, physics done
+-- So D7 must be latched at 0x7958 (before the snapshot zeroes the diff); the
+-- post-update slot state is emitted at 0x7966. Verified 2026-07-13.
+
+local function phys_latch_cb()
+    -- Exec hooks fire BEFORE the instruction runs, so at 0x7958 the snapshot
+    -- has NOT happened yet and $B03E-$B040 is still the elapsed-vblank D7.
+    phys_latch_d7 = (tr_u16(0xFFB03E) - tr_u16(0xFFB040)) & 0xFFFF
+end
+
+local function phys_emit_cb()
+    if not phys_fh then return end
+    -- The 0x7956 spin-wait guarantees D7>=1 for every real pass, so a latched
+    -- D7 of 0 means capture began BETWEEN the 0x7958 latch and this 0x7966
+    -- emit of the SAME pass — a partial first pass with no valid multiplier.
+    -- Skip it so tick 1 is a complete, D7-valid physics tick.
+    if phys_latch_d7 == 0 then return end
+    phys_tick = phys_tick + 1
+    local b = PHYS_SLOT2
+    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d\n",
+        phys_tick, emu.framecount(), phys_latch_d7, trace_pad_string(1),
+        tr_s16(b + 0x00), tr_u16(b + 0x02),      -- X 16.16: whole, sub
+        tr_s16(b + 0x14), tr_u16(b + 0x16),      -- Y 16.16: whole, sub
+        tr_s16(b + 0x28), tr_s16(b + 0x2A),      -- xv, yv
+        tr_u16(b + 0x54)))                       -- fdir
+    if phys_tick % TRACE_FLUSH == 0 then phys_fh:flush() end
+end
+
+local function phys_header()
+    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir"
 end
 
 -- ── Live state OSD ──────────────────────────────────────────────────────────
@@ -1684,6 +1776,57 @@ local function cmd_trace_status(p)
              frames = trace_frames, osd = TRACE_OSD }
 end
 
+-- ── Physics-sync trace control (v0.15.0) ─────────────────────────────────────
+-- Retail nhl94.gen only: registers the two Gameloop exec hooks (0x7958 latch,
+-- 0x7966 emit) and writes one row per physics tick to PHYS_PATH. See the
+-- phys_latch_cb / phys_emit_cb comments above for the address rationale.
+local function phys_unregister()
+    if phys_guid_latch then pcall(function() event.unregisterbyid(phys_guid_latch) end); phys_guid_latch = nil end
+    if phys_guid_emit  then pcall(function() event.unregisterbyid(phys_guid_emit)  end); phys_guid_emit  = nil end
+end
+
+local function cmd_phys_trace_start(p)
+    if not (CAPS.on_bus_exec and CAPS.unregisterbyid) then
+        error("physics-sync trace needs event.on_bus_exec on this core")
+    end
+    -- Hash guard: the hook addresses are retail nhl94.gen offsets — refuse to
+    -- capture garbage from any other ROM.
+    local hash = CAPS.gameinfo_getromhash and gameinfo.getromhash() or ""
+    if hash:upper() ~= RETAIL_MD5 then
+        error("physics-sync trace is retail nhl94.gen only (MD5 " .. RETAIL_MD5
+            .. "); loaded ROM hash is " .. tostring(hash))
+    end
+    local path = p.path or PHYS_PATH
+    if not path then error("no path given and no default PHYS_PATH configured") end
+    local fh, open_err = io.open(path, "w")
+    if not fh then error("could not open phys-sync file: " .. tostring(open_err)) end
+    phys_unregister()
+    if phys_fh then phys_fh:flush(); phys_fh:close() end
+    phys_fh = fh
+    phys_fh:write(phys_header() .. "\n")
+    phys_path = path
+    phys_tick = 0
+    phys_latch_d7 = 0
+    phys_guid_latch = event.on_bus_exec(phys_latch_cb, PHYS_ADDR_LATCH, "phys_latch")
+    phys_guid_emit  = event.on_bus_exec(phys_emit_cb,  PHYS_ADDR_EMIT,  "phys_emit")
+    return { path = path,
+             latch_addr = string.format("0x%X", PHYS_ADDR_LATCH),
+             emit_addr  = string.format("0x%X", PHYS_ADDR_EMIT) }
+end
+
+local function cmd_phys_trace_stop(p)
+    phys_unregister()
+    local ticks = phys_tick
+    local pth   = phys_path
+    if phys_fh then phys_fh:flush(); phys_fh:close(); phys_fh = nil end
+    return { path = pth, ticks = ticks }
+end
+
+local function cmd_phys_trace_status(p)
+    return { active = phys_fh ~= nil, path = phys_path,
+             ticks = phys_tick, latched_d7 = phys_latch_d7 }
+end
+
 -- ── Dispatch table ──────────────────────────────────────────────────────────
 
 local HANDLERS = {
@@ -1731,6 +1874,9 @@ local HANDLERS = {
     trace_start          = cmd_trace_start,
     trace_stop           = cmd_trace_stop,
     trace_status         = cmd_trace_status,
+    phys_trace_start     = cmd_phys_trace_start,
+    phys_trace_stop      = cmd_phys_trace_stop,
+    phys_trace_status    = cmd_phys_trace_status,
     osd_message          = cmd_osd_message,
 }
 

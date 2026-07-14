@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [0.5.7-jd] - 2026-07-13
+
+### Added
+
+- **`bizhawk_phys_trace_start` / `_stop` / `_status` / `_tail`** — first-class
+  MCP tools for the bridge's physics-sync trace (one CSV row per NHL94
+  `updateplayers` physics tick, each carrying the per-pass D7 step multiplier),
+  replacing the `eval_lua` global-alias workaround. `_start` is retail
+  nhl94.gen ONLY (hash-guarded, requires `event.on_bus_exec`) and suppresses
+  the per-video-frame `bizhawk_trace_*` writer while active; `_stop` re-enables
+  it. Columns: `tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir`; default path
+  `/tmp/nhl94_phys_<port>.csv`. Requires bridge_JD.lua ≥ 0.15.0.
+
 ## [0.5.6-jd] - 2026-07-13
 
 > Version note: jumps from 0.5.2-jd directly to 0.5.6-jd. The numbers

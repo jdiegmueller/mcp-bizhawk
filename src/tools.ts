@@ -1048,6 +1048,54 @@ const TOOLS: Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "bizhawk_phys_trace_start",
+    description:
+      "PURPOSE: Start the bridge's physics-sync trace — one CSV row per NHL94 `updateplayers` physics tick (NOT per video frame), each carrying the per-pass D7 step multiplier latched inside the retail Gameloop. " +
+      "USAGE: The right trace when you need physics-tick resolution and the actual D7 sub-step count per tick (e.g. speed/acceleration work), which the per-frame bizhawk_trace_* dump cannot expose. Start → drive input (bizhawk_play_input_sequence) → bizhawk_phys_trace_stop. " +
+      "BEHAVIOR: RETAIL nhl94.gen ONLY — hash-guarded (MD5 8356B3F0…), so it errors on any other ROM, and errors on cores without event.on_bus_exec. Registers two bus-exec hooks in the Gameloop. While active it SUPPRESSES the per-video-frame bizhawk_trace_* writer. DESTRUCTIVE TO TARGET FILE: opens `path` in write mode (truncates). " +
+      "RETURNS: 'Physics-sync trace started → PATH (latch ADDR, emit ADDR)'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path for the CSV. Omit to reuse the bridge default /tmp/nhl94_phys_<port>.csv." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_phys_trace_stop",
+    description:
+      "PURPOSE: Stop the physics-sync trace and flush/close the file. " +
+      "USAGE: End-of-experiment bookend for bizhawk_phys_trace_start; also re-enables the per-video-frame bizhawk_trace_* writer. " +
+      "BEHAVIOR: Removes the bus-exec hooks, flushes buffered rows, closes the file (the CSV remains on disk). Calling with no active phys trace is a no-op. " +
+      "RETURNS: 'Physics-sync trace stopped after N ticks (PATH)'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_phys_trace_status",
+    description:
+      "PURPOSE: Report whether the physics-sync trace is active, its file path, tick count, and last latched D7. " +
+      "USAGE: Find the CSV path before reading it (bizhawk_phys_trace_tail or direct file access); sanity-check that the trace is running and that D7 is being latched before an experiment. " +
+      "BEHAVIOR: No side effects. " +
+      "RETURNS: 'Physics-sync trace active|inactive: PATH, N ticks, last D7: N'.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "bizhawk_phys_trace_tail",
+    description:
+      "PURPOSE: Return the physics-sync CSV's header line plus its last N rows — a quick look at recent physics ticks without leaving the tool interface. " +
+      "USAGE: Spot-check per-tick D7 and slot-2 state right after a play_input_sequence. The phys CSV is narrow (11 columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir), so a tail reads cleanly here. " +
+      "BEHAVIOR: No side effects. Reads the file from the server's filesystem (requires server and BizHawk to share one — true locally). Rows are buffered, so the very newest may lag slightly. Returns an error if the phys trace has never been started or the file is unreadable. " +
+      "RETURNS: 'PATH (N ticks, active: yes|no)' + the CSV header + the last N data rows.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rows: { type: "integer", minimum: 1, maximum: 200, default: 10, description: "How many trailing data rows to return. Default 10." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 function ok(text: string) {
@@ -1605,6 +1653,39 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const tail = lines.slice(Math.max(1, lines.length - rows));
         return ok([
           `${st.path} (${lines.length - 1} rows, active: ${st.active ? "yes" : "no"})`,
+          header,
+          ...tail,
+        ].join("\n"));
+      }
+
+      case "bizhawk_phys_trace_start": {
+        const params: Record<string, unknown> = {};
+        if (p.path !== undefined) params.path = p.path;
+        const r = await bh.call<{ path: string; latch_addr: string; emit_addr: string }>(
+          "phys_trace_start", params);
+        return ok(`Physics-sync trace started → ${r.path} (latch ${r.latch_addr}, emit ${r.emit_addr})`);
+      }
+      case "bizhawk_phys_trace_stop": {
+        const r = await bh.call<{ path?: string; ticks: number }>("phys_trace_stop");
+        return ok(`Physics-sync trace stopped after ${r.ticks} ticks${r.path ? ` (${r.path})` : ""}`);
+      }
+      case "bizhawk_phys_trace_status": {
+        const r = await bh.call<{ active: boolean; path?: string; ticks: number; latched_d7: number }>(
+          "phys_trace_status");
+        return ok(
+          `Physics-sync trace ${r.active ? "active" : "inactive"}: ${r.path ?? "(no file)"}, ` +
+          `${r.ticks} ticks, last D7: ${r.latched_d7}`);
+      }
+      case "bizhawk_phys_trace_tail": {
+        const st = await bh.call<{ active: boolean; path?: string }>("phys_trace_status");
+        if (!st.path) throw new Error("no phys trace file — the physics-sync trace has never been started on this bridge");
+        const rows = (p.rows as number) ?? 10;
+        const text = fs.readFileSync(st.path, "utf8");
+        const lines = text.trimEnd().split("\n");
+        const header = lines[0];
+        const tail = lines.slice(Math.max(1, lines.length - rows));
+        return ok([
+          `${st.path} (${lines.length - 1} ticks, active: ${st.active ? "yes" : "no"})`,
           header,
           ...tail,
         ].join("\n"));
