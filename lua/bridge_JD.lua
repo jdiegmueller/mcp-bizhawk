@@ -1,5 +1,14 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.15.1
+-- v0.16.0
+--
+-- v0.16.0 changes (phys_trace heading fraction):
+--   * phys_trace now emits a trailing `frac` column = the low word of the
+--     32-bit skater heading longword @ slot struct +0x54. The octant (already
+--     emitted as `fdir`) is the high word @+0x54; `frac` is @+0x56. Appended
+--     LAST so existing column order/values are unchanged. For held-Down from
+--     rest, frac advances +0x3000 per tick and carries into the octant on
+--     16-bit overflow (verified against retail nhl94.gen).
+--   * CSV columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac.
 --
 -- v0.15.1 changes (drop phys_trace eval_lua workaround):
 --   * Removed the `_G.phys_trace_start/stop/status` global aliases. They existed
@@ -287,7 +296,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.15.1",
+    version    = "0.16.0",
     pause_safe = true,
 }
 
@@ -503,17 +512,18 @@ local function phys_emit_cb()
     if phys_latch_d7 == 0 then return end
     phys_tick = phys_tick + 1
     local b = PHYS_SLOT2
-    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d\n",
+    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d\n",
         phys_tick, emu.framecount(), phys_latch_d7, trace_pad_string(1),
         tr_s16(b + 0x00), tr_u16(b + 0x02),      -- X 16.16: whole, sub
         tr_s16(b + 0x14), tr_u16(b + 0x16),      -- Y 16.16: whole, sub
         tr_s16(b + 0x28), tr_s16(b + 0x2A),      -- xv, yv
-        tr_u16(b + 0x54)))                       -- fdir
+        tr_u16(b + 0x54),                        -- fdir = octant (high word of heading longword @+0x54)
+        tr_u16(b + 0x56)))                       -- frac = low word of the 32-bit heading longword @+0x54; octant (fdir) is the high word
     if phys_tick % TRACE_FLUSH == 0 then phys_fh:flush() end
 end
 
 local function phys_header()
-    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir"
+    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac"
 end
 
 -- ── Live state OSD ──────────────────────────────────────────────────────────

@@ -25,7 +25,9 @@ table:
 `8356B3F0…`) and requires `event.on_bus_exec` (errors on cores without it).
 Both surface naturally as tool errors — no special handling needed.
 
-CSV columns: `tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir`.
+CSV columns: `tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac` (`frac` added in
+bridge v0.16.0: the low word of the 32-bit heading longword @+0x54, of which
+`fdir` is the octant high word).
 Default path: `/tmp/nhl94_phys_<port>.csv`.
 
 Because the Node server's tool list is fixed, these handlers are currently only
@@ -53,7 +55,7 @@ Add after the `bizhawk_trace_tail` block (~line 1037+). Follow the
 - **`bizhawk_phys_trace_status`** — no params.
 - *(optional)* **`bizhawk_phys_trace_tail`** — clone `bizhawk_trace_tail`
   (lines 1037+/1598–1611) but read the path from `phys_trace_status` instead of
-  `trace_status`. The phys CSV is narrow (11 cols), so a tail is genuinely
+  `trace_status`. The phys CSV is narrow (12 cols), so a tail is genuinely
   useful here; still nice-to-have, not required.
 
 ### 2. Dispatch cases — in the switch (~line 1580)

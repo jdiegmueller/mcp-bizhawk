@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [0.5.8-jd] - 2026-07-14
+
+### Changed
+
+- **phys_trace gains a `frac` column** (bridge_JD.lua ≥ 0.16.0) — the low word
+  of the 32-bit skater heading longword @ slot struct +0x54, appended LAST so
+  existing column order/values are unchanged. `fdir` (already emitted) is the
+  octant high word; `frac` @+0x56 is the fine fraction. Columns are now
+  `tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac`. Updated the
+  `bizhawk_phys_trace_tail` description accordingly (11 → 12 columns).
+
 ## [0.5.7-jd] - 2026-07-13
 
 ### Added

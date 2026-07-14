@@ -1085,7 +1085,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_phys_trace_tail",
     description:
       "PURPOSE: Return the physics-sync CSV's header line plus its last N rows — a quick look at recent physics ticks without leaving the tool interface. " +
-      "USAGE: Spot-check per-tick D7 and slot-2 state right after a play_input_sequence. The phys CSV is narrow (11 columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir), so a tail reads cleanly here. " +
+      "USAGE: Spot-check per-tick D7 and slot-2 state right after a play_input_sequence. The phys CSV is narrow (12 columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac), so a tail reads cleanly here. " +
       "BEHAVIOR: No side effects. Reads the file from the server's filesystem (requires server and BizHawk to share one — true locally). Rows are buffered, so the very newest may lag slightly. Returns an error if the phys trace has never been started or the file is unreadable. " +
       "RETURNS: 'PATH (N ticks, active: yes|no)' + the CSV header + the last N data rows.",
     inputSchema: {
