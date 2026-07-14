@@ -6,6 +6,7 @@ import {
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { BizhawkServer } from "./bizhawk.js";
 import { VERSION } from "./version.js";
+import { describeImage, requireVisionConfig, type VisionConfig } from "./vision.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -82,7 +83,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_get_info",
     description:
       "PURPOSE: Get the loaded ROM's name and hash, current frame count, the list of available memory domains, the active default domain (the one used when 'domain' is omitted on read/write tool calls), and the bridge's capability map (which optional emu/client/savestate/joypad/memory methods this BizHawk build exposes). " +
-      "USAGE: Call after bizhawk_ping to learn what system is loaded and which optional features are available; before any memory tool call to confirm the active domain and avoid silent reads from the wrong address space; before pause / unpause / reset / screenshot / save_state to check the corresponding `capabilities.*` flag. " +
+      "USAGE: Call after bizhawk_ping to learn what system is loaded and which optional features are available; before any memory tool call to confirm the active domain and avoid silent reads from the wrong address space; before pause / unpause / reset / screenshot / save_state to check the corresponding `capabilities.*` flag. Do NOT call this just to re-check framecount/pause/domain after an action — press_buttons, frame_advance, pause / unpause / reset, load_state, load_slot, and play_input_sequence each ride a compact `State:` line (frame/paused/lag/domain) back inline. " +
       "BEHAVIOR: No side effects — pure read of emulator metadata. Returns 'unavailable' for fields the loaded core doesn't expose (rom_name when no ROM is loaded, framecount on cores without emu.framecount, etc.). " +
       "RETURNS: Multi-line text with ROM, ROM hash, framecount, memory_domains list, active domain, and a list of any missing capabilities for this build.",
     inputSchema: { type: "object", properties: {} },
@@ -103,7 +104,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_read8",
     description:
       "PURPOSE: Read an unsigned 8-bit byte from emulator memory at the given address. " +
-      "USAGE: Use for single-byte status flags, counters, and 8-bit fields. For 16- or 32-bit values use bizhawk_read16/read32 (one call instead of multi-byte assembly); for spans of more than ~4 bytes use bizhawk_read_range (one round-trip instead of N frame-latency hops). " +
+      "USAGE: Use for single-byte status flags, counters, and 8-bit fields. For 16- or 32-bit values use bizhawk_read16/read32 (one call instead of multi-byte assembly); for spans of more than ~4 bytes use bizhawk_read_range (one round-trip instead of N frame-latency hops); for several scattered addresses at once use bizhawk_read_many (one labeled round-trip). " +
       "BEHAVIOR: No side effects — pure read. Reads work the same way whether emulation is paused or running. Returns an error if the named domain doesn't exist, the address is out of range for the domain, or the loaded core doesn't expose memory.read_u8. " +
       "RETURNS: Single line 'ADDR_HEX: VAL_DEC (0xVAL_HEX)', e.g. '0x09C6: 99 (0x63)'.",
     inputSchema: {
@@ -156,7 +157,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_read_range",
     description:
       "PURPOSE: Read a contiguous range of bytes from emulator memory as a hex dump. " +
-      "USAGE: Use for >4 bytes (one round-trip vs N frame-latency hops). Max 4096 bytes/call (BizHawk serialization limit); chunk larger reads in 4 KiB. Powers the two-snapshot RAM-hunt workflow (snapshot before/after a known change, diff for matching deltas). " +
+      "USAGE: Use for >4 bytes (one round-trip vs N frame-latency hops). Max 4096 bytes/call (BizHawk serialization limit); chunk larger reads in 4 KiB. To hunt an unknown address, PREFER bizhawk_search_begin/filter (diffs bridge-side) over pulling hex dumps into context and diffing by hand. " +
       "BEHAVIOR: No side effects — pure read. Returns an error if domain is unknown, length is out of 1-4096, or address+length exceeds the domain. " +
       "RETURNS: 'ADDR_HEX [N bytes, DOMAIN]:' header + space-separated 2-digit uppercase hex bytes.",
     inputSchema: {
@@ -267,11 +268,12 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Set the joypad button state for one player for EXACTLY the next emulated frame. " +
       "USAGE: Drive games with input. Each call sets joypad state for ONE frame only — the very next frame BizHawk processes. After that frame, BizHawk's input goes back to whatever the human user is holding (typically nothing). " +
+      "For more than a few frames, PREFER bizhawk_play_input_sequence (batches N frames in ONE round-trip vs 2N here); to compare input variations from a savestate, use bizhawk_run_trials. Use this per-frame tool for single-frame or interactive stepping. " +
       "To HOLD a button across N consecutive frames, INTERLEAVE: call bizhawk_press_buttons + bizhawk_frame_advance(count=1) N times in a loop. " +
       "DO NOT call bizhawk_press_buttons once and then bizhawk_frame_advance(count=N) — only the first of those N frames sees the button; the rest are no-input. Verified empirically against SNES Super Metroid in May 2026: a 60-frame advance after a single press_buttons(Right) moved Samus the same +1 pixel as a 10-frame advance, because frames 2-60 had no input. " +
       "To release a button mid-hold, just stop calling press_buttons for it; the next frame_advance will see it released. " +
       "BEHAVIOR: Modifies emulator input state for the next frame poll only — no other side effects. Returns an error if the loaded core doesn't expose joypad.set. Button names that aren't valid for the active core are silently ignored by BizHawk (no error). " +
-      "RETURNS: Single line 'Set joypad N: BUTTON+BUTTON+...' or '... (all released)' if nothing was pressed. " +
+      "RETURNS: Single line 'Set joypad N: BUTTON+BUTTON+...' or '... (all released)' if nothing was pressed, plus a `State:` line (frame/paused/lag/domain) — no need to call bizhawk_get_info after. " +
       `\n\nButton names vary per system. Common names across cores: ${VALID_BUTTONS.join(", ")}. Use whatever names the active core understands — if unsure, try a name and check BizHawk's input display, or use bizhawk_get_info to confirm joypad_set is available.`,
     inputSchema: {
       type: "object",
@@ -296,7 +298,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_play_input_sequence",
     description:
       "PURPOSE: Play a pre-built sequence of per-frame joypad inputs back-to-back, advancing one frame per element, ENTIRELY SERVER-SIDE in a single bridge round-trip. Optionally captures screenshots AND labeled memory reads at fixed frame intervals during the play, and optionally aborts play early when a specified memory address changes. All observations come back inline so the agent sees the full trajectory + game state in one tool response. " +
-      "USAGE: Use whenever you have ≥10 frames of inputs to play in order — TAS movie playback, scripted multi-frame sequences, AI-search of input patterns, agent-driven gameplay. ONE bridge round-trip ships N frames instead of the 2N round-trips you'd pay looping bizhawk_press_buttons + bizhawk_frame_advance(1). Use `hold` on each element to run-length-encode repeated input ({buttons:{}, hold:60} = 60 idle frames in one entry) — this keeps the JSON tiny for long sequences. The RPC timeout scales with the total frame count, so multi-thousand-frame batches are fine; the practical reason to chunk is responsiveness (the bridge can't service other calls mid-batch). " +
+      "USAGE: Use whenever you have ≥10 frames of inputs to play in order — TAS movie playback, scripted multi-frame sequences, AI-search of input patterns, agent-driven gameplay. ONE bridge round-trip ships N frames instead of the 2N round-trips you'd pay looping bizhawk_press_buttons + bizhawk_frame_advance(1). Use `hold` on each element to run-length-encode repeated input ({buttons:{}, hold:60} = 60 idle frames in one entry) — this keeps the JSON tiny for long sequences. The RPC timeout scales with the total frame count, so multi-thousand-frame batches are fine; the practical reason to chunk is responsiveness (the bridge can't service other calls mid-batch). To compare several input variations from ONE baseline savestate (reloaded per variation), use bizhawk_run_trials instead. Prefer `observe_every` over `screenshot_every` for a dense memory-only trajectory (no PNGs = far cheaper); set `describe`+`describe_prompt` to get vision-model TEXT back per screenshot instead of binary; pass `load_state_path` to reload a baseline and play in one round-trip. " +
       "FOR AGENT-DRIVEN PLAY: combine `screenshot_every`, `observe_memory`, and `stop_on_memory_change` for the killer pattern — 'walk right for up to 200 frames, observing screenshot+x+y+hp every second, but STOP the moment the room ID changes'. The agent sees: where Samus was at each second, AND whether the goal (room transition) was reached, AND screenshots for visual confirmation — all in one tool response. " +
       "BEHAVIOR: For each `frames` element, calls joypad.set with that frame's buttons then emu.frameadvance. The bridge's main poll loop is BLOCKED for the duration of the call (no other RPCs, no heartbeat) until the sequence finishes or fails. With `screenshot_every`, each captured screenshot adds ~1 frame of wall-clock. With `observe_memory`, each observation also reads the listed memory addresses at the same frame the screenshot was taken — values come back labeled by `name` in each observation's `memory` field. With `stop_on_memory_change`, the bridge records the listed address's value before the first frame, re-reads it after each frame, and aborts the sequence the moment it changes (a final observation is captured at the stop frame regardless of cadence). Returns an error if joypad.set / emu.frameadvance / client.screenshot is missing when needed, if any `observe_memory` entry references an unknown domain, if any `width` isn't 'u8' / 'u16' / 'u32', or if any address is out of range. " +
       "RETURNS: A text summary ('Played N frames. Final framecount: M. Stopped early: yes/no [reason]. Captured K observations with their memory values') followed by K inline image content blocks (one per observation, in frame order). Each observation in the text summary includes its frame_offset and labeled memory values so the agent can correlate the visible screenshot with the game state at that exact frame.",
@@ -304,6 +306,12 @@ const TOOLS: Tool[] = [
       type: "object",
       required: ["frames"],
       properties: {
+        load_state_path: {
+          type: "string",
+          description:
+            "Optional. Absolute path to a .State file to load IMMEDIATELY before playback begins, in the same round-trip. " +
+            "Collapses the common 'load_state then play_input_sequence' trial loop into a single call: reset to a known baseline and run the sequence with no intermediate round-trip. The load happens before any stop_on_memory_change baseline is captured and before frame 0. Same ROM/core constraints as bizhawk_load_state. Omit to play from the current live state.",
+        },
         frames: {
           type: "array",
           description:
@@ -337,11 +345,17 @@ const TOOLS: Tool[] = [
             },
           },
         },
+        observe_every: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Optional. Capture an observation every N frames WITHOUT taking a screenshot — the token-cheap way to get a dense per-frame RAM trace. Pair with `observe_memory` to record labeled values every N frames (use 1 for every frame); the observations come back as text only, no inlined PNGs. Use this instead of `screenshot_every` whenever you want the memory trajectory but not the images. If both `observe_every` and `screenshot_every` are set, `screenshot_every` wins (its cadence points also carry screenshots).",
+        },
         screenshot_every: {
           type: "integer",
           minimum: 1,
           description:
-            "Optional. If set, capture a PNG screenshot every N frames during playback (and one extra at the final frame regardless of remainder). Each screenshot costs ~1 wall-clock frame for client.screenshot, so 60 (≈1 sec of game time) is a good default — captures meaningful state changes without doubling batch latency. Omit to skip screenshots. If `observe_memory` is also set, screenshots and memory reads happen at the same observation points.",
+            "Optional. If set, capture a PNG screenshot every N frames during playback (and one extra at the final frame regardless of remainder). Each screenshot costs ~1 wall-clock frame for client.screenshot, so 60 (≈1 sec of game time) is a good default — captures meaningful state changes without doubling batch latency. Omit to skip screenshots. If `observe_memory` is also set, screenshots and memory reads happen at the same observation points. To capture memory WITHOUT screenshots (far fewer tokens), use `observe_every` instead. To get screenshots back as text descriptions rather than binary images, add `describe: true`.",
         },
         screenshot_dir: {
           type: "string",
@@ -413,6 +427,104 @@ const TOOLS: Tool[] = [
           default: false,
           description: "Run at maximum emulation speed with rendering disabled (rendering stays ON if screenshots are requested). Restores 100% speed + visible rendering afterwards — note this resets any custom speed the user had set. Wall-clock speedup is typically 10-50×.",
         },
+        describe: {
+          type: "boolean",
+          default: false,
+          description: "If true, each captured screenshot is sent to the configured local vision model and returned as a TEXT caption instead of an inlined PNG — a large token saving on multi-screenshot plays. Only affects screenshot observations (those from `screenshot_every`); memory-only observations are unchanged. Requires VISION_BASE_URL + VISION_MODEL on the server.",
+        },
+        describe_prompt: {
+          type: "string",
+          description: "The question/instruction sent to the vision model with each screenshot when `describe` is true. Falls back to the server's VISION_DEFAULT_PROMPT.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_run_trials",
+    description:
+      "PURPOSE: Run a SWEEP of input experiments from one savestate — for each trial, reload the same baseline state, play that trial's input sequence, and read a shared set of memory values — all in ONE bridge round-trip, returning a per-trial table of outcomes. " +
+      "USAGE: The tool for savestate-anchored parameter sweeps and input search: 'from this faceoff, try shot A, shot B, and a pass — where does the puck end up in each?'. Replaces the manual loop of (load_state → play_input_sequence → read) repeated once per candidate, which costs 3+ round-trips PER trial and floods the transcript with intermediate results. Here N trials cost one call and one compact table. Each trial reloads `state_path` first, so trials are independent — trial K never sees trial K-1's mutations. For a single sequence with mid-play observation cadence or stop-on-change, use bizhawk_play_input_sequence (optionally with its load_state_path). " +
+      "BEHAVIOR: For each trial in order: loads `state_path` (unpausing to play), plays the trial's `frames` (same hold/RLE semantics as play_input_sequence), then reads every `observe_memory` entry at the final frame and optionally captures one screenshot. The bridge's poll loop is BLOCKED for the whole sweep (no other RPCs) — the RPC timeout scales with the total frame count across all trials. Any pre-existing freezes are re-asserted each frame exactly as in play_input_sequence. Errors (unknown domain, invalid width, missing state file, missing joypad/frameadvance/screenshot capability) fail the whole call. " +
+      "RETURNS: A text table — 'Ran N trials from PATH.' then one line per trial: '[name] played F, frame FC — label=value, ...' — followed by one inline PNG content block per trial that captured a screenshot, in trial order.",
+    inputSchema: {
+      type: "object",
+      required: ["state_path", "trials"],
+      properties: {
+        state_path: {
+          type: "string",
+          description: "Absolute path to the .State file reloaded before EVERY trial (the shared baseline). Same ROM/core constraints as bizhawk_load_state.",
+        },
+        trials: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          description: "The experiments to run, in order. Each reloads state_path, plays its frames, then observes.",
+          items: {
+            type: "object",
+            required: ["frames"],
+            additionalProperties: false,
+            properties: {
+              name: { type: "string", description: "Label for this trial in the output table. Defaults to 'trial<N>' (1-based) if omitted." },
+              frames: {
+                type: "array",
+                minItems: 1,
+                description: "Per-frame inputs for this trial. Same shape as bizhawk_play_input_sequence.frames: [{buttons:{...}, player?, hold?}].",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    buttons: { type: "object", additionalProperties: { type: "boolean" }, description: "Map of button name → pressed. Omit/empty = no input." },
+                    player:  { type: "integer", minimum: 1, default: 1, description: "Player number (1-based). Default 1." },
+                    hold:    { type: "integer", minimum: 1, default: 1, description: "Consecutive frames to repeat this input (RLE). Default 1." },
+                  },
+                },
+              },
+            },
+          },
+        },
+        observe_memory: {
+          type: "array",
+          description: "Memory reads taken at the FINAL frame of each trial, shared across all trials. Each value lands in that trial's row keyed by `name`. Same entry shape as bizhawk_play_input_sequence.observe_memory.",
+          items: {
+            type: "object",
+            required: ["name", "address", "width"],
+            additionalProperties: false,
+            properties: {
+              name:    { type: "string", description: "Label for this reading in each trial's row." },
+              domain:  { type: "string", description: "Optional memory domain. Omit for the currently selected domain." },
+              address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain." },
+              width:   { type: "string", enum: WIDTH_ENUM, description: WIDTH_PARAM_DESC },
+            },
+          },
+        },
+        screenshot: {
+          type: "boolean",
+          default: false,
+          description: "If true, capture one PNG at the final frame of each trial and return them inline. Requires client.screenshot on the build.",
+        },
+        screenshot_dir: {
+          type: "string",
+          description: "Directory for per-trial screenshots when `screenshot` is set. Default: C:/temp. Must exist and be writable.",
+        },
+        screenshot_prefix: {
+          type: "string",
+          description: "Filename prefix for per-trial screenshots. Default: 'trial'. Files are named `<prefix>-<NN>-<name>.png`.",
+        },
+        turbo: {
+          type: "boolean",
+          default: false,
+          description: "Run the whole sweep at maximum emulation speed (rendering stays on if screenshots are requested). Restores 100% speed + visible rendering afterwards.",
+        },
+        describe: {
+          type: "boolean",
+          default: false,
+          description: "If true (with `screenshot`), each trial's screenshot is sent to the configured local vision model and returned as a TEXT caption instead of an inlined PNG. Requires VISION_BASE_URL + VISION_MODEL on the server.",
+        },
+        describe_prompt: {
+          type: "string",
+          description: "The question/instruction sent to the vision model with each trial screenshot when `describe` is true. Falls back to the server's VISION_DEFAULT_PROMPT.",
+        },
       },
       additionalProperties: false,
     },
@@ -426,7 +538,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Pause emulation — freeze game-logic clocks and hold the current frame on screen. " +
       "USAGE: Use before a sequence of memory-inspect / write / screenshot calls when you need a stable game state across calls (so the game doesn't advance between your reads). Use bizhawk_unpause to resume; use bizhawk_frame_advance to step single frames without leaving pause. " +
       "BEHAVIOR: Modifies emulator run state. The Lua bridge keeps polling the socket while paused, so all other tool calls (memory r/w, screenshot, save_state, etc.) still work. Returns an error if the loaded core doesn't expose emu.pause — check `capabilities.pause` in bizhawk_get_info first to handle that case gracefully. Calling pause when already paused is a no-op. " +
-      "RETURNS: Single line 'Emulation paused'.",
+      "RETURNS: 'Emulation paused' plus a `State:` line (frame/paused/lag/domain).",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -435,16 +547,16 @@ const TOOLS: Tool[] = [
       "PURPOSE: Resume emulation after a pause, returning to normal real-time playback. " +
       "USAGE: Counterpart to bizhawk_pause. Use after a paused inspection sequence is complete. To advance only a few frames without resuming full speed, use bizhawk_frame_advance instead. " +
       "BEHAVIOR: Modifies emulator run state. Returns an error if the loaded core doesn't expose emu.unpause — check `capabilities.unpause` in bizhawk_get_info first. Calling unpause when not paused is a no-op. " +
-      "RETURNS: Single line 'Emulation resumed'.",
+      "RETURNS: 'Emulation resumed' plus a `State:` line (frame/paused/lag/domain).",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "bizhawk_frame_advance",
     description:
       "PURPOSE: Step emulation by exactly N frames (default 1) and return the new framecount. " +
-      "USAGE: Use for frame-precise input automation (combine with bizhawk_press_buttons), animation inspection, or letting the system initialize after a hard reset (RAM is mostly zero in the first ~30 frames after bizhawk_reset). For long jumps (thousands of frames) prefer bizhawk_save_state / bizhawk_load_state of a pre-prepared state — frame_advance scales linearly. Works whether emulation is currently paused or running and does NOT change the pause state. " +
+      "USAGE: Use for frame-precise input automation (combine with bizhawk_press_buttons), animation inspection, or letting the system initialize after a hard reset (RAM is mostly zero in the first ~30 frames after bizhawk_reset). For long jumps (thousands of frames) prefer bizhawk_save_state / bizhawk_load_state of a pre-prepared state — frame_advance scales linearly. Works whether emulation is currently paused or running and does NOT change the pause state. To advance until a memory condition holds (instead of guessing a frame count) use bizhawk_wait_for_memory; for multi-frame input use bizhawk_play_input_sequence. " +
       "BEHAVIOR: Advances the game-logic clock by N frames. Each step costs roughly one real frame (~16ms at 60Hz) plus one bridge round-trip — so advancing 600 frames takes ~10 seconds wall-clock. Returns an error if the loaded core doesn't expose emu.frameadvance. " +
-      "RETURNS: Single line 'Advanced N frame(s). Framecount: NEW_COUNT'.",
+      "RETURNS: Single line 'Advanced N frame(s). Framecount: NEW_COUNT', plus a `State:` line (lag/pause/domain) — no bizhawk_get_info needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -464,7 +576,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Reset the loaded core — equivalent to a hard reset (power cycle) of the emulated console. " +
       "USAGE: Use to start fresh from boot. To return to a specific known-good point instead of boot, use bizhawk_load_state with a previously saved state file. " +
       "BEHAVIOR: DESTRUCTIVE: RAM contents become indeterminate (typically zeroed), CPU returns to the reset vector, framecount resets to 0, joypad state clears, and any in-progress audio/video state is discarded. The loaded ROM stays loaded — only volatile state is cleared. Unsaved game progress is lost. Returns an error if the loaded core doesn't expose client.reboot_core — check `capabilities.reboot_core` in bizhawk_get_info first. " +
-      "RETURNS: Single line 'Core reset'.",
+      "RETURNS: 'Core reset' plus a `State:` line (frame resets toward 0).",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -478,6 +590,15 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         path: { type: "string", description: "Optional absolute filesystem path for the PNG (e.g. /tmp/snap.png). Omit to use an auto-generated temp file. Parent directory must exist. Overwritten without prompt if present." },
+        describe: {
+          type: "boolean",
+          default: false,
+          description: "If true, DON'T return the binary image — instead send it to the configured local vision model and return that model's text description. Far cheaper in tokens than an inlined PNG. Requires the server to have VISION_BASE_URL and VISION_MODEL set (errors clearly if not).",
+        },
+        describe_prompt: {
+          type: "string",
+          description: "The question/instruction sent to the vision model with the image when `describe` is true (e.g. 'Is the puck in the net? Where are the goalies?'). Falls back to the server's VISION_DEFAULT_PROMPT, then a generic 'describe this image'.",
+        },
       },
       additionalProperties: false,
     },
@@ -523,7 +644,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Restore the emulator from a previously saved .State file at the given path. " +
       "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. To start fresh from console boot instead, use bizhawk_reset. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge preserves the pause state across the load: if the emulator was paused before loading, it is re-paused in the same callback (ZERO frames run in between); pass pause=true to force a paused state after load regardless. Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
-      "RETURNS: Single line 'Loaded state from PATH (paused/running)'.",
+      "RETURNS: 'Loaded state from PATH (paused/running)' plus a `State:` line (frame/paused/lag/domain) — no bizhawk_get_info needed.",
     inputSchema: {
       type: "object",
       required: ["path"],
@@ -649,7 +770,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Pin one or MANY memory addresses to fixed values — the bridge re-writes them after EVERY emulated frame until unfrozen (classic cheat freezing). " +
       "USAGE: Infinite health/time cheats, and pinning state during experiments (freeze the game clock while testing collision). Single address: pass address+value. Batch: pass entries=[{address,value,...},...] — one call instead of N; top-level width/domain act as defaults for every entry. Freezing the same address+domain again just updates the value. Use bizhawk_unfreeze to release, bizhawk_list_frozen to inspect. For a one-shot write use bizhawk_write8/16/32; to MIX writes/freezes/unfreezes in one call use bizhawk_memory_ops. " +
-      "BEHAVIOR: DESTRUCTIVE: overwrites the address(es) every frame with no undo; the game's own writes are overridden one frame later at the latest. The first write happens immediately and validates domain/width/address (errors now, not silently later). Batch entries are applied in order; if one entry errors, earlier entries in the batch STAY frozen. Freezes live in the bridge — reloading the Lua script or restarting BizHawk clears them. Frozen values are re-asserted after each frame stepped by the bridge's own commands (frame_advance, play_input_sequence, wait_for_memory), but NOT for frames advanced inside a bizhawk_eval_lua chunk. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites the address(es) every frame with no undo; the game's own writes are overridden one frame later at the latest. The first write happens immediately and validates domain/width/address (errors now, not silently later). FOOTGUN: a full 68K bus address (0xFFxxxx) overflows the 64 KB '68K RAM' domain and is rejected — mask with & 0xFFFF, or target the full-bus domain (M68K BUS on Genesis, System Bus on NES/SNES). Batch entries are applied in order; if one entry errors, earlier entries in the batch STAY frozen. Freezes live in the bridge — reloading the Lua script or restarting BizHawk clears them. Frozen values are re-asserted after each frame stepped by the bridge's own commands (frame_advance, play_input_sequence, wait_for_memory), but NOT for frames advanced inside a bizhawk_eval_lua chunk. " +
       "RETURNS: One 'Froze ADDR_HEX (DOMAIN) = VAL' line per address, then 'N address(es) frozen.'",
     inputSchema: {
       type: "object",
@@ -979,7 +1100,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Restore the emulator from a named slot previously saved with bizhawk_save_slot for the currently loaded ROM. " +
       "USAGE: Counterpart to bizhawk_save_slot — the snapshot/experiment/rollback loop without path bookkeeping. Pass pause=true to freeze immediately after restoring. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces all current emulator state. Slots are looked up by the CURRENT ROM's hash — a slot saved under a different ROM won't be found (this is a safety feature: cross-ROM state loads crash cores). A missing name returns an error listing available slots. " +
-      "RETURNS: 'Loaded slot 'NAME' (paused|running)'.",
+      "RETURNS: 'Loaded slot 'NAME' (paused|running)' plus a `State:` line (frame/paused/lag/domain).",
     inputSchema: {
       type: "object",
       required: ["name"],
@@ -1100,6 +1221,49 @@ const TOOLS: Tool[] = [
 
 function ok(text: string) {
   return { content: [{ type: "text" as const, text }] };
+}
+// A compact, uniform emulator-state line the bridge can ride along on any
+// frame-changing command (load_state, frame_advance, play_input_sequence).
+// Additive: a bridge that omits `state` yields null and callers print nothing,
+// so older builds and existing behavior are unaffected. Kills the get_info
+// call agents otherwise make just to re-check framecount/pause after acting.
+interface StateSummary {
+  framecount?: number;
+  paused?: boolean;
+  lag_count?: number;
+  is_lagged?: boolean;
+  current_memory_domain?: string;
+  rom_hash?: string;
+}
+function fmtState(s?: StateSummary): string | null {
+  if (!s || typeof s !== "object") return null;
+  const parts: string[] = [];
+  if (typeof s.framecount === "number") parts.push(`frame ${s.framecount}`);
+  if (typeof s.paused === "boolean")    parts.push(s.paused ? "paused" : "running");
+  // lag count, with a trailing "*" when the CURRENT frame is a lag frame
+  // (matches the OSD's `lag N*` notation).
+  if (typeof s.lag_count === "number")  parts.push(`lag ${s.lag_count}${s.is_lagged ? "*" : ""}`);
+  // rom_hash is static; newer bridges omit it from the per-call block (kept
+  // here so any bridge that still sends it renders unchanged).
+  if (s.rom_hash)                       parts.push(`rom ${s.rom_hash}`);
+  if (s.current_memory_domain)          parts.push(`domain ${s.current_memory_domain}`);
+  return parts.length ? parts.join(", ") : null;
+}
+// Append the compact state line to a base message when the bridge rode one
+// along. Additive: no `state` block → base message unchanged.
+function withState(base: string, state?: StateSummary): string {
+  const st = fmtState(state);
+  return st ? `${base}\nState: ${st}` : base;
+}
+// Describe one screenshot without letting a single failure abort a whole run
+// (a play/sweep with many screenshots keeps its memory data even if the vision
+// model times out on one frame). Returns an inline error note instead.
+async function safeDescribe(imgPath: string, prompt: string | undefined, cfg: VisionConfig): Promise<string> {
+  try {
+    return await describeImage(imgPath, prompt, cfg);
+  } catch (err) {
+    return `(vision error: ${(err as Error).message})`;
+  }
 }
 function fmtHex(n: unknown): string {
   if (typeof n !== "number") return String(n);
@@ -1243,14 +1407,22 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_press_buttons": {
-        await bh.call("press_buttons", { buttons: p.buttons, player: p.player ?? 1 });
+        const r = await bh.call<true | { state?: StateSummary }>(
+          "press_buttons", { buttons: p.buttons, player: p.player ?? 1 },
+        );
         const pressed = Object.entries(p.buttons as Record<string, boolean>)
           .filter(([, v]) => v).map(([k]) => k);
-        return ok(`Set joypad ${p.player ?? 1}: ${pressed.length ? pressed.join("+") : "(all released)"}`);
+        const base = `Set joypad ${p.player ?? 1}: ${pressed.length ? pressed.join("+") : "(all released)"}`;
+        return ok(withState(base, typeof r === "object" ? r.state : undefined));
       }
 
       case "bizhawk_play_input_sequence": {
+        // `describe` is server-side only (vision runs after the bridge replies);
+        // validate config up front so we don't play frames then fail.
+        const visCfg = p.describe ? requireVisionConfig() : null;
         const params: Record<string, unknown> = { frames: p.frames };
+        if (p.load_state_path        !== undefined) params.load_state_path        = p.load_state_path;
+        if (p.observe_every          !== undefined) params.observe_every          = p.observe_every;
         if (p.screenshot_every       !== undefined) params.screenshot_every       = p.screenshot_every;
         if (p.screenshot_dir         !== undefined) params.screenshot_dir         = p.screenshot_dir;
         if (p.screenshot_prefix      !== undefined) params.screenshot_prefix      = p.screenshot_prefix;
@@ -1266,6 +1438,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           final_framecount?: number;
           stopped_early?: boolean;
           stop_reason?: string;
+          state?: StateSummary;
           observations?: {
             frame_offset: number;
             path?: string;
@@ -1283,31 +1456,46 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           lines.push(`Stopped early — reason: ${r.stop_reason ?? "(unspecified)"}.`);
         }
         lines.push(`Captured ${obs.length} observation${obs.length === 1 ? "" : "s"}.`);
-        // Per-observation lines so the agent can correlate inline images with state
+        const playState = fmtState(r.state);
+        if (playState) lines.push(`State: ${playState}`);
+
+        // When describing, caption each screenshot via the vision model instead
+        // of inlining it (sequential — gentle on a single local model).
+        const captions = new Map<number, string>();
+        if (visCfg) {
+          for (let i = 0; i < obs.length; i++) {
+            if (obs[i].path) {
+              captions.set(i, await safeDescribe(obs[i].path as string, p.describe_prompt as string | undefined, visCfg));
+            }
+          }
+        }
+
+        // Per-observation lines so the agent can correlate state with images/captions.
         for (let i = 0; i < obs.length; i++) {
           const o = obs[i];
           const memStr = o.memory
             ? ` memory={${Object.entries(o.memory).map(([k, v]) => `${k}=${v}`).join(", ")}}`
             : "";
-          const imgStr = o.path ? ` (image ${i + 1})` : "";
-          lines.push(`  obs[${i}] frame_offset=${o.frame_offset}${memStr}${imgStr}`);
+          const tag = !o.path ? "" : (visCfg ? " (described below)" : ` (image ${i + 1})`);
+          lines.push(`  obs[${i}] frame_offset=${o.frame_offset}${memStr}${tag}`);
         }
 
-        // Build the multi-content response: text summary + per-observation
-        // inline image blocks. We read each PNG from disk (Lua wrote it),
-        // base64-encode for MCP transport.
+        // Build the multi-content response: text summary, then either a text
+        // caption per screenshot (describe mode) or the inlined PNG. Memory-only
+        // observations (no path — e.g. observe_every) add nothing here.
         const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [
           { type: "text", text: lines.join("\n") },
         ];
-        for (const o of obs) {
+        for (let i = 0; i < obs.length; i++) {
+          const o = obs[i];
           if (!o.path) continue;
+          if (visCfg) {
+            content.push({ type: "text", text: `obs[${i}] frame_offset=${o.frame_offset}: ${captions.get(i) ?? "(no description)"}` });
+            continue;
+          }
           try {
             const bytes = fs.readFileSync(o.path);
-            content.push({
-              type: "image",
-              data: bytes.toString("base64"),
-              mimeType: "image/png",
-            });
+            content.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
           } catch (err) {
             content.push({
               type: "text",
@@ -1318,15 +1506,95 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return { content };
       }
 
-      case "bizhawk_pause":         await bh.call("pause");          return ok("Emulation paused");
-      case "bizhawk_unpause":       await bh.call("unpause");        return ok("Emulation resumed");
-      case "bizhawk_reset":         await bh.call("reset");          return ok("Core reset");
+      case "bizhawk_run_trials": {
+        const trialsVisCfg = p.describe ? requireVisionConfig() : null;
+        const trials = p.trials as { frames?: { hold?: number }[] }[];
+        const params: Record<string, unknown> = { state_path: p.state_path, trials: p.trials };
+        if (p.observe_memory    !== undefined) params.observe_memory    = p.observe_memory;
+        if (p.screenshot        !== undefined) params.screenshot        = p.screenshot;
+        if (p.screenshot_dir    !== undefined) params.screenshot_dir    = p.screenshot_dir;
+        if (p.screenshot_prefix !== undefined) params.screenshot_prefix = p.screenshot_prefix;
+        if (p.turbo             !== undefined) params.turbo             = p.turbo;
+        // Timeout scales with every emulated frame across all trials, plus a
+        // per-trial slice for the savestate load + optional screenshot.
+        const totalFrames = trials.reduce(
+          (sum, t) => sum + (t.frames ?? []).reduce((s, f) => s + (f.hold ?? 1), 0), 0,
+        );
+        const r = await bh.call<{
+          trials?: {
+            name: string;
+            played: number;
+            final_framecount?: number;
+            memory?: Record<string, number>;
+            screenshot_path?: string;
+          }[];
+        }>("run_trials", params, { timeoutMs: frameTimeout(totalFrames + trials.length * 10) });
+
+        const rows = Array.isArray(r.trials) ? r.trials : [];
+
+        // Caption each trial's screenshot via the vision model when describing.
+        const trialCaptions = new Map<number, string>();
+        if (trialsVisCfg) {
+          for (let i = 0; i < rows.length; i++) {
+            if (rows[i].screenshot_path) {
+              trialCaptions.set(i, await safeDescribe(rows[i].screenshot_path as string, p.describe_prompt as string | undefined, trialsVisCfg));
+            }
+          }
+        }
+
+        const lines = [`Ran ${rows.length} trial${rows.length === 1 ? "" : "s"} from ${p.state_path}.`];
+        for (let i = 0; i < rows.length; i++) {
+          const t = rows[i];
+          const memStr = t.memory && Object.keys(t.memory).length
+            ? " — " + Object.entries(t.memory).map(([k, v]) => `${k}=${v}`).join(", ")
+            : "";
+          const tag = !t.screenshot_path ? "" : (trialsVisCfg ? " (described below)" : " (image)");
+          lines.push(`[${t.name}] played ${t.played}, frame ${t.final_framecount ?? "?"}${memStr}${tag}`);
+        }
+
+        const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [
+          { type: "text", text: lines.join("\n") },
+        ];
+        for (let i = 0; i < rows.length; i++) {
+          const t = rows[i];
+          if (!t.screenshot_path) continue;
+          if (trialsVisCfg) {
+            content.push({ type: "text", text: `[${t.name}]: ${trialCaptions.get(i) ?? "(no description)"}` });
+            continue;
+          }
+          try {
+            const bytes = fs.readFileSync(t.screenshot_path);
+            content.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
+          } catch (err) {
+            content.push({ type: "text", text: `(failed to read trial '${t.name}' screenshot from ${t.screenshot_path}: ${(err as Error).message})` });
+          }
+        }
+        return { content };
+      }
+
+      case "bizhawk_pause": {
+        const r = await bh.call<true | { state?: StateSummary }>("pause");
+        return ok(withState("Emulation paused", typeof r === "object" ? r.state : undefined));
+      }
+      case "bizhawk_unpause": {
+        const r = await bh.call<true | { state?: StateSummary }>("unpause");
+        return ok(withState("Emulation resumed", typeof r === "object" ? r.state : undefined));
+      }
+      case "bizhawk_reset": {
+        const r = await bh.call<true | { state?: StateSummary }>("reset");
+        return ok(withState("Core reset", typeof r === "object" ? r.state : undefined));
+      }
       case "bizhawk_frame_advance": {
         const count = (p.count as number) ?? 1;
         const faParams: Record<string, unknown> = { count };
         if (p.turbo !== undefined) faParams.turbo = p.turbo;
-        const f = await bh.call<number>("frame_advance", faParams, { timeoutMs: frameTimeout(count) });
-        return ok(`Advanced ${count} frame(s). Framecount: ${f}`);
+        const f = await bh.call<number | { framecount?: number; state?: StateSummary }>(
+          "frame_advance", faParams, { timeoutMs: frameTimeout(count) });
+        // Bridge may return a bare framecount (legacy) or {framecount, state}.
+        const fc = typeof f === "number" ? f : (f.framecount ?? f.state?.framecount);
+        const st = typeof f === "number" ? null : fmtState(f.state);
+        const base = `Advanced ${count} frame(s). Framecount: ${fc}`;
+        return ok(st ? `${base}\nState: ${st}` : base);
       }
 
       case "bizhawk_wait_for_memory": {
@@ -1610,8 +1878,8 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         }
         const params: Record<string, unknown> = { path: file };
         if (p.pause !== undefined) params.pause = p.pause;
-        const r = await bh.call<{ paused?: boolean }>("load_state", params);
-        return ok(`Loaded slot '${p.name}' (${r.paused ? "paused" : "running"})`);
+        const r = await bh.call<{ paused?: boolean; state?: StateSummary }>("load_state", params);
+        return ok(withState(`Loaded slot '${p.name}' (${r.paused ? "paused" : "running"})`, r.state));
       }
       case "bizhawk_list_slots": {
         const hash = await currentRomHash(bh);
@@ -1692,9 +1960,16 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_screenshot": {
+        // Validate vision config up front so a describe request fails before we
+        // bother capturing.
+        const cfg = p.describe ? requireVisionConfig() : null;
         const target = (p.path as string | undefined)
           ?? path.join(os.tmpdir(), `mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
         const saved = await bh.call<string>("screenshot", { path: target });
+        if (cfg) {
+          const desc = await describeImage(saved, p.describe_prompt as string | undefined, cfg);
+          return ok(`Screenshot ${saved} — described by ${cfg.model}:\n${desc}`);
+        }
         let bytes: Buffer;
         try {
           bytes = fs.readFileSync(saved);
@@ -1721,8 +1996,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       case "bizhawk_load_state": {
         const params: Record<string, unknown> = { path: p.path };
         if (p.pause !== undefined) params.pause = p.pause;
-        const r = await bh.call<{ path: string; paused?: boolean }>("load_state", params);
-        return ok(`Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`);
+        const r = await bh.call<{ path: string; paused?: boolean; state?: StateSummary }>("load_state", params);
+        const base = `Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`;
+        const st = fmtState(r.state);
+        return ok(st ? `${base}\nState: ${st}` : base);
       }
 
       default:

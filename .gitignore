@@ -9,3 +9,6 @@ dist/
 # Local planning/scratch — not for publication
 .superpowers/
 docs/superpowers/
+
+# tools (bizhawk)
+tools/

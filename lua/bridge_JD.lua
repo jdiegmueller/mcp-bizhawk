@@ -1,5 +1,57 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v0.16.0
+-- v2026.7.3-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.3-jd changes (wall-clock watchdog, wider state blocks, freeze guard):
+--   * Link watchdog is now WALL-CLOCK, not frame-counted. New now_ms() reads
+--     .NET DateTime.Now.Ticks//10000 (ms), so DEAD_AFTER_MS (10000) and
+--     RECONNECT_INTERVAL_MS (5000) mean real seconds regardless of emulation
+--     speed. The old tick counters drifted: turbo made "~10s" fire in <1s and
+--     pause stretched it. last_rx_ms/last_reconnect_ms replace the tick vars.
+--   * state_summary() grew to the dynamic fields agents re-check after acting:
+--     framecount, paused, lag_count, is_lagged, current_memory_domain. rom_hash
+--     (static) was DROPPED from the block — it stays in get_info. The block is
+--     now ridden along on press_buttons, pause, unpause, reset (in addition to
+--     the existing load_state/frame_advance/play_input_sequence/run_trials), so
+--     those tools answer "where am I now?" without a follow-up get_info.
+--     NOTE: cmd_press_buttons/pause/unpause/reset now return a TABLE {state}
+--     instead of a bare `true` — additive; older servers ignore the extra field.
+--   * Freeze now validates the address against the target domain's size up
+--     front (validate_freeze_range) and errors once with a clear message, e.g.
+--     a full 68K bus address (0xFFxxxx) freed into the 64 KB "68K RAM" domain.
+--     Previously BizHawk silently dropped each out-of-range write and re-logged
+--     the warning every frame (freeze re-asserts per frame), flooding the
+--     console until unfrozen.
+--
+-- v2026.7.2-jd changes (console timestamps, state summaries, load_state_path,
+--                       run_trials, OSD lag+srv, observe_every, describe/vision):
+--   * Every bridge console line is now prefixed with a friendly local-timezone
+--     timestamp to the millisecond, e.g. "[09:19:32.947] [mcp-bizhawk] ...".
+--     console.log is monkeypatched once at startup; the ms comes from .NET
+--     DateTime.Now via luanet (os.date is second-only), with a second-
+--     resolution os.date fallback if luanet is unavailable.
+--   * play_input_sequence gains observe_every: capture observe_memory readings
+--     every N frames WITHOUT a screenshot (memory-only, cheap dense RAM trace).
+--     Decoupled from screenshot_every, which still wins if both are set.
+--   * OSD header line now shows cumulative lag frames ("lag N", with a
+--     trailing "*" when the current frame is itself a lag frame), and the OSD
+--     version line now shows the paired mcp-bizhawk server version ("srv vX")
+--     next to the bridge version — captured from the HELLO greeting.
+--   * frame_advance / load_state / play_input_sequence now ride a `state`
+--     block {framecount, paused, rom_hash} on their result via a new
+--     state_summary() helper, so the client can print a state line without a
+--     follow-up get_info round-trip. NOTE: cmd_frame_advance now returns a
+--     TABLE {framecount, state} instead of a bare framecount number — needs a
+--     server ≥ 2026.7.2-jd (which accepts either shape); an older server
+--     prints the object literally.
+--   * play_input_sequence takes an optional load_state_path: reload a baseline
+--     savestate then play the sequence in ONE round-trip (the load happens
+--     before the stop_on_memory_change baseline read and frame 0), collapsing
+--     the load_state+play trial loop to a single call.
+--   * cmd_run_trials — savestate-anchored input sweep. For each trial: reload
+--     the shared state_path (so trials are independent), play that trial's
+--     frames, then read the shared observe_memory set at the final frame and
+--     optionally screenshot. Replaces N × (load_state + play + read) with one
+--     round-trip and one per-trial results table.
 --
 -- v0.16.0 changes (phys_trace heading fraction):
 --   * phys_trace now emits a trailing `frac` column = the low word of the
@@ -256,8 +308,10 @@
 --     answers NONE every frame, so a healthy link receives every frame).
 --   * comm.socketServerSend never throws — SendString swallows exceptions
 --     and returns -1. Failure detection now checks the return value.
---   * Watchdog is rate-limited (last_reconnect_tick) — the old heartbeat
---     condition re-fired every frame once stale.
+--   * Watchdog is rate-limited (last_reconnect_ms) — the old heartbeat
+--     condition re-fired every frame once stale. Timers are wall-clock ms
+--     (now_ms via DateTime.Now), not frame counts, so detection latency is
+--     constant regardless of emulation speed (turbo/pause).
 --
 -- Architecture (inverted from mcp-mgba):
 --
@@ -296,9 +350,56 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "0.16.0",
+    version    = "2026.7.3-jd",
     pause_safe = true,
 }
+
+-- Friendly local-timezone timestamp, to the millisecond, prefixed onto every
+-- bridge console line. BizHawk's Lua (NLua) exposes .NET via `luanet`, so we
+-- format DateTime.Now as HH:mm:ss.fff — the only sub-second wall clock this
+-- build offers (os.date is second-only; luasocket isn't bundled). Falls back
+-- to second-resolution os.date if luanet/DateTime is ever unavailable.
+local _DateTime = nil
+do
+    local ok, dt = pcall(function()
+        return luanet and luanet.import_type and luanet.import_type("System.DateTime")
+    end)
+    if ok then _DateTime = dt end
+end
+local function ts_prefix()
+    if _DateTime then
+        local ok, s = pcall(function() return _DateTime.Now:ToString("HH:mm:ss.fff") end)
+        if ok and type(s) == "string" then return "[" .. s .. "]" end
+    end
+    return "[" .. os.date("%H:%M:%S") .. "]"
+end
+
+-- Wall-clock milliseconds, for the link watchdog. Frame-counted timers drift
+-- with emulation speed (turbo makes "~10s" fire in <1s; pause stretches it),
+-- so liveness is measured against the real clock instead. DateTime.Now.Ticks
+-- is 100-ns units → /1e4 for ms. Falls back to second-resolution os.time when
+-- luanet/DateTime is unavailable (fine for a multi-second watchdog).
+local function now_ms()
+    if _DateTime then
+        local ok, ms = pcall(function()
+            -- Floor-division keeps the 64-bit tick count exact (float division
+            -- would lose sub-ms precision at DateTime.Ticks' magnitude).
+            return _DateTime.Now.Ticks // 10000
+        end)
+        if ok and type(ms) == "number" then return ms end
+    end
+    return os.time() * 1000
+end
+
+-- Prefix all bridge console output with the timestamp. Monkeypatch console.log
+-- once so every existing/future call is covered without touching each site.
+local _raw_console_log = console.log
+console.log = function(first, ...)
+    if type(first) == "string" then
+        return _raw_console_log(ts_prefix() .. " " .. first, ...)
+    end
+    return _raw_console_log(ts_prefix(), first, ...)
+end
 
 -- Pending result from last frame's command. Sent back at the start of the
 -- next frame's round-trip (instead of a bare "READY").
@@ -306,14 +407,16 @@ local pending_result = nil
 local tick_count = 0
 local disconnected = false
 
--- Link-liveness bookkeeping (v0.5.2). The server answers every frame's
--- READY with at least "NONE", so a healthy link RECEIVES bytes every frame.
--- last_rx_tick is bumped on ANY received bytes (including "NONE") and is
--- the only heartbeat; command traffic is irrelevant to liveness.
-local last_rx_tick        = 0
-local last_reconnect_tick = 0
-local RECONNECT_INTERVAL  = 300   -- ticks between re-dial attempts (~5s)
-local DEAD_AFTER          = 600   -- ticks without rx before declaring dead (~10s)
+-- Link-liveness bookkeeping. The server answers every frame's READY with at
+-- least "NONE", so a healthy link RECEIVES bytes every frame. last_rx_ms is
+-- stamped (wall clock) on ANY received bytes (including "NONE") and is the
+-- only heartbeat; command traffic is irrelevant to liveness. Timers are
+-- WALL-CLOCK ms (via now_ms), not frame counts, so detection latency is
+-- constant regardless of turbo/pause/framerate.
+local last_rx_ms          = 0
+local last_reconnect_ms   = 0
+local RECONNECT_INTERVAL_MS = 5000    -- ms between re-dial attempts
+local DEAD_AFTER_MS         = 10000   -- ms without rx before declaring dead
 local SOCKET_TIMEOUT_MS   = 50    -- receive timeout; re-applied after re-dial
 
 -- ── Capability detection ────────────────────────────────────────────────────
@@ -598,10 +701,19 @@ local function osd_lines()
     -- a clock-STOPPED flag.
     local running = (tr_u8(TRACE_G.gmode) & 1) == 0
     local carrier = osd_carrier()
-    lines[#lines + 1] = string.format("clk %d:%02d %s   carry %s",
+    -- Lag frames: emu.lagcount() is the cumulative total; a trailing '*' marks
+    -- the current frame as itself a lag frame (emu.islagged()). Guarded with
+    -- has() rather than CAPS because CAPS is declared after this function.
+    local lag = ""
+    if emu and has(emu, "lagcount") then
+        local now = has(emu, "islagged") and emu.islagged()
+        lag = string.format("   lag %d%s", emu.lagcount(), now and "*" or "")
+    end
+    lines[#lines + 1] = string.format("clk %d:%02d %s   carry %s%s",
         clock // 60, clock % 60,
         running and "run " or "stop",
-        carrier and ("s" .. carrier) or "--")
+        carrier and ("s" .. carrier) or "--",
+        lag)
     for n = 0, 11 do
         local base = SORTCORDS + n * SCSIZE
         lines[#lines + 1] = string.format("s%-2d%s x%-5d y%-5d d%-2d v %d,%d",
@@ -623,7 +735,8 @@ local function osd_lines()
         tr_s16(TRACE_G.lastplayer),
         tr_s16(TRACE_G.passdir),
         tr_s16(TRACE_G.passspeed))
-    lines[#lines + 1] = string.format("%s v%s", BRIDGE.name, BRIDGE.version)
+    lines[#lines + 1] = string.format("%s v%s  srv v%s",
+        BRIDGE.name, BRIDGE.version, BRIDGE.server_version or "?")
     return lines
 end
 
@@ -751,6 +864,28 @@ local function memory_domain_list()
         i = i + 1
     end
     return out
+end
+
+-- Compact "where are we now" block attached to frame-changing command results
+-- (load_state, frame_advance, play_input_sequence). Lets the client render a
+-- state line without a follow-up get_info round-trip. Every field is guarded
+-- so a build missing a cap simply omits it.
+-- Compact, DYNAMIC state block ridden along on state-mutating commands so the
+-- client can print "where am I now?" without a follow-up get_info. Only fields
+-- that actually change as you act: framecount, pause, lag (count + whether the
+-- current frame lagged), and the active memory domain (which can silently drift
+-- after a savestate load). rom_hash is STATIC and deliberately omitted — it
+-- lives in get_info; re-sending a 40-char hash on every call is pure waste.
+local function state_summary()
+    local s = {}
+    if CAPS.framecount            then s.framecount = emu.framecount() end
+    if CAPS.ispaused              then s.paused     = client.ispaused() end
+    if CAPS.lagcount              then s.lag_count  = emu.lagcount()   end
+    if CAPS.islagged              then s.is_lagged  = emu.islagged()   end
+    if CAPS.memory_get_current_memorydomain then
+        s.current_memory_domain = memory.getcurrentmemorydomain()
+    end
+    return s
 end
 
 local function cmd_get_info(p)
@@ -888,7 +1023,7 @@ local function cmd_press_buttons(p)
     local buttons = assert(p.buttons, "buttons required (table like {A=true, Up=true})")
     local player  = p.player or 1
     joypad.set(buttons, player)
-    return true
+    return { state = state_summary() }
 end
 
 -- Batched input playback. Takes a list of per-frame inputs and runs them
@@ -910,6 +1045,9 @@ end
 --   p.screenshot_every  — capture a PNG every N frames (also captures the
 --                         final frame regardless of remainder). Requires
 --                         client.screenshot to be available on this build.
+--   p.observe_every     — capture an observation every N frames WITHOUT a
+--                         screenshot (memory-only, cheap). screenshot_every
+--                         takes precedence if both are given.
 --   p.screenshot_dir    — directory for PNGs (default: C:/temp on Windows,
 --                         /tmp elsewhere; caller should ensure it exists)
 --   p.screenshot_prefix — filename prefix (default: "obs")
@@ -1064,6 +1202,14 @@ local function cmd_play_input_sequence(p)
     local frames = assert(p.frames, "frames required (array of {buttons, player?} objects)")
     if type(frames) ~= "table" then error("frames must be an array") end
 
+    -- Optional: reload a baseline savestate before playback, same round-trip.
+    -- Done up front so stop_on_memory_change's initial read and frame 0 see the
+    -- restored state. Playback unpauses regardless, so pause state is moot here.
+    if p.load_state_path then
+        if not CAPS.savestate_load then error("savestate.load not available") end
+        savestate.load(p.load_state_path)
+    end
+
     local screenshot_every  = p.screenshot_every
     local screenshot_dir    = p.screenshot_dir    or "C:/temp"
     local screenshot_prefix = p.screenshot_prefix or "obs"
@@ -1073,6 +1219,12 @@ local function cmd_play_input_sequence(p)
 
     local observe_memory = p.observe_memory  -- nil or array of {name, domain, address, width}
     local stop_spec      = p.stop_on_memory_change  -- nil or {domain, address, width}
+    -- Observation cadence is decoupled from screenshots: screenshot_every drives
+    -- it AND adds a PNG at each point; observe_every drives it memory-only (no
+    -- PNG). screenshot_every wins if both are set. capture_wanted gates whether
+    -- there's anything to record (a screenshot and/or a memory read).
+    local obs_cadence   = screenshot_every or p.observe_every or 0xFFFF
+    local capture_wanted = (screenshot_every ~= nil) or (observe_memory ~= nil)
 
     -- Capture initial value for stop-on-change
     local stop_initial = nil
@@ -1127,8 +1279,8 @@ local function cmd_play_input_sequence(p)
                 if cur ~= stop_initial then
                     stopped = true
                     stop_reason = "memory_changed"
-                    -- Always capture the stop frame as an observation (regardless of screenshot_every cadence)
-                    if screenshot_every or observe_memory then
+                    -- Always capture the stop frame as an observation (regardless of cadence)
+                    if capture_wanted then
                         capture_observation()
                     end
                     break
@@ -1136,7 +1288,7 @@ local function cmd_play_input_sequence(p)
             end
 
             -- Periodic observation (only if we didn't already capture for stop)
-            if (screenshot_every or observe_memory) and (count % (screenshot_every or 0xFFFF) == 0 or count == total) then
+            if capture_wanted and (count % obs_cadence == 0 or count == total) then
                 capture_observation()
             end
         end
@@ -1153,16 +1305,17 @@ local function cmd_play_input_sequence(p)
         observations = #observations > 0 and observations or nil,
         stopped_early = stopped,
         stop_reason = stop_reason,
+        state = state_summary(),
     }
 end
 
 local function cmd_pause(p)
     if not CAPS.pause then error("client.pause not available") end
-    client.pause(); return true
+    client.pause(); return { state = state_summary() }
 end
 local function cmd_unpause(p)
     if not CAPS.unpause then error("client.unpause not available") end
-    client.unpause(); return true
+    client.unpause(); return { state = state_summary() }
 end
 local function cmd_frame_advance(p)
     if not CAPS.frameadvance then error("emu.frameadvance not available") end
@@ -1175,11 +1328,11 @@ local function cmd_frame_advance(p)
             end
         end)
     end)
-    return CAPS.framecount and emu.framecount() or nil
+    return { framecount = CAPS.framecount and emu.framecount() or nil, state = state_summary() }
 end
 local function cmd_reset(p)
     if not CAPS.reboot_core then error("client.reboot_core not available") end
-    client.reboot_core(); return true
+    client.reboot_core(); return { state = state_summary() }
 end
 
 local function cmd_screenshot(p)
@@ -1206,7 +1359,7 @@ local function cmd_load_state(p)
     savestate.load(path)
     local want_paused = was_paused or p.pause or false
     if want_paused and CAPS.pause then client.pause() end
-    return { path = path, paused = want_paused }
+    return { path = path, paused = want_paused, state = state_summary() }
 end
 
 -- Frame-advance until a memory condition holds (or a frame budget runs out).
@@ -1304,9 +1457,44 @@ local function cmd_read_struct_array(p)
     end)
 end
 
+local WIDTH_BYTES = {
+    u8 = 1, s8 = 1,
+    u16 = 2, s16 = 2, u16_be = 2, s16_be = 2,
+    u32 = 4, s32 = 4, u32_be = 4, s32_be = 4,
+}
+
+-- Reject an out-of-range freeze BEFORE registering it. BizHawk's memory.write_*
+-- does NOT throw on an out-of-bounds address — it silently drops the write and
+-- logs "attempted write to N outside the memory size of M". Because a frozen
+-- entry is re-asserted every frame (freeze_tick), that warning then repeats
+-- 60×/sec forever until unfrozen. The classic trigger is passing a full 68000
+-- bus address (0xFFxxxx) to the "68K RAM" domain, which is a 64 KB buffer
+-- indexed 0x0000..0xFFFF. Catch it here so the freeze call errors once with a
+-- clear message instead of flooding the console. Best-effort: silently skips
+-- the check on builds without memory.getmemorydomainsize.
+local function validate_freeze_range(addr, width, domain)
+    if not CAPS.memory_get_memorydomain_size then return end
+    local name = domain
+        or (CAPS.memory_get_current_memorydomain and memory.getcurrentmemorydomain())
+    if not name then return end
+    local ok, size = pcall(memory.getmemorydomainsize, name)
+    if not ok or type(size) ~= "number" or size <= 0 then return end
+    local bytes = WIDTH_BYTES[width] or 1
+    if addr < 0 or addr + bytes > size then
+        error(string.format(
+            "freeze address 0x%X (width %s) is outside domain '%s' "
+            .. "(size %d bytes, valid 0x0..0x%X). If this is a full-bus "
+            .. "address, mask to the domain offset (addr & 0x%X) or freeze it "
+            .. "in the full-address bus domain instead (see list_memory_domains "
+            .. "— e.g. 'System Bus' on NES/SNES, 'M68K BUS' on Genesis).",
+            addr, tostring(width), name, size, size - 1, size - 1))
+    end
+end
+
 local function freeze_one(addr, width, value, domain)
     -- Validate NOW (bad width/domain/address should error on this call, not
     -- silently every subsequent frame) — this also applies the first write.
+    validate_freeze_range(addr, width, domain)
     in_domain(domain, function() write_width(addr, width, value) end)
     frozen[freeze_key(domain, addr)] = { address = addr, width = width, value = value, domain = domain }
 end
@@ -1377,6 +1565,77 @@ local function cmd_memory_ops(p)
         applied = applied + 1
     end
     return { applied = applied, frozen_count = frozen_count() }
+end
+
+-- Savestate-anchored input sweep. For each trial: reload the shared
+-- state_path (so trials are independent), play that trial's frames, then read
+-- the shared observe_memory set at the final frame and optionally screenshot.
+-- Collapses N × (load_state + play_input_sequence + read) into one round-trip.
+local function cmd_run_trials(p)
+    if not CAPS.savestate_load then error("savestate.load not available") end
+    if not CAPS.joypad_set     then error("joypad.set not available") end
+    if not CAPS.frameadvance   then error("emu.frameadvance not available") end
+    local state_path = assert(p.state_path, "state_path required")
+    local trials     = assert(p.trials, "trials required (array of {name?, frames})")
+    if type(trials) ~= "table" then error("trials must be an array") end
+
+    local observe     = p.observe_memory  -- nil or array of {name, domain, address, width}
+    local want_shot   = p.screenshot and true or false
+    local shot_dir    = p.screenshot_dir or "C:/temp"
+    local shot_prefix = p.screenshot_prefix or "trial"
+    if want_shot and not CAPS.screenshot then
+        error("screenshot requested but client.screenshot is not available on this build")
+    end
+
+    local out = {}
+    -- keep_video true when screenshotting so turbo doesn't blank the capture.
+    run_unpaused(function()
+    maybe_turbo(p.turbo, want_shot, function()
+    for ti, trial in ipairs(trials) do
+        local name   = (type(trial) == "table" and trial.name) or ("trial" .. ti)
+        local frames = (type(trial) == "table" and trial.frames) or {}
+        if type(frames) ~= "table" then error("trial " .. ti .. ": frames must be an array") end
+
+        -- Independent baseline: every trial starts from the same state.
+        savestate.load(state_path)
+
+        local played = 0
+        for _, frame in ipairs(frames) do
+            local buttons = (type(frame) == "table" and frame.buttons) or {}
+            local player  = (type(frame) == "table" and frame.player) or 1
+            local hold    = (type(frame) == "table" and frame.hold) or 1
+            for _ = 1, hold do
+                joypad.set(buttons, player)
+                emu.frameadvance()
+                frame_hooks()
+                played = played + 1
+            end
+        end
+
+        local rec = {
+            name = name,
+            played = played,
+            final_framecount = CAPS.framecount and emu.framecount() or nil,
+        }
+        if observe then
+            local mem = {}
+            for _, spec in ipairs(observe) do
+                mem[spec.name] = read_memory_widthed(spec.domain, spec.address, spec.width)
+            end
+            rec.memory = mem
+        end
+        if want_shot then
+            -- Sanitize the label for the filename; keep it recognizable.
+            local safe = tostring(name):gsub("[^%w._-]", "_")
+            local path = string.format("%s/%s-%02d-%s.png", shot_dir, shot_prefix, ti, safe)
+            client.screenshot(path)
+            rec.screenshot_path = path
+        end
+        out[ti] = rec
+    end
+    end)
+    end)
+    return { trials = out }
 end
 
 -- Arbitrary-Lua escape hatch. The chunk runs with the bridge's full
@@ -1853,6 +2112,7 @@ local HANDLERS = {
     list_memory_domains  = cmd_list_memory_domains,
     press_buttons        = cmd_press_buttons,
     play_input_sequence  = cmd_play_input_sequence,
+    run_trials           = cmd_run_trials,
     pause                = cmd_pause,
     unpause              = cmd_unpause,
     frame_advance        = cmd_frame_advance,
@@ -1898,7 +2158,7 @@ local function dispatch(cmd)
     -- Echo every received command to the Lua console for visibility.
     local ok_enc, ps = pcall(json.encode, cmd.params or {})
     if not ok_enc then ps = "?" end
-    if #ps > 200 then ps = ps:sub(1, 197) .. "..." end
+    if #ps > 600 then ps = ps:sub(1, 597) .. "..." end
     console.log(string.format("[mcp-bizhawk] << %s %s", cmd.method, ps))
     local handler = HANDLERS[cmd.method]
     if not handler then
@@ -1967,7 +2227,7 @@ local function tick()
     if incoming and type(incoming) == "string" and #incoming > 0 then
         -- ANY received bytes — including a bare "NONE" — prove the link is
         -- alive. This is the heartbeat; command traffic is irrelevant.
-        last_rx_tick = tick_count
+        last_rx_ms = now_ms()
         incoming = incoming:gsub("[\r\n]+$", "")
         local hello = incoming:match("^HELLO (.+)$")
         if hello then
@@ -1975,6 +2235,9 @@ local function tick()
             -- version, so the console shows WHICH server build we reached.
             local ok, h = pcall(json.decode, hello)
             local v = (ok and type(h) == "table" and h.server_version) or "(unknown)"
+            -- Stash it so the OSD can show which server build we're paired with
+            -- alongside the bridge's own version.
+            BRIDGE.server_version = tostring(v)
             console.log("[mcp-bizhawk] bizhawk connected to mcp server v" .. tostring(v))
         elseif incoming ~= "NONE" and #incoming > 0 then
             local parse_ok, cmd = pcall(json.decode, incoming)
@@ -2080,16 +2343,17 @@ end
 while true do
     tick_count = tick_count + 1
 
-    -- Watchdog (v0.5.2). Declare the link dead when EITHER a send returned
-    -- -1 OR nothing has been received for DEAD_AFTER ticks (~10s) after we
-    -- had traffic at least once. A healthy server answers "NONE" every
-    -- frame, so silence — not the absence of commands — means dead. The
-    -- attempt itself is rate-limited so a stale condition can't fire at
-    -- 60Hz like the old heartbeat did.
-    local silent = last_rx_tick > 0 and (tick_count - last_rx_tick) > DEAD_AFTER
+    -- Watchdog. Declare the link dead when EITHER a send returned -1 OR
+    -- nothing has been received for DEAD_AFTER_MS after we had traffic at
+    -- least once. A healthy server answers "NONE" every frame, so silence —
+    -- not the absence of commands — means dead. Timing is wall-clock (now_ms)
+    -- so detection is ~10s regardless of turbo/pause/framerate; the attempt
+    -- is rate-limited so a stale condition can't re-fire every frame.
+    local now = now_ms()
+    local silent = last_rx_ms > 0 and (now - last_rx_ms) > DEAD_AFTER_MS
     if (disconnected or silent)
-        and (tick_count - last_reconnect_tick) >= RECONNECT_INTERVAL then
-        last_reconnect_tick = tick_count
+        and (now - last_reconnect_ms) >= RECONNECT_INTERVAL_MS then
+        last_reconnect_ms = now
         console.log("[mcp-bizhawk] link dead ("
             .. (disconnected and "send failed" or "no rx for 10s")
             .. ") — re-dialing...")
@@ -2101,7 +2365,7 @@ while true do
             -- Grace period: treat the re-dial moment as last rx so the
             -- silence check doesn't immediately re-fire before the first
             -- round-trip completes.
-            last_rx_tick = tick_count
+            last_rx_ms = now_ms()
         else
             console.log("[mcp-bizhawk] re-dial failed: " .. tostring(err))
         end

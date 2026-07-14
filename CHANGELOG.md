@@ -9,6 +9,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [2026.7.3-jd] - 2026-07-14
+
+### Changed
+
+- **Wall-clock link watchdog** — the bridge's dead-link detection is now
+  measured against the real clock (`now_ms()` via .NET `DateTime.Now.Ticks`)
+  instead of frame counts. `DEAD_AFTER_MS` (10 s) and `RECONNECT_INTERVAL_MS`
+  (5 s) now mean actual seconds regardless of emulation speed. The old
+  frame-counted timers drifted with speed — turbo fired "~10 s" in under a
+  second, pause stretched it — because the poll loop is `emu.yield()`-driven.
+- **Wider per-call state block, minus the static bits** — the compact `state`
+  summary that rides along on state-mutating tools now carries the *dynamic*
+  fields an agent re-checks after acting: `framecount`, `paused`, `lag_count`,
+  `is_lagged`, `current_memory_domain`. `rom_hash` (static, ~40 chars) was
+  dropped from the block — it remains in `get_info`. Net effect: the state line
+  is *cheaper* than before while carrying more useful signal.
+
+### Added
+
+- **Inline state on more tools** — `press_buttons`, `load_slot`, `pause`,
+  `unpause`, and `reset` now append the `State: …` line (joining `load_state` /
+  `frame_advance` / `play_input_sequence` / `run_trials`), so agents stop firing
+  `get_info` just to re-read framecount / pause / domain after acting. Additive
+  and back-compatible: the bridge handlers now return `{state}` instead of a
+  bare `true`, and the server prints nothing extra if the block is absent.
+
+### Fixed
+
+- **Freeze address validation** — freezing an address outside its target
+  domain (classic case: a full 68K bus address like `0xFFB04A` frozen into the
+  64 KB `68K RAM` domain) previously slipped past `write_*` (which only *warns*)
+  and then re-logged `attempted write to N outside the memory size of M` every
+  single frame, since freeze re-asserts per frame — flooding the console until
+  unfrozen. The bridge now range-checks against the domain size up front and
+  rejects the freeze call once with a clear message (suggesting the `& 0xFFFF`
+  mask or the full-address bus domain — `System Bus` on NES/SNES, `M68K BUS` on
+  Genesis). Best-effort: skipped on builds lacking `memory.getmemorydomainsize`.
+
+## [2026.7.2-jd] - 2026-07-14
+
+> Version scheme change: the mcp-bizhawk server and the `bridge_JD.lua` client
+> both move to calendar versioning (server version.ts + npm `package.json`, and
+> the bridge's `BRIDGE.version`, all kept in lockstep).
+
+### Added
+
+- **Millisecond timestamps on bridge console output** — every `bridge_JD.lua`
+  console line is now prefixed with a friendly local-timezone timestamp to the
+  millisecond, e.g. `[09:19:32.947] [mcp-bizhawk] << get_info {}`. Sourced from
+  .NET `DateTime.Now` via `luanet` (the only sub-second wall clock the build
+  exposes), with a second-resolution `os.date` fallback.
+- **`bizhawk_run_trials`** — a savestate-anchored input sweep. Give it a
+  `state_path` and a list of `trials` (each with its own `frames`); it reloads
+  the baseline before every trial (so trials are independent), plays that
+  trial's inputs, and reads a shared `observe_memory` set at the final frame,
+  optionally capturing one screenshot per trial. Replaces the manual loop of
+  `load_state` → `play_input_sequence` → read repeated once per candidate
+  (3+ round-trips each) with a single call and one compact per-trial table.
+  Requires bridge_JD.lua ≥ 2026.7.2-jd.
+- **`load_state_path` on `bizhawk_play_input_sequence`** — optionally reload a
+  baseline `.State` immediately before playback, in the same round-trip. The
+  load lands before the `stop_on_memory_change` baseline read and frame 0,
+  collapsing the common `load_state` + `play` trial loop into one call.
+- **`observe_every` on `bizhawk_play_input_sequence`** — capture `observe_memory`
+  readings every N frames WITHOUT taking a screenshot, for a dense per-frame RAM
+  trace that returns as text only (no inlined PNGs). Decouples the memory
+  cadence from `screenshot_every`, which previously forced a screenshot at every
+  observation point. `screenshot_every` still wins if both are given.
+- **`describe` (local vision model) on `bizhawk_screenshot`,
+  `bizhawk_play_input_sequence`, and `bizhawk_run_trials`** — with `describe:
+  true` (+ optional `describe_prompt`), the server sends each screenshot to a
+  configured local OpenAI-compatible vision model and returns its **text**
+  description instead of the binary image — a large token saving on dense or
+  multi-screenshot runs. Configured via server env: `VISION_BASE_URL`,
+  `VISION_MODEL` (both required), `VISION_API_KEY`, `VISION_DEFAULT_PROMPT`,
+  `VISION_TIMEOUT_MS`, `VISION_MAX_BYTES`. Requesting `describe` without config
+  errors clearly; a per-image vision failure degrades to an inline note without
+  losing the run's memory data.
+- **Lag frames + server version in the live OSD** — the overlay header now
+  shows cumulative lag frames (`lag N`, with a trailing `*` when the current
+  frame is a lag frame), and the version line now shows the paired
+  mcp-bizhawk **server** version (`srv vX`) next to the bridge version.
+
+### Changed
+
+- **State summary on frame-changing commands** — `bizhawk_load_state`,
+  `bizhawk_frame_advance`, and `bizhawk_play_input_sequence` now append a
+  `State: frame N, running|paused, rom HASH` line when the bridge supplies it
+  (bridge_JD.lua ≥ 2026.7.2-jd), so agents stop calling `bizhawk_get_info`
+  just to re-check framecount/pause after acting. Older bridges omit the block
+  and the line simply doesn't appear. Internally the bridge's `frame_advance`
+  now returns `{framecount, state}` instead of a bare number; the server
+  accepts either shape, so a new bridge against an older server degrades
+  gracefully.
+- **Version scheme** — reported server version and the bridge (`bridge_JD.lua`)
+  version both move to calendar versioning, `2026.7.2-jd`.
+
 ## [0.5.8-jd] - 2026-07-14
 
 ### Changed
