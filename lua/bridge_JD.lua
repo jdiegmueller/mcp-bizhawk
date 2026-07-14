@@ -1,5 +1,11 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.5-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.6-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.6-jd changes (OSD layout): column header above the skater block;
+--   skater rows drop inline field prefixes (header carries them); blank line
+--   between skaters and the puck; puck split onto TWO lines (position/velocity,
+--   then carrier ratings); client/server versions on their own lines ("client
+--   v… rc N" / "server v…"); canvas narrowed 1280→896.
 --
 -- v2026.7.5-jd changes (OSD: per-field freeze highlight, period, more fields):
 --   * Frozen-value highlight is now per-FIELD, not per-row: only the specific
@@ -384,7 +390,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.5-jd",
+    version    = "2026.7.6-jd",
     pause_safe = true,
 }
 
@@ -702,14 +708,14 @@ end
 local frozen = {}
 
 local OSD_LINE_H = 16   -- gui.text fallback line height (fixed OSD font)
-local OSD_LINES  = 16   -- header + 12 slots + puck + globals + version
+local OSD_LINES  = 20   -- clk + col-header + 12 slots + blank + 2 puck + shot + client + server
 
 -- Canvas render metrics. Widened to fit the expanded per-skater / puck field
 -- set (z, heading fraction, flags, stop-gate, puck Z/Zvel, carrier ratings);
 -- font trimmed ~10% (24→22) so the longer rows fit.
 local OSD_CANVAS_LINE_H = 32
 local OSD_CANVAS_FONT   = 22
-local OSD_CANVAS_W      = 1280
+local OSD_CANVAS_W      = 896   -- was 1280; prefix-less columns + 2-line puck fit narrower
 
 local osd_canvas = nil
 local osd_canvas_failed = false   -- don't retry a broken canvas every frame
@@ -826,47 +832,58 @@ local function osd_lines()
         carrier and ("s" .. carrier) or "--",
         lag)
     overlays[#lines] = nil
+    -- Column header for the skater block. Numeric columns are right-justified so
+    -- the digits sit under the labels; the values below carry no inline prefix.
+    lines[#lines + 1] = string.format("%-4s%5s %5s %4s %2s %5s %13s %2s %3s",
+        "", "x", "y", "z", "d", "f", "xv,yv", "fl", "st")
+    overlays[#lines] = nil
     -- Per-skater row: pos (x,y,z), heading (d octant + f fraction), velocity,
-    -- friction/flags byte (hex), stop/goalie gate. Velocity is fixed-width so
-    -- the fl/st columns line up across rows.
+    -- friction/flags byte (hex), stop/goalie gate. Fixed widths align with the
+    -- header above.
     for n = 0, 11 do
         local base = SORTCORDS + n * SCSIZE
         local fz = ff[n] or {}
         local vis, ov = osd_build({
-            { string.format("s%-2d%s ", n, n == carrier and "*" or " "), fz.other },
-            { string.format("x%-5d ", tr_s16(base + 0x00)), fz.x },
-            { string.format("y%-5d ", tr_s16(base + 0x14)), fz.y },
-            { string.format("z%-5d ", tr_s16(base + 0x18)), fz.z },
-            { string.format("d%-2d ", tr_u16(base + 0x54)), fz.d },
-            { string.format("f%-5d ", tr_u16(base + 0x56)), fz.f },
-            { string.format("v %6d,%6d ", tr_s16(base + 0x28), tr_s16(base + 0x2A)), fz.v },
-            { string.format("fl%02X ", tr_u8(base + 0x62)), fz.fl },
-            { string.format("st%-3d", tr_u16(base + 0x34)), fz.st },
+            { string.format("%-4s", "s" .. n .. (n == carrier and "*" or "")), fz.other },
+            { string.format("%5d ", tr_s16(base + 0x00)), fz.x },
+            { string.format("%5d ", tr_s16(base + 0x14)), fz.y },
+            { string.format("%4d ", tr_s16(base + 0x18)), fz.z },
+            { string.format("%2d ", tr_u16(base + 0x54)), fz.d },
+            { string.format("%5d ", tr_u16(base + 0x56)), fz.f },
+            { string.format("%6d,%6d ", tr_s16(base + 0x28), tr_s16(base + 0x2A)), fz.v },
+            { string.format("%02X ", tr_u8(base + 0x62)), fz.fl },
+            { string.format("%3d", tr_u16(base + 0x34)), fz.st },
         })
         lines[#lines + 1] = vis
         overlays[#lines] = ov
     end
+    -- Blank separator between the skater block and the puck.
+    lines[#lines + 1] = ""
+    overlays[#lines] = nil
+    -- Puck on TWO lines (keeps the window narrow): line 1 position + velocity,
+    -- line 2 the carrier's ratings.
     do
         local fz = ff.puck or {}
-        -- Carrier ratings (from the carrying slot's struct); blank when loose.
+        local vis, ov = osd_build({
+            { "pk  ", fz.other },
+            { string.format("x%-5d ", tr_s16(PUCK_ADDR + 0x00)), fz.x },
+            { string.format("y%-5d ", tr_s16(PUCK_ADDR + 0x14)), fz.y },
+            { string.format("z%-5d ", tr_s16(PUCK_ADDR + 0x18)), fz.z },
+            { string.format("v %d,%d,%d",
+                tr_s16(PUCK_ADDR + 0x28), tr_s16(PUCK_ADDR + 0x2A), tr_s16(PUCK_ADDR + 0x2C)),
+              fz.v or fz.zv },
+        })
+        lines[#lines + 1] = vis
+        overlays[#lines] = ov
+        -- Carrier ratings (from the carrying slot's struct); dashes when loose.
         local sp, sa, pa, en = "--", "--", "--", "--"
         if carrier then
             local cb = SORTCORDS + carrier * SCSIZE
             sp = tostring(tr_u8(cb + 0x6C)); sa = tostring(tr_u8(cb + 0x6D))
             pa = tostring(tr_u8(cb + 0x6E)); en = tostring(tr_u8(cb + 0x66))
         end
-        local vis, ov = osd_build({
-            { "pk   ", fz.other },
-            { string.format("x%-5d ", tr_s16(PUCK_ADDR + 0x00)), fz.x },
-            { string.format("y%-5d ", tr_s16(PUCK_ADDR + 0x14)), fz.y },
-            { string.format("z%-5d ", tr_s16(PUCK_ADDR + 0x18)), fz.z },
-            { string.format("v %6d,%6d,%6d ",
-                tr_s16(PUCK_ADDR + 0x28), tr_s16(PUCK_ADDR + 0x2A), tr_s16(PUCK_ADDR + 0x2C)),
-              fz.v or fz.zv },
-            { string.format("sp%-3s sa%-3s pa%-3s en%-3s", sp, sa, pa, en), false },
-        })
-        lines[#lines + 1] = vis
-        overlays[#lines] = ov
+        lines[#lines + 1] = string.format("    sp%-3s sa%-3s pa%-3s en%-3s", sp, sa, pa, en)
+        overlays[#lines] = nil
     end
     lines[#lines + 1] = string.format("shot s%d  last s%d  pass d%d,%d",
         tr_s16(TRACE_G.shotplayer),
@@ -874,10 +891,11 @@ local function osd_lines()
         tr_s16(TRACE_G.passdir),
         tr_s16(TRACE_G.passspeed))
     overlays[#lines] = nil
-    -- Version line: no "bridge_JD" prefix (it's already the window title) so the
-    -- reconnect counter fits without clipping the canvas.
-    lines[#lines + 1] = string.format("v%s  srv v%s  rc %d",
-        BRIDGE.version, BRIDGE.server_version or "?", reconnect_count)
+    -- Client (bridge) and server versions on their own lines. rc = successful
+    -- re-dials since script load. No "bridge_JD" prefix — it's the window title.
+    lines[#lines + 1] = string.format("client v%s  rc %d", BRIDGE.version, reconnect_count)
+    overlays[#lines] = nil
+    lines[#lines + 1] = string.format("server v%s", BRIDGE.server_version or "?")
     overlays[#lines] = nil
     return lines, overlays
 end

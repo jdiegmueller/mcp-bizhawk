@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [2026.7.6-jd] - 2026-07-14
+
+### Changed
+
+- **OSD layout cleanup.** Added a column header above the skater block and
+  dropped the inline per-cell field prefixes (the header now carries them);
+  inserted a blank separator line between the skaters and the puck; split the
+  puck onto two lines (position/velocity, then carrier ratings) to keep the
+  window narrow; put the client and server versions on their own lines
+  (`client v… rc N` / `server v…`). Canvas narrowed 1280→896; one extra line
+  added for the split version block.
+
 ## [2026.7.5-jd] - 2026-07-14
 
 ### Changed
