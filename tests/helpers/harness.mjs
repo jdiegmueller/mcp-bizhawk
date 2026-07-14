@@ -51,6 +51,7 @@ export async function startHarness(handlers = {}) {
   return {
     client,
     bridge,
+    bh,
     close: async () => {
       bridge.close();
       await client.close();

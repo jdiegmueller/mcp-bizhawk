@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- No unreleased changes yet. -->
 
+## [2026.7.5-jd] - 2026-07-14
+
+### Changed
+
+- **OSD frozen-value highlight is now per-field.** Only the specific pinned
+  value (x/y/z/heading/fraction/velocity/flags/stop-gate) turns red+bold, not
+  the whole row — drawn as a same-layout red overlay over the white line for
+  exact monospace alignment.
+- **OSD canvas widened 640→1280 and font trimmed 24→22** to fit the expanded
+  field set below.
+
+### Added
+
+- **Period indicator on the OSD clock line** — reads `gsp` (`0xFFC466`, u16
+  0-indexed) and shows `1st`/`2nd`/`3rd`/`OT`, matching the on-screen scoreboard.
+- **More per-skater fields:** Z/airborne (`+0x18`), heading fraction (`+0x56`),
+  friction/flags (`+0x62`, hex), stop/goalie gate (`+0x34`).
+- **More puck fields:** Z (`+0x18`), Zvel/loft (`+0x2C`), and the carrier's
+  rating bytes — shot power/accuracy, pass accuracy, energy
+  (`+0x6C`/`+0x6D`/`+0x6E`/`+0x66`).
+
+## [2026.7.4-jd] - 2026-07-14
+
+### Fixed
+
+- **Bridge no longer wedges when the server restarts.** On graceful shutdown
+  (SIGINT / SIGTERM / MCP-client disconnect) the server now sends a framed
+  `BYE` to the bridge *before* closing the socket. The bridge acts on `BYE` by
+  marking the link down and re-dialing the restarting server. Previously a
+  server restart left the bridge — and the entire emulator — frozen forever
+  inside BizHawk's `socketServerResponse()`, which blocks indefinitely on a
+  closed peer (confirmed against 2.11.1: no receive timeout, error, or
+  non-blocking probe surfaces the dead socket in time). The main poll loop now
+  **gates the socket read on the link being up** and only re-dials while it's
+  down, so it can never enter that blocking read on a known-dead link.
+  Re-dial is additionally gated by a non-blocking `/proc/net/tcp` LISTEN check:
+  `socketServerSetIp` does a *blocking connect* that hangs on a dead port until
+  mono aborts EmuHawk (core dump), so the bridge now only attempts the connect
+  once a server is actually listening and otherwise waits — a slow or absent
+  server restart no longer crashes BizHawk, it just reconnects when the server
+  returns. *Limitation:* a hard crash / `kill -9` of the server sends no `BYE`,
+  so the bridge's next read blocks before the silence timeout fires and it can
+  still wedge — recover by reloading the Lua script. Graceful restarts (`BYE`)
+  and silent network drops (wall-clock silence timeout) both recover on their
+  own.
+
+### Added
+
+- **OSD reconnect counter** — the overlay's version line now shows `rc N`, the
+  number of successful re-dials since the script loaded.
+
 ## [2026.7.3-jd] - 2026-07-14
 
 ### Changed

@@ -19,6 +19,7 @@ export class FakeBridge {
     this.pendingResult = null;
     this.hello = null; // parsed payload of the server's HELLO greeting
     this.helloCount = 0;
+    this.bye = false; // set when the server sends its BYE shutdown sentinel
   }
 
   connect() {
@@ -42,6 +43,7 @@ export class FakeBridge {
       this.buf = this.buf.slice(nl + 1);
       line = line.replace(/^\d+ /, ""); // strip BizHawk length prefix
       if (line === "NONE" || line.length === 0) continue;
+      if (line === "BYE") { this.bye = true; continue; }
       if (line.startsWith("HELLO ")) {
         this.hello = JSON.parse(line.slice(6));
         this.helloCount += 1;

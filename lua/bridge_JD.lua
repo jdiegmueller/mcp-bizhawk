@@ -1,5 +1,39 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.3-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.5-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.5-jd changes (OSD: per-field freeze highlight, period, more fields):
+--   * Frozen-value highlight is now per-FIELD, not per-row: only the specific
+--     pinned value (x/y/z/d/f/v/fl/st) turns red+bold, via a same-layout overlay
+--     string drawn over the white line (exact monospace alignment).
+--   * Clock line now leads with the PERIOD (gsp @0xFFC466: 1st/2nd/3rd/OT).
+--   * Per-skater rows gain Z/airborne (+0x18), heading fraction (+0x56),
+--     friction/flags (+0x62, hex) and stop/goalie gate (+0x34). Puck row gains
+--     Z (+0x18), Zvel (+0x2C) and the carrier's ratings (shotpwr/acc, passacc,
+--     energy @+0x6C/6D/6E/66). OSD canvas widened 640→1280, font 24→22 to fit.
+--
+-- v2026.7.4-jd changes (graceful-restart reconnect + OSD reconnect counter):
+--   * The server now sends a framed "BYE" on graceful shutdown (SIGINT/SIGTERM/
+--     MCP-client disconnect) BEFORE closing. On reading BYE the bridge marks the
+--     link down and re-dials the restarted server — fixing the freeze where a
+--     server restart left the bridge (and the whole emulator) wedged forever
+--     inside socketServerResponse(). That call BLOCKS indefinitely on a closed
+--     peer (no timeout/error/non-blocking probe exists in BizHawk 2.11.1 Lua —
+--     verified: socketServerIsConnected/Successful and a send-first probe all
+--     still report healthy right up to the blocking read), so the main loop now
+--     GATES the read on the link being up and only re-dials while it's down.
+--   * Re-dial is itself gated by a /proc/net/tcp LISTEN check (port_listening):
+--     comm.socketServerSetIp does a BLOCKING connect that, against a dead port,
+--     hangs the Lua thread until mono's hang-detector ABORTS EmuHawk (core
+--     dump — verified). So the bridge now only attempts the connect once a
+--     server is actually listening, and otherwise waits — a slow or absent
+--     restart no longer crashes BizHawk; it reconnects whenever the server
+--     returns.
+--     NOTE: a hard crash / kill -9 of the SERVER sends no BYE, so the bridge's
+--     next read blocks before the silence timeout can fire and it still wedges —
+--     recover by reloading the Lua script. Graceful restarts (BYE) and silent
+--     network drops (DEAD_AFTER_MS timeout) both recover on their own.
+--   * OSD version line gains a reconnect counter ("rc N") — successful re-dials
+--     since script load.
 --
 -- v2026.7.3-jd changes (wall-clock watchdog, wider state blocks, freeze guard):
 --   * Link watchdog is now WALL-CLOCK, not frame-counted. New now_ms() reads
@@ -350,7 +384,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.3-jd",
+    version    = "2026.7.5-jd",
     pause_safe = true,
 }
 
@@ -406,6 +440,7 @@ end
 local pending_result = nil
 local tick_count = 0
 local disconnected = false
+local reconnect_count = 0   -- successful re-dials since script load (shown in OSD)
 
 -- Link-liveness bookkeeping. The server answers every frame's READY with at
 -- least "NONE", so a healthy link RECEIVES bytes every frame. last_rx_ms is
@@ -492,10 +527,18 @@ local TRACE_FIELDS = {
 
 local TRACE_G = {
     gameclock = 0xFFC468, puckc = 0xFFB7AA,
+    gsp       = 0xFFC466,   -- current period (u16, 0-indexed: 0=1st,1=2nd,2=3rd,3=OT)
     RNGseed   = 0xFFD066, collflag = 0xFFBFA0, evalue = 0xFFBFA2,
     gmode     = 0xFFC2EA, shotplayer = 0xFFBED8, lastplayer = 0xFFBEDA,
     passdir   = 0xFFBEDC, passspeed = 0xFFBEDE,
 }
+
+-- Period label from gsp (0-indexed). 4+ = further OT / shootout.
+local function period_label(p)
+    if p == 0 then return "1st" elseif p == 1 then return "2nd"
+    elseif p == 2 then return "3rd" elseif p == 3 then return "OT"
+    else return "OT" .. (p - 2) end
+end
 
 local TRACE_BTN_ORDER = {"Up","Down","Left","Right","A","B","C","Start"}
 local TRACE_BTN_CHAR  = {"U","D","L","R","A","B","C","S"}
@@ -653,13 +696,20 @@ if gui and has(gui, "text") then
     osd_text = function(x, y, s) gui.text(x, y, s) end
 end
 
+-- Frozen-address table (cheat-style pins). Declared HERE — before the OSD code
+-- — so osd_lines() can highlight rows whose memory is frozen. Populated/consumed
+-- by the freeze_* helpers and freeze_tick() defined later in the file.
+local frozen = {}
+
 local OSD_LINE_H = 16   -- gui.text fallback line height (fixed OSD font)
 local OSD_LINES  = 16   -- header + 12 slots + puck + globals + version
 
--- Canvas render metrics (v0.14.0: 2x the original size).
+-- Canvas render metrics. Widened to fit the expanded per-skater / puck field
+-- set (z, heading fraction, flags, stop-gate, puck Z/Zvel, carrier ratings);
+-- font trimmed ~10% (24→22) so the longer rows fit.
 local OSD_CANVAS_LINE_H = 32
-local OSD_CANVAS_FONT   = 24
-local OSD_CANVAS_W      = 640
+local OSD_CANVAS_FONT   = 22
+local OSD_CANVAS_W      = 1280
 
 local osd_canvas = nil
 local osd_canvas_failed = false   -- don't retry a broken canvas every frame
@@ -692,8 +742,67 @@ local function osd_carrier()
     return nil
 end
 
+-- Map each frozen memory location to the specific player/puck FIELD it pins, so
+-- the OSD can highlight just that value (not the whole row). Normalize every
+-- frozen entry to a full 68K address (0xFFxxxx) — the user may freeze it in the
+-- "M68K BUS" domain (already full) or "68K RAM" (0-based offset) — then map it
+-- onto the SORTCORDS slot grid + in-struct offset. Returns fields[key] tables
+-- (key = slot 0-11 or "puck") with booleans x/y/d/v (a displayed field) or
+-- `other` (a frozen byte we show no column for — flags the row label instead).
+local function osd_frozen_fields()
+    local out = {}
+    local function mark(key, off)
+        local t = out[key]; if not t then t = {}; out[key] = t end
+        if     off == 0x00 or off == 0x02 then t.x = true      -- Xpos 16.16
+        elseif off == 0x14 or off == 0x16 then t.y = true      -- Ypos 16.16
+        elseif off == 0x18 or off == 0x1A then t.z = true      -- Zpos/airborne 16.16
+        elseif off == 0x54                then t.d = true      -- heading octant
+        elseif off == 0x56                then t.f = true      -- heading fraction
+        elseif off == 0x28 or off == 0x2A then t.v = true      -- Xvel / Yvel
+        elseif off == 0x2C                then t.zv = true     -- Zvel (puck loft)
+        elseif off == 0x34                then t.st = true     -- stop/goalie gate
+        elseif off == 0x62                then t.fl = true     -- friction/flags
+        else t.other = true end
+    end
+    for _, f in pairs(frozen) do
+        local a = f.address
+        local full
+        if a >= 0xFF0000 then full = a               -- full-bus address
+        elseif a < 0x10000 then full = 0xFF0000 + a  -- 68K RAM offset
+        else full = a end
+        if full >= SORTCORDS then
+            local rel  = full - SORTCORDS
+            local slot = rel // SCSIZE
+            local off  = rel % SCSIZE
+            if slot >= 0 and slot <= 11 then mark(slot, off)
+            elseif slot == 14 then mark("puck", off) end   -- PUCK_ADDR = SORTCORDS+14*SCSIZE
+        end
+    end
+    return out
+end
+
+local OSD_RED = 0xFFFF4040   -- frozen-value highlight (ARGB)
+
+-- Build a visible line from {text, hot} segments plus a same-length "overlay"
+-- string that carries ONLY the hot (frozen) segments' characters, spaces
+-- elsewhere. Drawing the overlay in red over the white line highlights exactly
+-- the frozen value(s) with perfect alignment (identical monospace layout).
+-- Returns visible, overlay-or-nil.
+local function osd_build(segs)
+    local vis, ov, any = {}, {}, false
+    for _, s in ipairs(segs) do
+        vis[#vis + 1] = s[1]
+        if s[2] then ov[#ov + 1] = s[1]; any = true
+        else ov[#ov + 1] = string.rep(" ", #s[1]) end
+    end
+    return table.concat(vis), (any and table.concat(ov) or nil)
+end
+
+-- Returns two parallel arrays: the text lines and a per-line red overlay string
+-- (nil = nothing frozen on that line). Only the frozen VALUE is highlighted.
 local function osd_lines()
-    local lines = {}
+    local lines, overlays = {}, {}
+    local ff = osd_frozen_fields()
     local clock   = tr_u16(TRACE_G.gameclock)   -- seconds remaining in period
     -- gmode bit 0 SET means the clock is STOPPED (verified live 2026-07-13:
     -- clock ticks down while gmode==0, holds while gmode==1). Note the trace
@@ -709,35 +818,68 @@ local function osd_lines()
         local now = has(emu, "islagged") and emu.islagged()
         lag = string.format("   lag %d%s", emu.lagcount(), now and "*" or "")
     end
-    lines[#lines + 1] = string.format("clk %d:%02d %s   carry %s%s",
-        clock // 60, clock % 60,
+    -- Period (gsp) leads the clock line, matching the on-screen scoreboard.
+    local period = period_label(tr_u16(TRACE_G.gsp))
+    lines[#lines + 1] = string.format("%-3s %d:%02d %s   carry %s%s",
+        period, clock // 60, clock % 60,
         running and "run " or "stop",
         carrier and ("s" .. carrier) or "--",
         lag)
+    overlays[#lines] = nil
+    -- Per-skater row: pos (x,y,z), heading (d octant + f fraction), velocity,
+    -- friction/flags byte (hex), stop/goalie gate. Velocity is fixed-width so
+    -- the fl/st columns line up across rows.
     for n = 0, 11 do
         local base = SORTCORDS + n * SCSIZE
-        lines[#lines + 1] = string.format("s%-2d%s x%-5d y%-5d d%-2d v %d,%d",
-            n,
-            n == carrier and "*" or " ",
-            tr_s16(base + 0x00),
-            tr_s16(base + 0x14),
-            tr_u16(base + 0x54),
-            tr_s16(base + 0x28),
-            tr_s16(base + 0x2A))
+        local fz = ff[n] or {}
+        local vis, ov = osd_build({
+            { string.format("s%-2d%s ", n, n == carrier and "*" or " "), fz.other },
+            { string.format("x%-5d ", tr_s16(base + 0x00)), fz.x },
+            { string.format("y%-5d ", tr_s16(base + 0x14)), fz.y },
+            { string.format("z%-5d ", tr_s16(base + 0x18)), fz.z },
+            { string.format("d%-2d ", tr_u16(base + 0x54)), fz.d },
+            { string.format("f%-5d ", tr_u16(base + 0x56)), fz.f },
+            { string.format("v %6d,%6d ", tr_s16(base + 0x28), tr_s16(base + 0x2A)), fz.v },
+            { string.format("fl%02X ", tr_u8(base + 0x62)), fz.fl },
+            { string.format("st%-3d", tr_u16(base + 0x34)), fz.st },
+        })
+        lines[#lines + 1] = vis
+        overlays[#lines] = ov
     end
-    lines[#lines + 1] = string.format("pk   x%-5d y%-5d      v %d,%d",
-        tr_s16(PUCK_ADDR + 0x00),
-        tr_s16(PUCK_ADDR + 0x14),
-        tr_s16(PUCK_ADDR + 0x28),
-        tr_s16(PUCK_ADDR + 0x2A))
+    do
+        local fz = ff.puck or {}
+        -- Carrier ratings (from the carrying slot's struct); blank when loose.
+        local sp, sa, pa, en = "--", "--", "--", "--"
+        if carrier then
+            local cb = SORTCORDS + carrier * SCSIZE
+            sp = tostring(tr_u8(cb + 0x6C)); sa = tostring(tr_u8(cb + 0x6D))
+            pa = tostring(tr_u8(cb + 0x6E)); en = tostring(tr_u8(cb + 0x66))
+        end
+        local vis, ov = osd_build({
+            { "pk   ", fz.other },
+            { string.format("x%-5d ", tr_s16(PUCK_ADDR + 0x00)), fz.x },
+            { string.format("y%-5d ", tr_s16(PUCK_ADDR + 0x14)), fz.y },
+            { string.format("z%-5d ", tr_s16(PUCK_ADDR + 0x18)), fz.z },
+            { string.format("v %6d,%6d,%6d ",
+                tr_s16(PUCK_ADDR + 0x28), tr_s16(PUCK_ADDR + 0x2A), tr_s16(PUCK_ADDR + 0x2C)),
+              fz.v or fz.zv },
+            { string.format("sp%-3s sa%-3s pa%-3s en%-3s", sp, sa, pa, en), false },
+        })
+        lines[#lines + 1] = vis
+        overlays[#lines] = ov
+    end
     lines[#lines + 1] = string.format("shot s%d  last s%d  pass d%d,%d",
         tr_s16(TRACE_G.shotplayer),
         tr_s16(TRACE_G.lastplayer),
         tr_s16(TRACE_G.passdir),
         tr_s16(TRACE_G.passspeed))
-    lines[#lines + 1] = string.format("%s v%s  srv v%s",
-        BRIDGE.name, BRIDGE.version, BRIDGE.server_version or "?")
-    return lines
+    overlays[#lines] = nil
+    -- Version line: no "bridge_JD" prefix (it's already the window title) so the
+    -- reconnect counter fits without clipping the canvas.
+    lines[#lines + 1] = string.format("v%s  srv v%s  rc %d",
+        BRIDGE.version, BRIDGE.server_version or "?", reconnect_count)
+    overlays[#lines] = nil
+    return lines, overlays
 end
 
 local function osd_tick()
@@ -745,11 +887,19 @@ local function osd_tick()
     local canvas = osd_get_canvas()
     if canvas then
         local ok = pcall(function()
-            local lines = osd_lines()
+            local lines, overlays = osd_lines()
             canvas.Clear(0xFF101010)
             for i, s in ipairs(lines) do
-                canvas.DrawText(4, 4 + (i - 1) * OSD_CANVAS_LINE_H, s,
-                    0xFFFFFFFF, nil, OSD_CANVAS_FONT, "Courier New")
+                local y = 4 + (i - 1) * OSD_CANVAS_LINE_H
+                canvas.DrawText(4, y, s, 0xFFFFFFFF, nil, OSD_CANVAS_FONT, "Courier New")
+                -- Over-draw only the frozen field(s) in red (same layout → exact
+                -- alignment), twice at a 1px offset for a pseudo-bold weight
+                -- (LuaCanvas has no bold flag).
+                local ov = overlays[i]
+                if ov then
+                    canvas.DrawText(4, y, ov, OSD_RED, nil, OSD_CANVAS_FONT, "Courier New")
+                    canvas.DrawText(5, y, ov, OSD_RED, nil, OSD_CANVAS_FONT, "Courier New")
+                end
             end
             canvas.Refresh()
         end)
@@ -1110,7 +1260,8 @@ end
 -- ── Frozen addresses (cheat-style) ──────────────────────────────────────────
 -- Re-written after every emulated frame by frame_hooks(). Keyed by
 -- "<domain or ''>:<address>" so the same offset in two domains can coexist.
-local frozen = {}
+-- (The `frozen` table itself is declared earlier, above the OSD code, so the
+-- overlay can highlight frozen rows.)
 
 local function freeze_key(domain, address)
     return (domain or "") .. ":" .. tostring(address)
@@ -2187,6 +2338,40 @@ end
 --   * The fresh socket has a default ReceiveTimeout (blocking) — SetTimeout
 --     must be re-applied or the next socketServerResponse() on an idle link
 --     hangs the entire emulator.
+-- Is anything LISTENing on our target port RIGHT NOW? This is the safety gate
+-- in front of redial(): comm.socketServerSetIp does a BLOCKING connect, and if
+-- the port is dead it hangs the Lua thread long enough that mono's hang-detector
+-- ABORTS EmuHawk (core dump) — verified. There is no connect timeout or
+-- non-blocking connect in BizHawk's Lua. So on Linux we cheaply read
+-- /proc/net/tcp{,6} (a plain file, never blocks) and only redial once a server
+-- is actually accepting. Returns true (listening), false (checked, not
+-- listening), or nil (couldn't read /proc — non-Linux; caller falls back to
+-- attempting the redial as before).
+local function port_listening(port)
+    if not port then return nil end
+    local hexport = string.format("%04X", port)
+    local checked = false
+    for _, path in ipairs({ "/proc/net/tcp", "/proc/net/tcp6" }) do
+        local fh = io.open(path, "r")
+        if fh then
+            checked = true
+            for line in fh:lines() do
+                -- fields: sl  local_address  rem_address  st  ...
+                -- st "0A" == TCP_LISTEN. Match the port regardless of local IP
+                -- (server may bind 0.0.0.0 or 127.0.0.1 or ::).
+                local laddr, st = line:match("^%s*%d+:%s+(%S+)%s+%S+%s+(%x%x)")
+                if laddr and st == "0A" and laddr:match(":(%x+)$") == hexport then
+                    fh:close()
+                    return true
+                end
+            end
+            fh:close()
+        end
+    end
+    if checked then return false end
+    return nil
+end
+
 local function redial()
     if not CAPS.socket_redial then
         return false, "socketServerSetIp/GetIp not available on this build"
@@ -2239,6 +2424,23 @@ local function tick()
             -- alongside the bridge's own version.
             BRIDGE.server_version = tostring(v)
             console.log("[mcp-bizhawk] bizhawk connected to mcp server v" .. tostring(v))
+        elseif incoming == "BYE" then
+            -- Server is shutting down gracefully (restart/upgrade). Mark the
+            -- link down NOW so the main loop stops calling tick() — the very
+            -- next socketServerResponse() would block forever on the imminent
+            -- close and wedge the whole emulator. The watchdog then re-dials
+            -- the restarted server. (A hard crash sends no BYE — that case
+            -- can still wedge; nothing in BizHawk's Lua lets us avoid it.)
+            disconnected = true
+            pending_result = nil
+            -- Delay the first re-dial by one RECONNECT_INTERVAL so the server
+            -- has time to come back up and bind the port. comm.socketServerSetIp
+            -- does a BLOCKING connect — re-dialing into a port with no listener
+            -- yet hangs the Lua thread long enough for mono's hang-detector to
+            -- KILL EmuHawk. Waiting avoids racing the restart.
+            last_reconnect_ms = now_ms()
+            console.log("[mcp-bizhawk] server said BYE (shutting down) — re-dialing in "
+                .. (RECONNECT_INTERVAL_MS // 1000) .. "s")
         elseif incoming ~= "NONE" and #incoming > 0 then
             local parse_ok, cmd = pcall(json.decode, incoming)
             if parse_ok and type(cmd) == "table" then
@@ -2266,6 +2468,9 @@ local function tick()
     if sent == -1 then
         disconnected = true
         pending_result = nil
+        -- Same delay rationale as the BYE path: give the server time to rebind
+        -- before the blocking re-dial connect.
+        last_reconnect_ms = now_ms()
     end
 end
 
@@ -2303,6 +2508,9 @@ if (comm.socketServerGetIp   and (ip == nil or ip == "")) or
     console.log("[mcp-bizhawk] Launch BizHawk with --socket_ip=127.0.0.1 --socket_port=8766 (matching a running mcp-bizhawk server), then reload this script.")
     return
 end
+
+-- Cached for the reconnect safety gate (port_listening) in the main loop.
+local target_port = port
 
 console.log(string.format("[mcp-bizhawk] socket server target: %s:%s",
     tostring(ip or "(unknown)"), tostring(port or "(unknown)")))
@@ -2343,35 +2551,50 @@ end
 while true do
     tick_count = tick_count + 1
 
-    -- Watchdog. Declare the link dead when EITHER a send returned -1 OR
-    -- nothing has been received for DEAD_AFTER_MS after we had traffic at
-    -- least once. A healthy server answers "NONE" every frame, so silence —
-    -- not the absence of commands — means dead. Timing is wall-clock (now_ms)
-    -- so detection is ~10s regardless of turbo/pause/framerate; the attempt
-    -- is rate-limited so a stale condition can't re-fire every frame.
+    -- Watchdog. The link is DOWN when a send returned -1, the server sent BYE,
+    -- or nothing has been received for DEAD_AFTER_MS (wall clock). A healthy
+    -- server answers "NONE" every frame, so silence — not the absence of
+    -- commands — means dead. CRITICAL: once down we STOP calling tick(). BizHawk's
+    -- socketServerResponse() blocks forever on a peer that has closed (no
+    -- timeout, no error, no non-blocking probe — verified against 2.11.1), which
+    -- would wedge this loop AND the whole emulator. So we gate the read on the
+    -- link being up and only redial (rate-limited) while it's down.
     local now = now_ms()
-    local silent = last_rx_ms > 0 and (now - last_rx_ms) > DEAD_AFTER_MS
-    if (disconnected or silent)
-        and (now - last_reconnect_ms) >= RECONNECT_INTERVAL_MS then
+    if not disconnected and last_rx_ms > 0 and (now - last_rx_ms) > DEAD_AFTER_MS then
+        disconnected = true  -- silence: stop reading, start re-dialing
+        console.log("[mcp-bizhawk] no rx for " .. (DEAD_AFTER_MS // 1000) .. "s — link down")
+    end
+    if disconnected and (now - last_reconnect_ms) >= RECONNECT_INTERVAL_MS then
         last_reconnect_ms = now
-        console.log("[mcp-bizhawk] link dead ("
-            .. (disconnected and "send failed" or "no rx for 10s")
-            .. ") — re-dialing...")
-        local ok, err = redial()
-        if ok then
-            console.log("[mcp-bizhawk] reconnected (fresh socket)")
-            disconnected = false
-            pending_result = nil
-            -- Grace period: treat the re-dial moment as last rx so the
-            -- silence check doesn't immediately re-fire before the first
-            -- round-trip completes.
-            last_rx_ms = now_ms()
+        -- SAFETY GATE: never call the blocking redial() connect unless a server
+        -- is actually LISTENing on our port — otherwise SetIp hangs and mono
+        -- aborts EmuHawk. port_listening() reads /proc/net/tcp (non-blocking).
+        -- false = confirmed down (wait); nil = can't check (non-Linux → attempt).
+        local listening = port_listening(target_port)
+        if listening == false then
+            console.log("[mcp-bizhawk] link down — server not listening on port "
+                .. tostring(target_port) .. " yet, waiting")
         else
-            console.log("[mcp-bizhawk] re-dial failed: " .. tostring(err))
+            console.log("[mcp-bizhawk] link down — re-dialing...")
+            local ok, err = redial()
+            if ok then
+                reconnect_count = reconnect_count + 1
+                console.log("[mcp-bizhawk] reconnected (fresh socket, #" .. reconnect_count .. ")")
+                disconnected = false
+                pending_result = nil
+                -- Grace period: treat the re-dial moment as last rx so the silence
+                -- check doesn't immediately re-fire before the first round-trip.
+                last_rx_ms = now_ms()
+            else
+                console.log("[mcp-bizhawk] re-dial failed: " .. tostring(err))
+            end
         end
     end
 
-    tick()
+    -- Only poll the socket while the link is up — see the CRITICAL note above.
+    if not disconnected then
+        tick()
+    end
     frame_hooks()
     -- ALWAYS yield here, never frameadvance. emu.frameadvance() blocks until
     -- a frame actually emulates, so if the emulator gets paused (keyboard

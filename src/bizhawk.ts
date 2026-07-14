@@ -97,7 +97,19 @@ export class BizhawkServer {
   }
 
   stop(): void {
-    this.client?.destroy();
+    // Graceful goodbye: tell the bridge we're going away BEFORE closing, so it
+    // redials the (restarting) server instead of wedging on its next blocking
+    // socketServerResponse() — a bare FIN/RST makes BizHawk's read spin forever
+    // and freezes the whole emulator. end() flushes the BYE then half-closes;
+    // callers that then process.exit should give it a brief moment to drain.
+    if (this.client && !this.client.destroyed) {
+      try {
+        this.sendFramed("BYE");
+        this.client.end();
+      } catch {
+        this.client.destroy();
+      }
+    }
     this.client = null;
     this.server?.close();
     this.server = null;

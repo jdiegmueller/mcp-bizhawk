@@ -45,8 +45,11 @@ async function main() {
   // EADDRINUSE until the orphan is manually killed.
   const shutdown = (reason: string) => {
     process.stderr.write(`[mcp-bizhawk] shutting down (${reason})\n`);
-    bh.stop();
-    process.exit(0);
+    bh.stop(); // sends BYE + half-closes the bridge socket
+    // Give the BYE + FIN a beat to flush to the bridge before we exit — without
+    // it process.exit() can truncate the write and the bridge never sees BYE
+    // (then it wedges on its next read instead of redialing the new server).
+    setTimeout(() => process.exit(0), 150);
   };
   process.stdin.on("end",   () => shutdown("stdin closed"));
   process.stdin.on("close", () => shutdown("stdin closed"));
