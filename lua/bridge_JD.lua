@@ -1,5 +1,16 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.8-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.9-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.9-jd changes (OSD off by default + backtick toggle):
+--   * The OSD is now OFF at startup. The separate LuaCanvas window's per-frame
+--     repaint costs real emulation speed under Mono/Linux (audible audio
+--     slowdown), so it no longer runs unless asked for. The window is created
+--     lazily on first enable, so a session that never opens it pays nothing.
+--   * Press the End key to toggle the OSD on/off at runtime. The key is polled
+--     each frame via input.get() (BizHawk/SDL2 reports it as "End"), edge-
+--     triggered so a held key flips once. trace_start/trace_stop's `osd` param
+--     still works too. Turning it off blanks the window once (LuaCanvas exposes
+--     no close to Lua) and stops the per-frame draw.
 --
 -- v2026.7.8-jd changes (freeze perf + OSD frame#):
 --   * freeze_tick rewritten for scale. It re-asserts every frozen value each
@@ -414,7 +425,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.8-jd",
+    version    = "2026.7.9-jd",
     pause_safe = true,
 }
 
@@ -711,13 +722,16 @@ end
 --           (+0x28/+0x2A); the carrier slot is starred
 --   pk:     puck position/velocity (no facing)
 --   footer: shotplayer/lastplayer slots and pass direction/speed globals
--- Set TRACE_OSD = false to disable, or toggle at runtime via
--- trace_start/trace_stop's `osd` param.
+-- OSD is OFF by default (the separate LuaCanvas window's per-frame repaint
+-- costs real emulation speed under Mono/Linux). Press the End key to toggle it
+-- on/off at runtime; it can also be driven by trace_start/trace_stop's `osd`
+-- param. The window is only created on the first toggle-on, so a session that
+-- never opens the OSD pays nothing for it.
 --
 -- Rendering prefers a SEPARATE WINDOW (gui.createcanvas LuaCanvas) so the
 -- game view stays clean; if the build can't create one (or the window dies
 -- — e.g. user closes it), it falls back to the on-game gui.text overlay.
-local TRACE_OSD = true
+local TRACE_OSD = false
 
 -- gui.text (EmuHawk OSD renderer, window coords) — NOT gui.pixelText, whose
 -- bitmap font renders as empty boxes under mono/Linux.
@@ -976,7 +990,34 @@ local function osd_lines()
     return lines, overlays
 end
 
+-- The End key toggles the OSD. BizHawk's SDL2 input reports it as "End"
+-- (WinForms Keys enum name; confirmed present in BizHawk.Bizware.Input) — not a
+-- Genesis input and not a default BizHawk hotkey, so no collision. Edge-
+-- triggered off osd_key_was_down so holding it flips once.
+local OSD_TOGGLE_KEYS = { End = true }
+local osd_key_was_down = false
+
+local function osd_poll_toggle()
+    if not (input and has(input, "get")) then return end
+    local ok, keys = pcall(input.get)
+    if not ok or type(keys) ~= "table" then return end
+    local down = false
+    for name in pairs(OSD_TOGGLE_KEYS) do if keys[name] then down = true; break end end
+    if down and not osd_key_was_down then
+        TRACE_OSD = not TRACE_OSD
+        console.log("[mcp-bizhawk] OSD " .. (TRACE_OSD and "ON" or "OFF") .. " (End key toggle)")
+        -- Turning OFF: LuaCanvas exposes no Close/Hide to Lua, so blank the
+        -- window once (kills stale content) and then stop the per-frame draw —
+        -- an idle, un-refreshed window doesn't incur the repaint cost.
+        if not TRACE_OSD and osd_canvas then
+            pcall(function() osd_canvas.Clear(0xFF101010); osd_canvas.Refresh() end)
+        end
+    end
+    osd_key_was_down = down
+end
+
 local function osd_tick()
+    osd_poll_toggle()
     if not TRACE_OSD then return end
     local canvas = osd_get_canvas()
     if canvas then
@@ -2638,6 +2679,15 @@ if comm.socketServerSetTimeout then
 end
 
 console.log("[mcp-bizhawk] frame loop active — bridge is polling once per frame")
+
+-- OSD starts OFF (see TRACE_OSD). Tell the user how to bring it up, and warn if
+-- the host input library isn't available to catch the backtick toggle.
+if input and has(input, "get") then
+    console.log("[mcp-bizhawk] OSD off by default — press End to toggle it on/off")
+else
+    console.log("[mcp-bizhawk] OSD off by default; input.get unavailable — End-key toggle disabled "
+        .. "(use trace_start osd=true)")
+end
 
 if CAPS.socket_redial then
     console.log("[mcp-bizhawk] auto-reconnect enabled (SetIp re-dial) — retries every ~5s if the link dies")
