@@ -1,5 +1,17 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.6-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.7-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.7-jd changes (OSD: system/game split): all emulation telemetry moves
+--   to ONE line at the TOP — client+server version, reconnect count (rc), and
+--   lag frames (lag was previously on the game-clock line). Versions COLLAPSE to
+--   a single "v…" when client and server match; when they differ they split to
+--   "cli v… srv v…" and the OLDER build is drawn orange+bold to flag the stale
+--   component. The two bottom "client v…"/"server v…" lines are gone (folded
+--   up), so the game-clock line is now pure NHL94 and OSD_LINES drops 20→19.
+--   Also: freezing the puck-carrier global (0xFFB7AA) now reddens the "carry
+--   sN" value on the clock line — its dedicated readout — instead of the bare
+--   "pk" label (0xFFB7AA physically sits at puck-slot offset 0x60, which has no
+--   puck column). Other un-columned puck bytes still highlight the "pk" label.
 --
 -- v2026.7.6-jd changes (OSD layout): column header above the skater block;
 --   skater rows drop inline field prefixes (header carries them); blank line
@@ -390,7 +402,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.6-jd",
+    version    = "2026.7.7-jd",
     pause_safe = true,
 }
 
@@ -708,7 +720,7 @@ end
 local frozen = {}
 
 local OSD_LINE_H = 16   -- gui.text fallback line height (fixed OSD font)
-local OSD_LINES  = 20   -- clk + col-header + 12 slots + blank + 2 puck + shot + client + server
+local OSD_LINES  = 19   -- sys + clk + col-header + 12 slots + blank + 2 puck + shot
 
 -- Canvas render metrics. Widened to fit the expanded per-skater / puck field
 -- set (z, heading fraction, flags, stop-gate, puck Z/Zvel, carrier ratings);
@@ -776,7 +788,13 @@ local function osd_frozen_fields()
         if a >= 0xFF0000 then full = a               -- full-bus address
         elseif a < 0x10000 then full = 0xFF0000 + a  -- 68K RAM offset
         else full = a end
-        if full >= SORTCORDS then
+        -- The puck-carrier global (0xFFB7AA, u16) physically lives inside the
+        -- puck's object slot (slot 14, offset 0x60) but is shown by the "carry"
+        -- field on the clock line — not by any puck column. Route it there so a
+        -- frozen carrier highlights "carry sN" instead of the bare "pk" label.
+        if full == TRACE_G.puckc or full == TRACE_G.puckc + 1 then
+            out.carry = true
+        elseif full >= SORTCORDS then
             local rel  = full - SORTCORDS
             local slot = rel // SCSIZE
             local off  = rel % SCSIZE
@@ -787,7 +805,26 @@ local function osd_frozen_fields()
     return out
 end
 
-local OSD_RED = 0xFFFF4040   -- frozen-value highlight (ARGB)
+local OSD_RED    = 0xFFFF4040   -- frozen-value highlight (ARGB)
+local OSD_ORANGE = 0xFFFFA030   -- stale-version highlight (ARGB) on the system line
+
+-- Compare two calendar-version strings by their numeric components only
+-- ("2026.7.6-jd" → {2026,7,6}; the "-jd" suffix and any other non-digits are
+-- ignored). Returns -1 if a<b, 1 if a>b, 0 if equal/uncomparable. Used to flag
+-- the OLDER of the client/server pair on the OSD system line.
+local function version_cmp(a, b)
+    local function parts(v)
+        local t = {}
+        for n in tostring(v):gmatch("%d+") do t[#t + 1] = tonumber(n) end
+        return t
+    end
+    local pa, pb = parts(a), parts(b)
+    for i = 1, math.max(#pa, #pb) do
+        local x, y = pa[i] or 0, pb[i] or 0
+        if x < y then return -1 elseif x > y then return 1 end
+    end
+    return 0
+end
 
 -- Build a visible line from {text, hot} segments plus a same-length "overlay"
 -- string that carries ONLY the hot (frozen) segments' characters, spaces
@@ -816,22 +853,49 @@ local function osd_lines()
     -- a clock-STOPPED flag.
     local running = (tr_u8(TRACE_G.gmode) & 1) == 0
     local carrier = osd_carrier()
+    -- System/emulation line (v2026.7.7-jd): client+server version, reconnect
+    -- count (rc), and lag frames — all the non-game telemetry on ONE line at the
+    -- top. Versions COLLAPSE to a single "v…" when client and server match (the
+    -- normal case); when they differ they split to "cli v… srv v…" and the OLDER
+    -- build is drawn orange+bold to flag the stale component.
     -- Lag frames: emu.lagcount() is the cumulative total; a trailing '*' marks
     -- the current frame as itself a lag frame (emu.islagged()). Guarded with
     -- has() rather than CAPS because CAPS is declared after this function.
-    local lag = ""
+    local lag = "lag ?"
     if emu and has(emu, "lagcount") then
         local now = has(emu, "islagged") and emu.islagged()
-        lag = string.format("   lag %d%s", emu.lagcount(), now and "*" or "")
+        lag = string.format("lag %d%s", emu.lagcount(), now and "*" or "")
     end
-    -- Period (gsp) leads the clock line, matching the on-screen scoreboard.
+    local cliver = tostring(BRIDGE.version)
+    local srvver = tostring(BRIDGE.server_version or "?")
+    if cliver == srvver then
+        lines[#lines + 1] = string.format("v%s  rc %d  %s", cliver, reconnect_count, lag)
+        overlays[#lines] = nil
+    else
+        -- Only rank the pair when BOTH carry version digits; a bare "?" (no
+        -- HELLO from the server yet) is shown but highlights nothing.
+        local cmp = 0
+        if cliver:match("%d") and srvver:match("%d") then cmp = version_cmp(cliver, srvver) end
+        local vis, ov = osd_build({
+            { "cli v" .. cliver,          cmp < 0 },
+            { "  srv v" .. srvver,        cmp > 0 },
+            { string.format("  rc %d  %s", reconnect_count, lag), false },
+        })
+        lines[#lines + 1] = vis
+        overlays[#lines] = ov and { str = ov, color = OSD_ORANGE } or nil
+    end
+    -- Game-clock line — pure NHL94 now (lag moved up). Period (gsp) leads,
+    -- matching the on-screen scoreboard. The carrier VALUE is its own segment so
+    -- a frozen carrier (ff.carry) turns just "sN"/"--" red (like the per-field
+    -- freeze highlight on skater rows).
     local period = period_label(tr_u16(TRACE_G.gsp))
-    lines[#lines + 1] = string.format("%-3s %d:%02d %s   carry %s%s",
-        period, clock // 60, clock % 60,
-        running and "run " or "stop",
-        carrier and ("s" .. carrier) or "--",
-        lag)
-    overlays[#lines] = nil
+    local vis, ov = osd_build({
+        { string.format("%-3s %d:%02d %s   carry ",
+            period, clock // 60, clock % 60, running and "run " or "stop"), false },
+        { carrier and ("s" .. carrier) or "--", ff.carry },
+    })
+    lines[#lines + 1] = vis
+    overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
     -- Column header for the skater block. Numeric columns are right-justified so
     -- the digits sit under the labels; the values below carry no inline prefix.
     lines[#lines + 1] = string.format("%-4s%5s %5s %4s %2s %5s %13s %2s %3s",
@@ -855,7 +919,7 @@ local function osd_lines()
             { string.format("%3d", tr_u16(base + 0x34)), fz.st },
         })
         lines[#lines + 1] = vis
-        overlays[#lines] = ov
+        overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
     end
     -- Blank separator between the skater block and the puck.
     lines[#lines + 1] = ""
@@ -874,7 +938,7 @@ local function osd_lines()
               fz.v or fz.zv },
         })
         lines[#lines + 1] = vis
-        overlays[#lines] = ov
+        overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
         -- Carrier ratings (from the carrying slot's struct); dashes when loose.
         local sp, sa, pa, en = "--", "--", "--", "--"
         if carrier then
@@ -891,12 +955,6 @@ local function osd_lines()
         tr_s16(TRACE_G.passdir),
         tr_s16(TRACE_G.passspeed))
     overlays[#lines] = nil
-    -- Client (bridge) and server versions on their own lines. rc = successful
-    -- re-dials since script load. No "bridge_JD" prefix — it's the window title.
-    lines[#lines + 1] = string.format("client v%s  rc %d", BRIDGE.version, reconnect_count)
-    overlays[#lines] = nil
-    lines[#lines + 1] = string.format("server v%s", BRIDGE.server_version or "?")
-    overlays[#lines] = nil
     return lines, overlays
 end
 
@@ -910,13 +968,14 @@ local function osd_tick()
             for i, s in ipairs(lines) do
                 local y = 4 + (i - 1) * OSD_CANVAS_LINE_H
                 canvas.DrawText(4, y, s, 0xFFFFFFFF, nil, OSD_CANVAS_FONT, "Courier New")
-                -- Over-draw only the frozen field(s) in red (same layout → exact
-                -- alignment), twice at a 1px offset for a pseudo-bold weight
-                -- (LuaCanvas has no bold flag).
+                -- Over-draw only the highlighted field(s) — frozen values in
+                -- red, a stale version in orange — on the same layout → exact
+                -- alignment, twice at a 1px offset for a pseudo-bold weight
+                -- (LuaCanvas has no bold flag). Each overlay carries its color.
                 local ov = overlays[i]
                 if ov then
-                    canvas.DrawText(4, y, ov, OSD_RED, nil, OSD_CANVAS_FONT, "Courier New")
-                    canvas.DrawText(5, y, ov, OSD_RED, nil, OSD_CANVAS_FONT, "Courier New")
+                    canvas.DrawText(4, y, ov.str, ov.color, nil, OSD_CANVAS_FONT, "Courier New")
+                    canvas.DrawText(5, y, ov.str, ov.color, nil, OSD_CANVAS_FONT, "Courier New")
                 end
             end
             canvas.Refresh()
