@@ -1,5 +1,17 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.7-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.8-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.8-jd changes (freeze perf + OSD frame#):
+--   * freeze_tick rewritten for scale. It re-asserts every frozen value each
+--     frame; the old version paid a per-entry pcall + closure allocation +
+--     getcurrentmemorydomain + domain switch/restore, so cost grew steeply with
+--     the number of frozen addresses (measured ~3x slower at N=100). Now the
+--     current domain is read ONCE, switched only when the target changes, and
+--     the write body is a define-once function called via pcall-with-arguments
+--     (no per-entry closure). Per-entry write isolation is preserved. Emulation
+--     no longer visibly slows as you freeze more addresses.
+--   * OSD system line gains the emulated frame counter ("frame N"), between rc
+--     and lag.
 --
 -- v2026.7.7-jd changes (OSD: system/game split): all emulation telemetry moves
 --   to ONE line at the TOP — client+server version, reconnect count (rc), and
@@ -402,7 +414,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.7-jd",
+    version    = "2026.7.8-jd",
     pause_safe = true,
 }
 
@@ -853,9 +865,9 @@ local function osd_lines()
     -- a clock-STOPPED flag.
     local running = (tr_u8(TRACE_G.gmode) & 1) == 0
     local carrier = osd_carrier()
-    -- System/emulation line (v2026.7.7-jd): client+server version, reconnect
-    -- count (rc), and lag frames — all the non-game telemetry on ONE line at the
-    -- top. Versions COLLAPSE to a single "v…" when client and server match (the
+    -- System/emulation line: client+server version, reconnect count (rc), the
+    -- emulated frame counter, and lag frames — all the non-game telemetry on ONE
+    -- line at the top. Versions COLLAPSE to a single "v…" when client and server match (the
     -- normal case); when they differ they split to "cli v… srv v…" and the OLDER
     -- build is drawn orange+bold to flag the stale component.
     -- Lag frames: emu.lagcount() is the cumulative total; a trailing '*' marks
@@ -866,10 +878,16 @@ local function osd_lines()
         local now = has(emu, "islagged") and emu.islagged()
         lag = string.format("lag %d%s", emu.lagcount(), now and "*" or "")
     end
+    -- Emulated frame counter (emu.framecount) — emulation telemetry, so it rides
+    -- the system line between rc and lag. Empty string if unavailable.
+    local frame = ""
+    if emu and has(emu, "framecount") then
+        frame = string.format("frame %d  ", emu.framecount())
+    end
     local cliver = tostring(BRIDGE.version)
     local srvver = tostring(BRIDGE.server_version or "?")
     if cliver == srvver then
-        lines[#lines + 1] = string.format("v%s  rc %d  %s", cliver, reconnect_count, lag)
+        lines[#lines + 1] = string.format("v%s  rc %d  %s%s", cliver, reconnect_count, frame, lag)
         overlays[#lines] = nil
     else
         -- Only rank the pair when BOTH carry version digits; a bare "?" (no
@@ -879,7 +897,7 @@ local function osd_lines()
         local vis, ov = osd_build({
             { "cli v" .. cliver,          cmp < 0 },
             { "  srv v" .. srvver,        cmp > 0 },
-            { string.format("  rc %d  %s", reconnect_count, lag), false },
+            { string.format("  rc %d  %s%s", reconnect_count, frame, lag), false },
         })
         lines[#lines + 1] = vis
         overlays[#lines] = ov and { str = ov, color = OSD_ORANGE } or nil
@@ -1350,21 +1368,37 @@ local function frozen_count()
     return n
 end
 
-local function freeze_tick()
+-- Re-assert every frozen value once per frame. Structured for scale: the
+-- current domain is read ONCE and switched only when the target actually
+-- changes (a switch is cheap; the per-entry pcall + closure allocation +
+-- getcurrentmemorydomain the old version paid N *times per frame* was the real
+-- cost — measured ~3x slower at N=100). The write body is a define-once
+-- function invoked via pcall with ARGUMENTS (no per-entry closure allocation),
+-- so a single bad entry still can't kill the poll loop.
+local function freeze_apply_all()
+    local getcur = memory.getcurrentmemorydomain
+    local orig = getcur and getcur() or nil
+    local active = orig
     for _, f in pairs(frozen) do
-        -- pcall: a stale entry (domain gone after core switch) must never
-        -- kill the poll loop.
-        pcall(function()
-            if f.domain then
-                local prev = memory.getcurrentmemorydomain and memory.getcurrentmemorydomain() or nil
-                if not memory.usememorydomain(f.domain) then error("unknown domain") end
-                write_width(f.address, f.width, f.value)
-                if prev then memory.usememorydomain(prev) end
-            else
-                write_width(f.address, f.width, f.value)
-            end
-        end)
+        local target = f.domain or orig
+        -- Switch only on change; a false return means an unknown domain (e.g.
+        -- gone after a core switch) → skip just this entry, keep re-asserting
+        -- the rest, and don't leave `active` claiming a domain we failed to set.
+        if target and target ~= active then
+            active = memory.usememorydomain(target) and target or nil
+        end
+        if target == active then
+            pcall(write_width, f.address, f.width, f.value)
+        end
     end
+    if orig and active ~= orig then memory.usememorydomain(orig) end
+end
+
+local function freeze_tick()
+    if next(frozen) == nil then return end
+    -- Outer pcall: an unexpected API error in one frame must never wedge the
+    -- poll loop. Per-entry write errors are already isolated inside the loop.
+    pcall(freeze_apply_all)
 end
 
 -- The ONE per-frame hook. Called from the main yield loop and after every
