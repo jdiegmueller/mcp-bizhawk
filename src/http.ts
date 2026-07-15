@@ -39,7 +39,7 @@ function jsonRpcError(res: http.ServerResponse, status: number, message: string,
  * Caller invokes `.listen(port, host)`.
  */
 export function createMcpHttpServer(bh: BizhawkServer): http.Server {
-  const server = http.createServer(async (req, res) => {
+  return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
     if (url.pathname !== MCP_PATH) {
@@ -80,17 +80,4 @@ export function createMcpHttpServer(bh: BizhawkServer): http.Server {
       if (!res.headersSent) jsonRpcError(res, 500, "Internal server error");
     }
   });
-
-  // Log MCP clients at TCP-connection granularity, not per request: a keep-alive
-  // client opens one socket and reuses it for many JSON-RPC calls, so this fires
-  // once on connect and once on disconnect rather than on every tool call.
-  server.on("connection", (socket) => {
-    const peer = `${socket.remoteAddress ?? "?"}:${socket.remotePort ?? "?"}`;
-    process.stderr.write(`[mcp-bizhawk] MCP client connected from ${peer}\n`);
-    socket.on("close", () => {
-      process.stderr.write(`[mcp-bizhawk] MCP client disconnected from ${peer}\n`);
-    });
-  });
-
-  return server;
 }
