@@ -25,6 +25,20 @@ Sessions configure this as an **HTTP** MCP server (by `url`), not a `command`
 stdio subprocess. There is no stdio transport — point `npm run inspector` at
 the HTTP URL.
 
+Each daemon still owns exactly **one** BizHawk socket (a second BizHawk dialing
+the same listener is refused). To drive more than one emulator today you run
+**one daemon per BizHawk**, each on its own MCP+BizHawk port pair, exposed as a
+distinct MCP server — e.g. `bizhawk_windows` (daemon `:8765`/BizHawk `:8766`)
+and `bizhawk_linux` (daemon `:8763`/BizHawk `:8764`, unit
+`deploy/bizhawk-daemon-linux.service`).
+
+> **Near-term TODO — first-class multi-BizHawk support.** The one-daemon-per-
+> emulator setup above is a stopgap. A single daemon should own N labelled
+> BizHawk connections (named/keyed sockets) and expose them through one MCP
+> endpoint — tools taking a `target` (or similar) to pick which emulator — so
+> adding an emulator doesn't mean standing up another daemon + MCP entry + port
+> pair. Until then, per-daemon is the way.
+
 ## Versioning — keep the two halves in sync
 
 The **server** and the **Lua bridge** ship a version string each, and they are
