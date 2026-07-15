@@ -1,5 +1,16 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.14-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.15-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.15-jd changes (OSD paused-refresh + window hide/show):
+--   * End key now HIDES/SHOWS the OSD window (WinForms Hide()/Show(), reachable
+--     on the Windows build) instead of just blanking it; pcall-guarded so mono
+--     falls back to the old blank-out. Hide/Show preserves window position/size.
+--   * The OSD forces a one-time repaint (bypassing the paused throttle) on two
+--     events that change displayed state without advancing a frame, so a PAUSED
+--     panel no longer needs an End/End to catch up: (a) when the server's HELLO
+--     version arrives at boot (fixes stale "srv v?"), and (b) after any MCP
+--     command runs while paused (fixes "freeze a bunch while paused, nothing
+--     turns red"). Running is unaffected — the throttle already refreshes it.
 --
 -- v2026.7.14-jd changes (OSD repaint throttle): the LuaCanvas OSD was repainted
 --   every emulated frame. That repaint (Clear + per-line DrawText + Refresh)
@@ -463,7 +474,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.14-jd",
+    version    = "2026.7.15-jd",
     pause_safe = true,
 }
 
@@ -1059,13 +1070,26 @@ local function osd_poll_toggle()
     for name in pairs(OSD_TOGGLE_KEYS) do if keys[name] then down = true; break end end
     if down and not osd_key_was_down then
         TRACE_OSD = not TRACE_OSD
-        if TRACE_OSD then osd_last_frame = -1 end   -- repaint immediately on enable
         console.log("[mcp-bizhawk] OSD " .. (TRACE_OSD and "ON" or "OFF") .. " (End key toggle)")
-        -- Turning OFF: LuaCanvas exposes no Close/Hide to Lua, so blank the
-        -- window once (kills stale content) and then stop the per-frame draw —
-        -- an idle, un-refreshed window doesn't incur the repaint cost.
-        if not TRACE_OSD and osd_canvas then
-            pcall(function() osd_canvas.Clear(0xFF101010); osd_canvas.Refresh() end)
+        if osd_canvas then
+            if TRACE_OSD then
+                -- Enable: un-hide the window (WinForms Show(), reachable on the
+                -- Windows build) and force an immediate repaint so it isn't blank
+                -- until the throttle's next tick — matters most while paused.
+                pcall(function() osd_canvas.Show() end)
+                osd_last_frame = -1
+            else
+                -- Disable: actually HIDE the window where supported (Windows).
+                -- On builds where Hide() isn't callable (mono/Linux) the pcall
+                -- fails, so fall back to blanking it, keeping a stale panel from
+                -- lingering. Either way the per-frame draw stops (TRACE_OSD gate).
+                local hid = pcall(function() osd_canvas.Hide() end)
+                if not hid then
+                    pcall(function() osd_canvas.Clear(0xFF101010); osd_canvas.Refresh() end)
+                end
+            end
+        elseif TRACE_OSD then
+            osd_last_frame = -1   -- no canvas yet; osd_tick will create + repaint
         end
     end
     osd_key_was_down = down
@@ -2546,6 +2570,19 @@ local function dispatch(cmd)
         return nil, { code = -32601, message = "unknown method: " .. cmd.method }
     end
     local ok, result = pcall(handler, cmd.params or {})
+    -- If the OSD is up AND the emulator is paused, force a one-time repaint so a
+    -- command's visible effect shows immediately — freeze/unfreeze highlights, a
+    -- memory write, a loaded state. While paused emu.framecount() doesn't
+    -- advance, so the OSD's frame-keyed throttle would otherwise not repaint
+    -- until the next frame step (the "freeze a bunch while paused, nothing turns
+    -- red until END/END" symptom). Gated on paused: while running the throttle
+    -- already refreshes at its normal rate, and forcing a repaint per command
+    -- would re-introduce the 60Hz drag during command bursts. Runs regardless of
+    -- handler success so a partial mutation (e.g. a freeze that applied some
+    -- entries then errored) still shows. -1 makes the next osd_tick draw.
+    if TRACE_OSD and client and has(client, "ispaused") and client.ispaused() then
+        osd_last_frame = -1
+    end
     if not ok then
         console.log(string.format("[mcp-bizhawk] !! %s error: %s", cmd.method, tostring(result)))
         return nil, { code = -32603, message = tostring(result) }
@@ -2652,6 +2689,11 @@ local function tick()
             -- Stash it so the OSD can show which server build we're paired with
             -- alongside the bridge's own version.
             BRIDGE.server_version = tostring(v)
+            -- Force the OSD to repaint even if paused: HELLO usually lands while
+            -- the game is still paused at boot, and the paused throttle otherwise
+            -- keeps showing the pre-HELLO "srv v?" until something advances a
+            -- frame. -1 makes the next osd_tick redraw regardless of framecount.
+            osd_last_frame = -1
             console.log("[mcp-bizhawk] bizhawk connected to mcp server v" .. tostring(v))
         elseif incoming == "BYE" then
             -- Server is shutting down gracefully (restart/upgrade). Mark the
