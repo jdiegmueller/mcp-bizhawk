@@ -1,5 +1,24 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.12-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.14-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.14-jd changes (OSD repaint throttle): the LuaCanvas OSD was repainted
+--   every emulated frame. That repaint (Clear + per-line DrawText + Refresh)
+--   measures ~5.5ms/frame plain and ~10ms once frozen addresses add the red
+--   overlay draws — of a 16.6ms 60fps budget shared with emulation — so at 60Hz
+--   it starved the core and dropped below 60fps (the "OSD-up + many frozen =
+--   drag" symptom; it's GDI+ text/repaint cost, hence identical on Windows and
+--   mono). The OSD now repaints only every Nth EMULATED frame via the global
+--   OSD_REFRESH_EVERY (default 6 ≈ 10Hz; live-tunable through bizhawk_eval_lua,
+--   e.g. `OSD_REFRESH_EVERY = 3` for ~20Hz). Throttle is keyed off
+--   emu.framecount() (not poll count, since emu.yield() re-enters multiple times
+--   per frame / while paused); toggling the OSD on forces an immediate repaint.
+--   While PAUSED the throttle is bypassed for a single repaint of the current
+--   frame (then idle), so a paused OSD always shows current state without
+--   repainting on every UI tick. Server bumped in lockstep to keep the OSD
+--   version line collapsed.
+--   Also: OSD is DEFAULT ON again (reverts 7.9's default-off) now that the
+--   throttle fixes the repaint cost that motivated turning it off. End key still
+--   toggles.
 --
 -- v2026.7.12-jd changes (server-side only; bridge unchanged): dropped the MCP
 --   (HTTP) client connect/disconnect logging added in 7.11 — only BizHawk-client
@@ -444,7 +463,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.12-jd",
+    version    = "2026.7.14-jd",
     pause_safe = true,
 }
 
@@ -750,7 +769,7 @@ end
 -- Rendering prefers a SEPARATE WINDOW (gui.createcanvas LuaCanvas) so the
 -- game view stays clean; if the build can't create one (or the window dies
 -- — e.g. user closes it), it falls back to the on-game gui.text overlay.
-local TRACE_OSD = false
+local TRACE_OSD = true
 
 -- gui.text (EmuHawk OSD renderer, window coords) — NOT gui.pixelText, whose
 -- bitmap font renders as empty boxes under mono/Linux.
@@ -776,6 +795,22 @@ local OSD_CANVAS_W      = 896   -- was 1280; prefix-less columns + 2-line puck f
 
 local osd_canvas = nil
 local osd_canvas_failed = false   -- don't retry a broken canvas every frame
+
+-- OSD repaint throttle. The LuaCanvas repaint (Clear + DrawText×lines + Refresh)
+-- measures ~5.5ms/frame plain and ~10ms/frame once frozen addresses turn on the
+-- red overlay draws — of a 16.6ms 60fps budget shared with emulation. Repainting
+-- at the full 60Hz therefore starves emulation and drops it below 60fps (the
+-- "OSD-up + many frozen = drag" symptom; the cost is GDI+ text/repaint, so it
+-- reproduces on Windows and mono alike). A telemetry panel doesn't need 60Hz:
+-- repaint only every Nth EMULATED frame. INTENTIONALLY GLOBAL (no `local`) so it
+-- can be retuned live via bizhawk_eval_lua — e.g. `OSD_REFRESH_EVERY = 3` — with
+-- no script reload. 1 = every frame (old behavior); 3 ≈ 20Hz, 6 ≈ 10Hz,
+-- 12 ≈ 5Hz at 60fps. (While PAUSED the throttle is bypassed for a single
+-- repaint of the current frame — see osd_tick.)
+OSD_REFRESH_EVERY = 6
+-- emu.framecount() at the last repaint; -1 forces the next tick to draw (set on
+-- enable so toggling the OSD on repaints immediately rather than after N frames).
+local osd_last_frame = -1
 
 local function osd_get_canvas()
     if osd_canvas or osd_canvas_failed then return osd_canvas end
@@ -1024,6 +1059,7 @@ local function osd_poll_toggle()
     for name in pairs(OSD_TOGGLE_KEYS) do if keys[name] then down = true; break end end
     if down and not osd_key_was_down then
         TRACE_OSD = not TRACE_OSD
+        if TRACE_OSD then osd_last_frame = -1 end   -- repaint immediately on enable
         console.log("[mcp-bizhawk] OSD " .. (TRACE_OSD and "ON" or "OFF") .. " (End key toggle)")
         -- Turning OFF: LuaCanvas exposes no Close/Hide to Lua, so blank the
         -- window once (kills stale content) and then stop the per-frame draw —
@@ -1038,6 +1074,28 @@ end
 local function osd_tick()
     osd_poll_toggle()
     if not TRACE_OSD then return end
+    -- Repaint throttle (see OSD_REFRESH_EVERY). Keyed off the emulated frame
+    -- counter, NOT poll count: emu.yield() can re-enter this several times per
+    -- frame and repeatedly while paused, so a per-call counter would misfire.
+    -- Same-frame re-entries share one framecount → at most one repaint per frame,
+    -- then one per N frames. Falls back to every-frame if framecount is absent.
+    --
+    -- PAUSED: framecount is frozen, so the plain throttle would leave the panel
+    -- showing whatever frame it last happened to land on (up to N-1 frames
+    -- stale) and never catch up. Instead bypass the throttle for exactly ONE
+    -- repaint of the current frame, then idle — a paused OSD reflects the
+    -- current state without repainting on every UI tick.
+    local every = tonumber(OSD_REFRESH_EVERY) or 1
+    if emu and has(emu, "framecount") then
+        local fc = emu.framecount()
+        local paused = client and has(client, "ispaused") and client.ispaused()
+        if paused then
+            if osd_last_frame == fc then return end        -- current frame already drawn
+        elseif every > 1 and osd_last_frame >= 0 and (fc - osd_last_frame) < every then
+            return
+        end
+        osd_last_frame = fc
+    end
     local canvas = osd_get_canvas()
     if canvas then
         local ok = pcall(function()
