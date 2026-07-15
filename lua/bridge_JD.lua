@@ -1,5 +1,10 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.11-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.12-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.12-jd changes (server-side only; bridge unchanged): dropped the MCP
+--   (HTTP) client connect/disconnect logging added in 7.11 — only BizHawk-client
+--   connect/disconnect/refusal is logged now. Bridge bumped in lockstep to keep
+--   the OSD version line collapsed.
 --
 -- v2026.7.11-jd changes (server-side only; bridge unchanged): the daemon now
 --   logs peer IP:port for both BizHawk (TCP :8766) and MCP (HTTP) clients on
@@ -439,7 +444,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.11-jd",
+    version    = "2026.7.12-jd",
     pause_safe = true,
 }
 
