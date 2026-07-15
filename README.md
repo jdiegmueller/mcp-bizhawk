@@ -22,17 +22,23 @@ One bridge, **many systems**: NES, SNES, Game Boy / GBC / GBA, Sega Master Syste
 ## How it works
 
 ```
-+------------------+    stdio     +------------------+   TCP :8766   +------------------+
-|   MCP client     |   JSON-RPC   |    mcp-bizhawk   |  newline JSON |     BizHawk      |
-| (Claude / etc.)  | ===========> |     (Node.js)    | <============ |  bridge_JD.lua   |
-+------------------+              +------------------+               +------------------+
+ Claude session 1 ─┐
+ Claude session 2 ─┼─ HTTP MCP ─▶ mcp-bizhawk daemon ─ TCP :8766 ─▶  BizHawk
+ Claude session N ─┘  :8765/mcp    (Node.js, always-on)  newline JSON  bridge_JD.lua
 ```
 
-The transport is **inverted** compared to most other emulator-MCP bridges: BizHawk's Lua doesn't have native server sockets, only an outbound `comm.socketServer*` client. So `mcp-bizhawk` runs the TCP **listener**, and BizHawk's Lua bridge dials in once per frame to ferry commands and replies.
+The server runs as a **single always-on daemon** that speaks MCP over
+**streamable-HTTP** (`http://127.0.0.1:8765/mcp` by default). Any number of MCP
+clients (Claude Code sessions, etc.) connect to it concurrently, and it owns the
+one TCP socket the BizHawk bridge dials. All clients' commands interleave into a
+single serial, frame-paced queue to the one emulator — no arbitration,
+last-writer-wins.
+
+The BizHawk transport is **inverted** compared to most other emulator-MCP bridges: BizHawk's Lua doesn't have native server sockets, only an outbound `comm.socketServer*` client. So `mcp-bizhawk` runs the TCP **listener**, and BizHawk's Lua bridge dials in once per frame to ferry commands and replies.
 
 Two pieces:
 - **`lua/bridge_JD.lua`** — runs *inside* BizHawk's Lua Console, polls our TCP server once per frame
-- **`dist/index.js`** — the Node.js MCP server, listens on `127.0.0.1:8766` by default, exposes tools over stdio
+- **`dist/index.js`** — the Node.js MCP daemon: serves streamable-HTTP on `127.0.0.1:8765/mcp` and listens for the bridge on `127.0.0.1:8766` (both overridable)
 
 Trade-off: this design adds **~one frame of latency** per call (≈16ms at 60Hz). Fine for interactive memory hunting, save-state experimentation, and frame-by-frame inspection. Less ideal for high-rate-of-fire scripting.
 
@@ -99,18 +105,43 @@ And in the `mcp-bizhawk` process's stderr:
 [mcp-bizhawk] bridge_JD.lua is polling — bridge ready
 ```
 
+## Run the daemon
+
+The server is an always-on HTTP daemon — start it once and leave it running;
+every MCP client connects to it by URL. It's fine to start the daemon before
+BizHawk is up: tool calls queue until the bridge dials in.
+
+```bash
+npm run daemon        # or: node dist/index.js
+# [mcp-bizhawk] MCP server vX ready — streamable-HTTP at http://127.0.0.1:8765/mcp
+```
+
+For always-on operation, install the systemd **user** unit in
+[`deploy/bizhawk-daemon.service`](deploy/bizhawk-daemon.service):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/bizhawk-daemon.service ~/.config/systemd/user/   # edit WorkingDirectory first
+systemctl --user daemon-reload
+systemctl --user enable --now bizhawk-daemon
+systemctl --user restart bizhawk-daemon    # after `npm run build` on a version bump
+```
+
 ## Register with your MCP client
+
+Connect to the daemon over HTTP — the same URL works for any number of clients
+simultaneously, so there's nothing to toggle per session.
 
 ### Claude Code (CLI)
 
 ```bash
-claude mcp add bizhawk --scope user mcp-bizhawk
+claude mcp add bizhawk --scope user --transport http http://127.0.0.1:8765/mcp
 ```
 
 Verify:
 ```bash
 claude mcp list
-# bizhawk: mcp-bizhawk - ✓ Connected
+# bizhawk: http://127.0.0.1:8765/mcp (HTTP) - ✓ Connected
 ```
 
 ### Claude Desktop
@@ -127,7 +158,8 @@ Edit `claude_desktop_config.json`:
 {
   "mcpServers": {
     "bizhawk": {
-      "command": "mcp-bizhawk"
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
     }
   }
 }
@@ -137,14 +169,18 @@ Restart Claude Desktop after editing.
 
 ### Other MCP clients
 
-The server speaks standard MCP over stdio. Run `mcp-bizhawk` and connect any MCP client to its stdio.
+The server speaks standard MCP over **streamable-HTTP** at
+`http://127.0.0.1:8765/mcp`. Point any HTTP-capable MCP client (including
+`npx @modelcontextprotocol/inspector`) at that URL.
 
 ## Configuration
 
-| Env var        | Default       | Purpose                              |
-|----------------|---------------|--------------------------------------|
-| `BIZHAWK_HOST` | `127.0.0.1`   | TCP host to listen on for BizHawk    |
-| `BIZHAWK_PORT` | `8766`        | TCP port to listen on for BizHawk    |
+| Env var         | Default       | Purpose                                    |
+|-----------------|---------------|--------------------------------------------|
+| `MCP_HTTP_HOST` | `127.0.0.1`   | Host the streamable-HTTP MCP endpoint binds |
+| `MCP_HTTP_PORT` | `8765`        | Port the streamable-HTTP MCP endpoint binds |
+| `BIZHAWK_HOST`  | `127.0.0.1`   | TCP host to listen on for BizHawk          |
+| `BIZHAWK_PORT`  | `8766`        | TCP port to listen on for BizHawk          |
 
 ## Tools
 

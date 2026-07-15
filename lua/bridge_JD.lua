@@ -1,5 +1,19 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.9-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.11-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.11-jd changes (server-side only; bridge unchanged): the daemon now
+--   logs peer IP:port for both BizHawk (TCP :8766) and MCP (HTTP) clients on
+--   connect and disconnect. Bridge bumped in lockstep to keep the OSD version
+--   line collapsed.
+--
+-- v2026.7.10-jd changes (server transport: stdio -> HTTP; bridge unchanged):
+--   * No functional bridge change. Version bumped in lockstep with the server,
+--     which switched from a per-session stdio MCP process to a single always-on
+--     streamable-HTTP daemon (many Claude sessions, one BizHawk). The bridge
+--     still dials the same TCP socket (default :8766) and speaks the same
+--     HELLO/READY/RESULT protocol; the daemon just owns that socket now instead
+--     of a per-session process. Kept in sync so the OSD version line stays
+--     collapsed rather than flagging a stale-component mismatch.
 --
 -- v2026.7.9-jd changes (OSD off by default + backtick toggle):
 --   * The OSD is now OFF at startup. The separate LuaCanvas window's per-frame
@@ -425,7 +439,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.9-jd",
+    version    = "2026.7.11-jd",
     pause_safe = true,
 }
 

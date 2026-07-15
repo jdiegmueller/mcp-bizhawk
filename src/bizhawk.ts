@@ -116,13 +116,17 @@ export class BizhawkServer {
   }
 
   private attachClient(sock: net.Socket): void {
+    // Capture the peer address up front — sock.remoteAddress reads as undefined
+    // once the socket has closed, so the disconnect log needs the saved copy.
+    const peer = `${sock.remoteAddress ?? "?"}:${sock.remotePort ?? "?"}`;
     if (this.client && !this.client.destroyed) {
       // Already have a client. Refuse the new one — only one BizHawk at a time.
+      process.stderr.write(`[mcp-bizhawk] BizHawk client from ${peer} REFUSED (another already connected)\n`);
       sock.write("ERROR another BizHawk client already connected\n");
       sock.destroy();
       return;
     }
-    process.stderr.write(`[mcp-bizhawk v${VERSION}] BizHawk client connected (waiting for bridge_JD.lua to start polling)\n`);
+    process.stderr.write(`[mcp-bizhawk v${VERSION}] BizHawk client connected from ${peer} (waiting for bridge_JD.lua to start polling)\n`);
     this.client = sock;
     this.buf = "";
     this.awaitingResult = false;
@@ -137,7 +141,7 @@ export class BizhawkServer {
     sock.setEncoding("utf8");
     sock.on("data", (chunk: string) => this.onData(chunk));
     sock.on("close", () => {
-      process.stderr.write("[mcp-bizhawk] BizHawk client disconnected\n");
+      process.stderr.write(`[mcp-bizhawk] BizHawk client disconnected from ${peer}\n`);
       this.client = null;
       // Leave inflight commands hanging — they'll time out cleanly.
     });

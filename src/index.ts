@@ -1,58 +1,59 @@
 #!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { BizhawkServer } from "./bizhawk.js";
-import { registerTools } from "./tools.js";
+import { createMcpHttpServer, MCP_PATH } from "./http.js";
 import { VERSION } from "./version.js";
 
-const HOST = process.env.BIZHAWK_HOST ?? "127.0.0.1";
-const PORT = parseInt(process.env.BIZHAWK_PORT ?? "8766", 10);
+// --- BizHawk side (downstream): the single TCP socket the Lua bridge dials ---
+const BIZHAWK_HOST = process.env.BIZHAWK_HOST ?? "127.0.0.1";
+const BIZHAWK_PORT = parseInt(process.env.BIZHAWK_PORT ?? "8766", 10);
+
+// --- MCP side (upstream): the always-on HTTP endpoint Claude sessions connect to ---
+const HTTP_HOST = process.env.MCP_HTTP_HOST ?? "127.0.0.1";
+const HTTP_PORT = parseInt(process.env.MCP_HTTP_PORT ?? "8765", 10);
 
 async function main() {
-  const bh = new BizhawkServer({ host: HOST, port: PORT });
+  // The one shared BizHawk connection + serial, frame-paced command queue.
+  // Every per-request MCP Server (see http.ts) drives this same singleton, so N
+  // Claude sessions interleave into one FIFO to the one emulator (last-writer-
+  // wins; there is deliberately no arbitration between sessions).
+  const bh = new BizhawkServer({ host: BIZHAWK_HOST, port: BIZHAWK_PORT });
 
-  // Start the TCP listener immediately. Tool calls will queue up until BizHawk
-  // connects (via lua/bridge_JD.lua loaded in BizHawk's Lua Console + the
-  // socket server IP/port configured to point here).
   try {
     await bh.start();
     process.stderr.write(
       `[mcp-bizhawk] v${VERSION}; ${bh.describeTarget()}; waiting for BizHawk to connect...\n` +
       `             1. In BizHawk: Settings > Customize > External Tools (or use --socket_ip / --socket_port flags)\n` +
-      `             2. Set socket server target to ${HOST}:${PORT}\n` +
+      `             2. Set socket server target to ${BIZHAWK_HOST}:${BIZHAWK_PORT}\n` +
       `             3. Tools > Lua Console > Open Script > select lua/bridge_JD.lua from this repo\n`,
     );
   } catch (err) {
-    process.stderr.write(`[mcp-bizhawk] FATAL: could not bind ${HOST}:${PORT}: ${err}\n`);
+    process.stderr.write(`[mcp-bizhawk] FATAL: could not bind ${BIZHAWK_HOST}:${BIZHAWK_PORT}: ${err}\n`);
     process.exit(1);
   }
 
-  const server = new Server(
-    { name: "mcp-bizhawk", version: VERSION },
-    { capabilities: { tools: {} } },
-  );
+  const httpServer = createMcpHttpServer(bh);
+  httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+    process.stderr.write(
+      `[mcp-bizhawk] MCP server v${VERSION} ready — streamable-HTTP at http://${HTTP_HOST}:${HTTP_PORT}${MCP_PATH}\n`,
+    );
+  });
+  httpServer.on("error", (err) => {
+    process.stderr.write(`[mcp-bizhawk] FATAL: HTTP server error on ${HTTP_HOST}:${HTTP_PORT}: ${err}\n`);
+    process.exit(1);
+  });
 
-  registerTools(server, bh);
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  process.stderr.write(`[mcp-bizhawk] MCP server v${VERSION} ready (stdio)\n`);
-
-  // Clean shutdown when the MCP client (Claude Code, Claude Desktop, etc.)
-  // disconnects. Without this, the TCP listener for bridge_JD.lua keeps the
-  // event loop alive after stdin closes — leaving an orphan process bound
-  // to the port. Every subsequent MCP-client restart would then fail with
-  // EADDRINUSE until the orphan is manually killed.
+  // Clean shutdown. systemd sends SIGTERM on stop/restart; give the bridge's BYE
+  // + FIN a beat to flush before exit so it redials the new server instead of
+  // wedging on its next read.
+  let shuttingDown = false;
   const shutdown = (reason: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     process.stderr.write(`[mcp-bizhawk] shutting down (${reason})\n`);
+    httpServer.close();
     bh.stop(); // sends BYE + half-closes the bridge socket
-    // Give the BYE + FIN a beat to flush to the bridge before we exit — without
-    // it process.exit() can truncate the write and the bridge never sees BYE
-    // (then it wedges on its next read instead of redialing the new server).
     setTimeout(() => process.exit(0), 150);
   };
-  process.stdin.on("end",   () => shutdown("stdin closed"));
-  process.stdin.on("close", () => shutdown("stdin closed"));
   process.on("SIGINT",  () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
