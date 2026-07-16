@@ -52,8 +52,10 @@ Environment=VISION_API_KEY=sk-no-key-required
 # dir BOTH sides can reach via the shared mount. Here X:\ (Windows) == the
 # server's /mnt/8tb/jason (Linux): the server writes/reads .../tmp, BizHawk is
 # told X:\tmp. The dir must exist (the server creates the SHOT_DIR side).
+# NOTE: the backslash MUST be doubled — systemd Environment= does C-style escape
+# processing, so a lone `\t` becomes a TAB and BizHawk gets an invalid path.
 Environment=MCP_BIZHAWK_SHOT_DIR=/mnt/8tb/jason/tmp
-Environment=MCP_BIZHAWK_SHOT_DIR_BRIDGE=X:\tmp
+Environment=MCP_BIZHAWK_SHOT_DIR_BRIDGE=X:\\tmp
 
 [Install]
 WantedBy=default.target
