@@ -13,7 +13,27 @@ import {
   formatClock,
   parkOps,
   PARK_Y,
+  resolveField,
+  READ_DEFAULT_FIELDS,
 } from "../dist/nhl94.js";
+
+test("resolveField maps known names to offset/width and flags fixed-point axes", () => {
+  assert.deepEqual(resolveField("impact"), { field: "impact", offset: 0x32, width: "s16_be", fixed: false });
+  assert.deepEqual(resolveField("pf"), { field: "pf", offset: 0x62, width: "u8", fixed: false });
+  assert.deepEqual(resolveField("x"), { field: "x", offset: 0x00, width: "s32_be", fixed: true });
+});
+
+test("resolveField parses raw offsets with optional width (default u8)", () => {
+  assert.deepEqual(resolveField("+0x32"), { field: "+0x32", offset: 0x32, width: "u8", fixed: false });
+  assert.deepEqual(resolveField("0x32:s16_be"), { field: "0x32:s16_be", offset: 0x32, width: "s16_be", fixed: false });
+  assert.deepEqual(resolveField("50"), { field: "50", offset: 50, width: "u8", fixed: false });
+});
+
+test("resolveField rejects unknown names and out-of-struct offsets", () => {
+  assert.throws(() => resolveField("nope"), /unknown field/);
+  assert.throws(() => resolveField("+0x80"), /out of struct range/); // SCSIZE = 0x80
+  assert.ok(READ_DEFAULT_FIELDS.includes("impact"));
+});
 
 // Decode the x whole-pixel each parked skater's frozen x-op was set to, in
 // slot order, from a parkOps result.

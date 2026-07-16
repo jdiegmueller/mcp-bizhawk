@@ -6,11 +6,12 @@ import {
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { BizhawkServer } from "./bizhawk.js";
 import { VERSION } from "./version.js";
-import { describeImage, requireVisionConfig, type VisionConfig } from "./vision.js";
+import { describeImage, requireVisionConfig, visionConfig, type VisionConfig } from "./vision.js";
 import * as nhl94 from "./nhl94.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const VALID_BUTTONS = [
   "A", "B", "X", "Y",                 // Face buttons
@@ -169,6 +170,59 @@ const TOOLS: Tool[] = [
         length:  { type: "integer", minimum: 1, maximum: 4096, description: "Number of bytes to read (1-4096; hard cap is BizHawk's per-call serialization limit)." },
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
       },
+      additionalProperties: false,
+    },
+  },
+
+  {
+    name: "bizhawk_ram_snapshot",
+    description:
+      "PURPOSE: Snapshot a contiguous memory range to a binary FILE on the server's filesystem (with a sha256 digest) — the tool for reverse-engineering by RAM diffing across game states, instead of hand-rolling a memory-dump loop in bizhawk_eval_lua. " +
+      "USAGE: Capture the same range in several states (e.g. gameplay vs menu vs title) then diff the files (they live on the server host, readable regardless of which BizHawk) to isolate the bytes that track a state/flag — exactly the workflow used to hunt game-phase globals. Defaults to the whole 64 KiB Genesis work RAM ('68K RAM', base 0, size 0x10000). The `digest` alone lets you cheaply tell whether two states differ without re-reading. Pair with bizhawk_search_begin/filter when you want the bridge to diff for you against a live-changing value instead. " +
+      "BEHAVIOR: No side effects on the emulator — pure reads, chunked into ≤4096-byte read_range calls and assembled + written server-side. DESTRUCTIVE to the target file (overwrites `path`). Errors if the domain is unknown or the range exceeds it. " +
+      "RETURNS: 'PATH (N bytes, DOMAIN @0xBASE) sha256=…' — the file path, byte count, domain, base, and the digest.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        base: { type: "integer", minimum: 0, default: 0, description: "Starting byte offset within the domain (0-based per-domain). Default 0." },
+        size: { type: "integer", minimum: 1, maximum: 1048576, default: 65536, description: "Number of bytes to snapshot (default 65536 = full 64 KiB 68K RAM; max 1 MiB)." },
+        domain: { type: "string", description: "Memory domain (default '68K RAM' — the Genesis work RAM)." },
+        path: { type: "string", description: "Output file path on the SERVER host. Omit for an auto temp file. Overwritten if present." },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  {
+    name: "bizhawk_trap_exec",
+    description:
+      "PURPOSE: Persistent, multi-address execution-site capture — arm exec hooks at ROM addresses that ACCUMULATE register/memory snapshots into per-trap buffers across normally-driven frames, then read them back. The built-in replacement for hand-rolling event.on_bus_exec capture loops in bizhawk_eval_lua (the dominant reverse-engineering use). " +
+      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle via `action`: 'start' arms `traps`; then advance frames; 'read' fetches the buffers; 'status' returns just counts; 'stop' unregisters and clears. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
+      "BEHAVIOR: 'start' registers event.on_bus_exec hooks (errors if the core lacks it) that persist until 'stop' or a bridge reload — REMEMBER to stop when done, as live hooks cost emulation speed. Buffers are bounded by `limit` (default 200/trap). Memory reads use the active domain (M68K BUS on Genesis); addresses masked to 24 bits. " +
+      "RETURNS: 'start' the armed trap names; 'read' per-trap counts + the captured entries (JSON); 'status'/'stop' the counts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["start", "read", "status", "stop"], description: "Lifecycle step." },
+        traps: {
+          type: "array",
+          description: "For action=start: the exec sites to arm.",
+          items: {
+            type: "object",
+            properties: {
+              addr: { type: "integer", minimum: 0, description: "Instruction address to trap (system-bus address)." },
+              name: { type: "string", description: "Buffer name for this trap (default t1, t2, …)." },
+              capture: { type: "array", items: { type: "string" }, description: "Capture tokens (default: all M68K registers)." },
+              limit: { type: "integer", minimum: 1, description: "Max entries to accumulate for this trap (default 200)." },
+            },
+            required: ["addr"],
+            additionalProperties: false,
+          },
+        },
+        name: { type: "string", description: "For action=read: return only this trap's buffer (default: all)." },
+        limit: { type: "integer", minimum: 1, description: "Default per-trap entry cap for action=start (default 200)." },
+      },
+      required: ["action"],
       additionalProperties: false,
     },
   },
@@ -586,19 +640,19 @@ const TOOLS: Tool[] = [
       "PURPOSE: Capture a PNG screenshot of the current emulator display and return it INLINE as an image content block (also saved to disk). " +
       "USAGE: The primary 'look at the screen' tool — call it whenever you need visual confirmation of game state. To capture a specific state, pause / advance frames / load state first. Pass `path` only if you want the PNG at a specific location; otherwise a temp file is used. For screenshots DURING an input sequence use bizhawk_play_input_sequence's screenshot_every instead. " +
       "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists. The image is read back from disk and inlined; if the file can't be read (e.g. BizHawk runs on a different filesystem than this server), the tool still succeeds and returns the path with a note instead of the image. Returns an error if the parent directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info. " +
-      "RETURNS: A text block 'Screenshot saved: PATH' followed by an inline PNG image content block.",
+      "RETURNS: A text block 'Screenshot saved: PATH', an inline PNG image content block, and (unless describe:false) a vision-model caption of the screen.",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Optional absolute filesystem path for the PNG (e.g. /tmp/snap.png). Omit to use an auto-generated temp file. Parent directory must exist. Overwritten without prompt if present." },
         describe: {
           type: "boolean",
-          default: false,
-          description: "If true, DON'T return the binary image — instead send it to the configured local vision model and return that model's text description. Far cheaper in tokens than an inlined PNG. Requires the server to have VISION_BASE_URL and VISION_MODEL set (errors clearly if not).",
+          default: true,
+          description: "Default TRUE: in ADDITION to the inline PNG, send the image to the configured local vision model and append its text caption of the game state. Pass false to return the PNG only and skip the vision call. Best-effort: if vision is unconfigured or fails, the PNG is still returned with a short note instead of a caption. Requires the server to have VISION_BASE_URL and VISION_MODEL set for the caption.",
         },
         describe_prompt: {
           type: "string",
-          description: "The question/instruction sent to the vision model with the image when `describe` is true (e.g. 'Is the puck in the net? Where are the goalies?'). Falls back to the server's VISION_DEFAULT_PROMPT, then a generic 'describe this image'.",
+          description: "The question/instruction sent to the vision model with the image (unless describe:false), e.g. 'Is the puck in the net? Where are the goalies?'. Falls back to the server's built-in NHL94 system prompt / VISION_DEFAULT_PROMPT.",
         },
       },
       additionalProperties: false,
@@ -1312,13 +1366,38 @@ const TOOLS: Tool[] = [
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
       "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Targets s0-s11 (skaters) and pk (puck) ARE the game's own entity slots — the struct at base+N*0x80 on the 68K bus, the SAME slot index the puck-carrier word uses; they are NOT a render/sort order. ALWAYS prefer this tool over hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes — dropping the 0xFF prefix, wrong base, wrong width). If you need a field this tool doesn't decode, DON'T guess an address: take base+stride+offsets from the `layout:` line (or the per-target `@0xADDR` shown under raw:true) and compute base+offset. Pass raw:true to also see the raw 16.16 hex, sub-pixel fraction, and each target's absolute struct address. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then carrier, clock+period+play+faceoff, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. `play` is running|stopped and `faceoff` is yes|no — BOTH decode the same gmode(0xFFC2EA) bit 0 (set = clock-stopped = whistle/faceoff/stoppage, when the game also disables body-checks); faceoff:yes always coincides with play:stopped. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge.",
+      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then carrier, clock+period+play+faceoff, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. `play` is running|stopped and `faceoff` is yes|no — BOTH decode the same gmode(0xFFC2EA) bit 0 (set = clock-stopped = whistle/faceoff/stoppage, when the game also disables body-checks); faceoff:yes always coincides with play:stopped. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge. Pass verbose:true to add a per-entity extended line (impact/impactp/pos/nopuck/pf/pf2/pf3/wgt8); for any other field use nhl94_read.",
     inputSchema: {
       type: "object",
       properties: {
         raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
-        describe: { type: "boolean", default: false, description: "If true, also capture a screenshot and send it to the configured vision model, returning a text description of the visible game state alongside the structured data. Requires VISION_BASE_URL + VISION_MODEL on the server." },
-        describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot when `describe` is true. Falls back to the server's VISION_DEFAULT_PROMPT." },
+        verbose: { type: "boolean", default: false, description: "Add a per-entity extended line: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf,pf2,pf3(+0x62-64)/wgt8(+0x67) — the accumulator/flag/weight fields (use nhl94_read for arbitrary fields)." },
+        describe: { type: "boolean", default: true, description: "Default TRUE: also capture a screenshot and send it to the configured vision model, appending a text description of the visible game state after the structured data. Pass false to skip the vision call and return the structured data only. Best-effort: if vision is unconfigured or fails, the structured data is still returned with a short note. Requires VISION_BASE_URL + VISION_MODEL on the server." },
+        describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot (unless describe:false). Falls back to the server's built-in NHL94 system prompt / VISION_DEFAULT_PROMPT." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_read",
+    description:
+      "PURPOSE: Read arbitrary decoded fields of NHL94 entities (skaters s0-s11, puck pk) by NAME or raw in-struct offset — the game-aware alternative to hand-computing 68K base+offset in bizhawk_read/eval_lua (the #1 source of base/stride/endian mistakes). " +
+      "USAGE: Use for per-entity fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or ANY raw offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For the common position/velocity/anim/carrier/clock snapshot use nhl94_state instead. " +
+      "BEHAVIOR: No side effects — one read_many round-trip. x/y/z decode to whole pixels; every other field is the raw integer at its width. Errors if targets×fields exceeds 128 reads, or on an unknown target/field. " +
+      "RETURNS: One line per target: 'sN: field=val field=val …'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targets: {
+          type: "array",
+          items: { type: "string", description: "'s0'..'s11' or 'pk'." },
+          description: "Entities to read (default: all skaters s0-s11 + pk).",
+        },
+        fields: {
+          type: "array",
+          items: { type: "string" },
+          description: "Field names or raw '+0xNN[:width]' offsets (default: impact,impactp,pos,nopuck,pf,pf2,pf3,wgt8).",
+        },
       },
       additionalProperties: false,
     },
@@ -1613,7 +1692,9 @@ const EXPOSED_BIZHAWK = new Set([
   "bizhawk_save_state",
   "bizhawk_load_state",
   "bizhawk_read_many",
+  "bizhawk_ram_snapshot",
   "bizhawk_disassemble",
+  "bizhawk_trap_exec",
   "bizhawk_eval_lua",
   "bizhawk_trace_start",
   "bizhawk_trace_stop",
@@ -1721,6 +1802,45 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const bytes = await bh.call<number[]>("read_range", { address: a(), length: p.length, ...dom() });
         const hex = bytes.map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
         return ok(`${addrHex(a())} [${bytes.length} bytes${p.domain ? `, ${p.domain}` : ""}]:\n${hex}`);
+      }
+
+      case "bizhawk_ram_snapshot": {
+        const base = (p.base as number | undefined) ?? 0;
+        const size = (p.size as number | undefined) ?? 0x10000;
+        const domain = (p.domain as string | undefined) ?? "68K RAM";
+        const outPath = (p.path as string | undefined)
+          ?? path.join(os.tmpdir(), `bizhawk-ram-${domain.replace(/[^a-z0-9]/gi, "_")}-${base.toString(16)}-${size.toString(16)}.bin`);
+        // Chunk into <=4096-byte read_range calls (the bridge's per-call cap) and
+        // assemble server-side, so the file lands on the server host regardless of
+        // which BizHawk filesystem the emulator runs on.
+        const buf = Buffer.allocUnsafe(size);
+        for (let off = 0; off < size; off += 4096) {
+          const len = Math.min(4096, size - off);
+          const chunk = await bh.call<number[]>("read_range", { address: base + off, length: len, domain });
+          for (let i = 0; i < len; i++) buf[off + i] = chunk[i] & 0xff;
+        }
+        fs.writeFileSync(outPath, buf);
+        const digest = crypto.createHash("sha256").update(buf).digest("hex");
+        return ok(`${outPath} (${size} bytes, ${domain} @0x${base.toString(16).toUpperCase()}) sha256=${digest}`);
+      }
+
+      case "bizhawk_trap_exec": {
+        const action = p.action as string;
+        const args: Record<string, unknown> = { action };
+        if (action === "start") {
+          if (!Array.isArray(p.traps) || p.traps.length === 0) throw new Error("action:start requires a non-empty `traps` array");
+          args.traps = p.traps;
+          if (p.limit !== undefined) args.limit = p.limit;
+        }
+        if (action === "read" && p.name !== undefined) args.name = p.name;
+        const r = await bh.call<{ started?: number; traps?: unknown; counts?: Record<string, number>; active?: boolean }>("trap_exec", args);
+        if (action === "start") {
+          const names = Array.isArray(r.traps) ? r.traps.join(", ") : "";
+          return ok(`Armed ${r.started} trap(s): ${names}. Now drive frames (bizhawk_frame_advance / play_input_sequence), then action:"read". Call action:"stop" when done — live hooks cost emulation speed.`);
+        }
+        if (action === "status") return ok(`trap_exec active=${r.active} counts=${JSON.stringify(r.counts ?? {})}`);
+        if (action === "stop") return ok(`Stopped trap_exec. Final counts: ${JSON.stringify(r.counts ?? {})}`);
+        return ok(`trap_exec counts=${JSON.stringify(r.counts ?? {})}\n${JSON.stringify(r.traps ?? {}, null, 1)}`);
       }
 
       case "bizhawk_write8": {
@@ -2100,6 +2220,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
 
       case "nhl94_state": {
         const raw = p.raw === true;
+        const verbose = p.verbose === true;
         const domain = await nhlDomain(bh);
         const fields = [
           { name: "x", offset: nhl94.OFF.x, width: "s32_be" },
@@ -2115,6 +2236,13 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           { name: "spanum", offset: nhl94.OFF.spanum, width: "u16_be" },
           { name: "spacnt", offset: nhl94.OFF.spacnt, width: "s16_be" },
         ];
+        // verbose adds the extended per-entity fields (accumulators/flags/weight)
+        // — the ones agents otherwise hand-read; kept off the default block to
+        // avoid bloating the common snapshot.
+        const EXTRA_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf", "pf2", "pf3", "wgt8"];
+        if (verbose) {
+          for (const name of EXTRA_FIELDS) fields.push({ name, offset: nhl94.OFF[name], width: nhl94.FIELD_WIDTH[name] });
+        }
         // Slots 0..14 in one contiguous read (12 skaters + 2 unused + puck@14).
         const recs = await bh.call<Record<string, number>[]>("read_struct_array", {
           base: nhlAddr(nhl94.SORTCORDS, domain), stride: nhl94.SCSIZE, count: 15, fields,
@@ -2148,6 +2276,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
 
         const whole = (rawv: number) => nhl94.fromFixed(rawv >>> 0).whole;
         const hex4 = (v: number) => (v >>> 0).toString(16).toUpperCase().padStart(4, "0");
+        const hex2 = (v: number) => (v >>> 0).toString(16).toUpperCase().padStart(2, "0");
         // Absolute (domain-relative) struct base for a slot — the same number an
         // agent needs to read any field this tool doesn't decode (base + OFF.*).
         const slotAddr = (idx: number) => nhlAddr(nhl94.SORTCORDS + idx * nhl94.SCSIZE, domain);
@@ -2171,10 +2300,19 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             `attr=0x${hex4(rec.attr)}${mark(label, "attr")}(xflip=${(rec.attr >> 3) & 1}) ` +
             `spanum=${rec.spanum}${mark(label, "spanum")}(rec ${rec.spanum >> 2}) ` +
             `spacnt=${rec.spacnt}${mark(label, "spacnt")}`;
-          return [
+          const out = [
             `${label}${at}: ${pos} | ${vel} | dir=${rec.fdir} frame=${rec.frame}`,
             `     ${anim}`,
           ];
+          if (verbose) {
+            out.push(
+              `     impact=${rec.impact}${mark(label, "impact")} impactp=${rec.impactp}${mark(label, "impactp")} ` +
+              `pos=${rec.pos}${mark(label, "pos")} nopuck=${rec.nopuck}${mark(label, "nopuck")} ` +
+              `pf=0x${hex2(rec.pf)}${mark(label, "pf")} pf2=0x${hex2(rec.pf2)}${mark(label, "pf2")} ` +
+              `pf3=0x${hex2(rec.pf3)}${mark(label, "pf3")} wgt8=${rec.wgt8}${mark(label, "wgt8")}`,
+            );
+          }
+          return out;
         };
 
         const lines: string[] = [];
@@ -2203,16 +2341,51 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);
         const stateText = lines.join("\n");
 
-        // Optional screenshot + vision description
-        if (p.describe === true) {
-          const cfg = requireVisionConfig();
+        // Screenshot + vision description — ON BY DEFAULT (opt out with
+        // describe:false). Best-effort: if vision is unconfigured or errors, the
+        // structured data is still returned with a short note rather than
+        // failing the whole read.
+        if (p.describe !== false) {
+          const cfg = visionConfig();
+          if (!cfg) {
+            return ok(`${stateText}\n\n=== Vision unavailable ===\n(describe is on by default but VISION_BASE_URL/VISION_MODEL are not set; pass describe:false to silence)`);
+          }
           const shotPath = path.join(os.tmpdir(), `mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`);
-          await bh.call<string>("screenshot", { path: shotPath });
-          const desc = await describeImage(shotPath, p.describe_prompt as string | undefined, cfg);
-          return ok(`${stateText}\n\n=== Screenshot described by ${cfg.model} ===\n${desc}`);
+          try {
+            await bh.call<string>("screenshot", { path: shotPath });
+            const desc = await describeImage(shotPath, p.describe_prompt as string | undefined, cfg);
+            return ok(`${stateText}\n\n=== Screenshot described by ${cfg.model} ===\n${desc}`);
+          } catch (err) {
+            return ok(`${stateText}\n\n=== Vision unavailable ===\n(${(err as Error).message})`);
+          }
         }
 
         return ok(stateText);
+      }
+
+      case "nhl94_read": {
+        const domain = await nhlDomain(bh);
+        const targets = (p.targets as string[] | undefined)
+          ?? Array.from({ length: 12 }, (_, i) => `s${i}`).concat("pk");
+        const fieldToks = (p.fields as string[] | undefined) ?? nhl94.READ_DEFAULT_FIELDS;
+        const fields = fieldToks.map((t) => nhl94.resolveField(t)); // validates fields
+        const bases = targets.map((t) => ({ t, base: nhl94.resolveTarget(t).base })); // validates targets
+        const reads = bases.flatMap(({ t, base }) =>
+          fields.map((f) => ({ name: `${t}.${f.field}`, address: nhlAddr(base + f.offset, domain), width: f.width, domain })),
+        );
+        if (reads.length > 128) {
+          throw new Error(`nhl94_read would issue ${reads.length} reads (>128); reduce targets or fields`);
+        }
+        const vals = await bh.call<Record<string, number>>("read_many", { reads });
+        const lines = bases.map(({ t }) => {
+          const parts = fields.map((f) => {
+            const v = vals[`${t}.${f.field}`] ?? 0;
+            const shown = f.fixed ? nhl94.fromFixed(v >>> 0).whole : v;
+            return `${f.field}=${shown}`;
+          });
+          return `${t}: ${parts.join(" ")}`;
+        });
+        return ok(lines.join("\n"));
       }
 
       case "nhl94_park": {
@@ -2654,28 +2827,49 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_screenshot": {
-        // Validate vision config up front so a describe request fails before we
-        // bother capturing.
-        const cfg = p.describe ? requireVisionConfig() : null;
+        // Vision caption is ON BY DEFAULT (opt out with describe:false). It is
+        // ADDITIVE: the inline PNG is ALWAYS returned; the caption is appended
+        // when vision is available. Best-effort — a missing config or a vision
+        // outage degrades to image-only + a short note, never a hard error.
+        const wantCaption = p.describe !== false;
+        const cfg = wantCaption ? visionConfig() : null;
         const target = (p.path as string | undefined)
           ?? path.join(os.tmpdir(), `mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
         const saved = await bh.call<string>("screenshot", { path: target });
-        if (cfg) {
-          const desc = await describeImage(saved, p.describe_prompt as string | undefined, cfg);
-          return ok(`Screenshot ${saved} — described by ${cfg.model}:\n${desc}`);
+
+        // Build the caption (best-effort) before assembling the content blocks.
+        let caption: string | null = null;
+        if (wantCaption) {
+          if (!cfg) {
+            caption = "(vision caption unavailable: VISION_BASE_URL/VISION_MODEL not set; pass describe:false to silence)";
+          } else {
+            try {
+              const desc = await describeImage(saved, p.describe_prompt as string | undefined, cfg);
+              caption = `Described by ${cfg.model}:\n${desc}`;
+            } catch (err) {
+              caption = `(vision caption unavailable: ${(err as Error).message})`;
+            }
+          }
         }
+
         let bytes: Buffer;
         try {
           bytes = fs.readFileSync(saved);
         } catch (err) {
-          return ok(`Screenshot saved: ${saved} (could not inline image: ${(err as Error).message})`);
+          // Can't inline the image (e.g. BizHawk on a different filesystem) —
+          // still return the caption if we have one.
+          const note = `Screenshot saved: ${saved} (could not inline image: ${(err as Error).message})`;
+          return ok(caption ? `${note}\n\n${caption}` : note);
         }
-        return {
-          content: [
-            { type: "text" as const, text: `Screenshot saved: ${saved}` },
-            { type: "image" as const, data: bytes.toString("base64"), mimeType: "image/png" },
-          ],
-        };
+        const content: (
+          | { type: "text"; text: string }
+          | { type: "image"; data: string; mimeType: string }
+        )[] = [
+          { type: "text", text: `Screenshot saved: ${saved}` },
+          { type: "image", data: bytes.toString("base64"), mimeType: "image/png" },
+        ];
+        if (caption) content.push({ type: "text", text: caption });
+        return { content };
       }
 
       case "bizhawk_osd_message": {

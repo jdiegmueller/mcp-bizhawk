@@ -1,5 +1,33 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.22-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.27-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.27-jd changes (server-side only; bridge unchanged): vision upgrades.
+--   (1) Every describe request now carries a persistent NHL94-specific SYSTEM
+--   message, so even a bare describe returns a focused game-state read
+--   (phase/menu/faceoff/gameplay, plus period+clock+player activity on the ice)
+--   instead of a generic caption. (2) `describe` now DEFAULTS TRUE on nhl94_state
+--   and bizhawk_screenshot (opt out with describe:false); screenshot returns the
+--   PNG *and* a caption (additive, no longer image-replacing). (3) The vision
+--   step is best-effort: a missing config or outage degrades to data/image + a
+--   short note instead of failing the call. Protocol stays 2.
+--
+-- v2026.7.26-jd changes: the OSD version line now self-heals after a Lua-script
+--   RELOAD. Reloading the script reuses BizHawk's External-Tool socket, so the
+--   new script never re-received the once-per-connection HELLO and showed
+--   "srv v?" forever. The server now stamps its version/protocol (sv/sp) on
+--   EVERY command frame; dispatch() captures them, so the version line repaints
+--   correctly on the next command after any reload. Additive/backward-compatible
+--   → protocol stays 2.
+--
+-- v2026.7.25-jd changes: NEW `trap_exec` command (bizhawk_trap_exec) — PERSISTENT
+--   multi-address exec-site capture. Registers event.on_bus_exec hooks that
+--   accumulate per-trap buffers (register + memory captures via a small token
+--   DSL: D0-D7/A0-A7/PC/SR and @<0xADDR|REG[+/-0xOFF]>:width) across normally-
+--   driven frames, read back on demand (action start/read/status/stop). The
+--   built-in replacement for hand-rolled on_bus_exec loops in eval_lua. This adds
+--   a wire command → PROTOCOL bumped 1→2 (BRIDGE.protocol); server ≥2 talking to
+--   a protocol-1 bridge now shows the OSD stale-component warning (as intended).
+--   (Server-only v2026.7.23/.24: nhl94_read, nhl94_state verbose, bizhawk_ram_snapshot.)
 --
 -- v2026.7.22-jd changes: introduced an RPC PROTOCOL version (BRIDGE.protocol,
 --   server-side version.ts PROTOCOL_VERSION), advertised in the HELLO handshake
@@ -539,13 +567,13 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.22-jd",
+    version    = "2026.7.27-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
     -- (see version.ts PROTOCOL_VERSION), NOT when the display versions differ.
     -- Bump only on an actual wire-contract change.
-    protocol   = 1,
+    protocol   = 2,
     pause_safe = true,
 }
 
@@ -2389,6 +2417,121 @@ local function cmd_trap_memory(p)
     }
 end
 
+-- ── Persistent exec-site capture (bizhawk_trap_exec) ─────────────────────────
+-- Unlike cmd_trap_memory (ONE address, first hit only, self-advances then
+-- unregisters), this registers PERSISTENT exec hooks at one or more addresses
+-- that ACCUMULATE captures into per-trap buffers across normally-driven frames
+-- (frame_advance / play_input_sequence / live play), read back on demand — the
+-- built-in replacement for hand-rolled event.on_bus_exec capture loops in
+-- eval_lua. Lifecycle via p.action: start (arm) / read / status / stop.
+local trap_exec = { hooks = {}, buf = {}, order = {}, active = false }
+local TRAP_REGS = { "D0","D1","D2","D3","D4","D5","D6","D7",
+                    "A0","A1","A2","A3","A4","A5","A6","A7","PC","SR" }
+local function trap_regval(regs, name) return regs["M68K " .. name] end
+local TRAP_READERS = {
+    u8  = function(a) return memory.read_u8(a) end,
+    s8  = function(a) return memory.read_s8(a) end,
+    u16 = function(a) return memory.read_u16_be(a) end,
+    s16 = function(a) return memory.read_s16_be(a) end,
+    u32 = function(a) return memory.read_u32_be(a) end,
+    s32 = function(a) return memory.read_s32_be(a) end,
+}
+
+-- Compile a capture token into {key, fn(regs)->value}. Tokens:
+--   D0-D7 / A0-A7 / PC / SR           register value
+--   @0xADDR:width                     absolute memory read (active domain)
+--   @REG:width / @REG+0xOFF:width / @REG-0xOFF:width   register-relative read
+-- width ∈ u8/s8/u16/s16/u32/s32 (16/32 big-endian). Addresses masked to 24 bits.
+local function trap_compile(tok)
+    if tok:match("^[DA]%d$") or tok == "PC" or tok == "SR" then
+        return tok, function(regs) return trap_regval(regs, tok) end
+    end
+    local body, width = tok:match("^@(.+):(%w+)$")
+    if not body or not TRAP_READERS[width] then
+        error("bad capture token '" .. tok .. "' (D0-D7/A0-A7/PC/SR or @<0xADDR|REG[+/-0xOFF]>:width)")
+    end
+    local rd = TRAP_READERS[width]
+    local absn = body:match("^0[xX](%x+)$")
+    if absn then
+        local addr = tonumber(absn, 16) & 0xFFFFFF
+        return tok, function() return rd(addr) end
+    end
+    local rp, off = body:match("^([DA]%d)%+0[xX](%x+)$")
+    if rp then local o = tonumber(off, 16); return tok, function(regs) return rd((trap_regval(regs, rp) + o) & 0xFFFFFF) end end
+    local rm, offm = body:match("^([DA]%d)%-0[xX](%x+)$")
+    if rm then local o = tonumber(offm, 16); return tok, function(regs) return rd((trap_regval(regs, rm) - o) & 0xFFFFFF) end end
+    local rr = body:match("^([DA]%d)$")
+    if rr then return tok, function(regs) return rd(trap_regval(regs, rr) & 0xFFFFFF) end end
+    error("bad capture address in token '" .. tok .. "'")
+end
+
+local function trap_exec_clear()
+    for _, id in ipairs(trap_exec.hooks) do pcall(function() event.unregisterbyid(id) end) end
+    trap_exec.hooks, trap_exec.buf, trap_exec.order, trap_exec.active = {}, {}, {}, false
+end
+
+local function cmd_trap_exec(p)
+    local action = p.action or "read"
+    if action == "start" then
+        if not CAPS.on_bus_exec then error("event.on_bus_exec not available on this core") end
+        if not CAPS.getregisters then error("emu.getregisters not available") end
+        trap_exec_clear()
+        local traps = p.traps or {}
+        if #traps == 0 then error("start requires at least one trap {addr,name?,capture?,limit?}") end
+        local default_limit = p.limit or 200
+        for i, t in ipairs(traps) do
+            local addr = assert(t.addr, "each trap needs addr")
+            local name = t.name or ("t" .. i)
+            local limit = t.limit or default_limit
+            local compiled = {}
+            if t.capture and #t.capture > 0 then
+                for _, tk in ipairs(t.capture) do
+                    local key, fn = trap_compile(tk)
+                    compiled[#compiled + 1] = { key = key, fn = fn }
+                end
+            else
+                for _, rn in ipairs(TRAP_REGS) do
+                    compiled[#compiled + 1] = { key = rn, fn = (function(n) return function(regs) return trap_regval(regs, n) end end)(rn) }
+                end
+            end
+            trap_exec.buf[name] = {}
+            trap_exec.order[#trap_exec.order + 1] = name
+            local buf = trap_exec.buf[name]
+            local id = event.on_bus_exec(function()
+                if #buf >= limit then return end
+                local regs = emu.getregisters()
+                local e = { f = emu.framecount() }
+                for _, c in ipairs(compiled) do e[c.key] = c.fn(regs) end
+                buf[#buf + 1] = e
+            end, addr, "mcp_te_" .. name)
+            trap_exec.hooks[#trap_exec.hooks + 1] = id
+        end
+        trap_exec.active = true
+        return { started = #traps, traps = trap_exec.order }
+    elseif action == "read" then
+        local want = p.name
+        local out, counts = {}, {}
+        for _, name in ipairs(trap_exec.order) do
+            if (not want) or want == name then
+                out[name] = trap_exec.buf[name]
+                counts[name] = #trap_exec.buf[name]
+            end
+        end
+        return { active = trap_exec.active, counts = counts, traps = out }
+    elseif action == "status" then
+        local counts = {}
+        for _, name in ipairs(trap_exec.order) do counts[name] = #trap_exec.buf[name] end
+        return { active = trap_exec.active, counts = counts }
+    elseif action == "stop" then
+        local counts = {}
+        for _, name in ipairs(trap_exec.order) do counts[name] = #trap_exec.buf[name] end
+        trap_exec_clear()
+        return { stopped = true, counts = counts }
+    else
+        error("action must be start/read/status/stop")
+    end
+end
+
 -- Record the HUMAN's joypad for up to max_frames (or until a memory value
 -- changes), returning a play_input_sequence-compatible RLE frame list.
 -- Lets a user demonstrate a move once, then hand the agent a replayable
@@ -2639,6 +2782,7 @@ local HANDLERS = {
     set_register         = cmd_set_register,
     disassemble          = cmd_disassemble,
     trap_memory          = cmd_trap_memory,
+    trap_exec            = cmd_trap_exec,
     record_input         = cmd_record_input,
     get_input            = cmd_get_input,
     movie_status         = cmd_movie_status,
@@ -2654,6 +2798,19 @@ local HANDLERS = {
 }
 
 local function dispatch(cmd)
+    -- Capture the server version/protocol stamped on every command (sv/sp) so
+    -- the OSD version line self-heals from normal traffic — a Lua-script RELOAD
+    -- reuses the socket and thus misses the once-per-connection HELLO, leaving
+    -- server_version nil ("srv v?") until the next command lands here.
+    if cmd.sv ~= nil then
+        local newv = tostring(cmd.sv)
+        local newp = tonumber(cmd.sp)
+        if newv ~= BRIDGE.server_version or newp ~= BRIDGE.server_protocol then
+            BRIDGE.server_version = newv
+            BRIDGE.server_protocol = newp
+            osd_last_frame = -1  -- force a repaint so the version line updates now
+        end
+    end
     if not cmd.method then
         console.log("[mcp-bizhawk] << (malformed: missing method field)")
         return nil, { code = -32600, message = "missing method field" }

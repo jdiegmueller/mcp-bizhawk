@@ -54,7 +54,7 @@ export class FakeBridge {
   }
 
   onCommand(cmd) {
-    this.calls.push({ method: cmd.method, params: cmd.params ?? {} });
+    this.calls.push({ method: cmd.method, params: cmd.params ?? {}, sv: cmd.sv, sp: cmd.sp });
     const h = this.handlers[cmd.method];
     let reply;
     if (!h) {

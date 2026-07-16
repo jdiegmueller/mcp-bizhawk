@@ -1,33 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startHarness, textOf } from "./helpers/harness.mjs";
+import { startVisionStub } from "./helpers/vision-stub.mjs";
 
-// A tiny stub of the OpenAI-compatible /chat/completions endpoint a local
-// vision model (llama.cpp / llama-swap) would serve. Captures the request so
-// tests can assert we sent the image + prompt correctly.
-async function startVisionStub(content) {
-  const received = [];
-  const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
-    req.on("end", () => {
-      received.push({ url: req.url, body: JSON.parse(body) });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
-    });
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const port = server.address().port;
-  return {
-    baseUrl: `http://127.0.0.1:${port}/v1`,
-    received,
-    close: () => new Promise((r) => server.close(r)),
-  };
-}
+const DOMAINS = ["M68K BUS", "68K RAM"];
 
 function tempPng() {
   const p = path.join(os.tmpdir(), `mcp-vision-test-${process.pid}-${Math.random().toString(36).slice(2)}.png`);
@@ -35,26 +14,40 @@ function tempPng() {
   return p;
 }
 
-test("bizhawk_screenshot with describe returns the vision model's text, not an image", async () => {
+// A screenshot handler that actually writes the PNG at the requested path, so
+// the server can read it back to inline it AND hand it to the vision stub.
+function writingScreenshot(p) {
+  fs.writeFileSync(p.path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  return p.path;
+}
+
+test("bizhawk_screenshot returns the PNG AND a vision caption by default", async () => {
   const stub = await startVisionStub("A hockey rink; the puck is near center ice.");
   const png = tempPng();
   process.env.VISION_BASE_URL = stub.baseUrl;
   process.env.VISION_MODEL = "test-vlm";
   const h = await startHarness({ screenshot: (p) => p.path });
   try {
+    // describe defaults to true — no need to pass it.
     const res = await h.client.callTool({
       name: "bizhawk_screenshot",
-      arguments: { path: png, describe: true, describe_prompt: "Where is the puck?" },
+      arguments: { path: png, describe_prompt: "Where is the puck?" },
     });
     const t = textOf(res);
+    // The PNG is STILL inlined (describe is additive now, not a replacement)...
+    assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG inlined");
+    // ...and the caption is appended.
     assert.match(t, /A hockey rink; the puck is near center ice\./);
-    assert.equal(res.content.filter((c) => c.type === "image").length, 0, "no binary image returned");
+    assert.match(t, /Described by test-vlm/);
 
-    // We actually called the vision endpoint with the prompt + a PNG data URL.
+    // We sent a system message, the prompt, and a PNG data URL.
     assert.equal(stub.received.length, 1);
-    const msg = stub.received[0].body.messages[0];
-    assert.equal(msg.content[0].text, "Where is the puck?");
-    assert.match(msg.content[1].image_url.url, /^data:image\/png;base64,/);
+    const messages = stub.received[0].body.messages;
+    assert.equal(messages[0].role, "system");
+    assert.match(messages[0].content, /NHL '94/, "system message frames the NHL94 task");
+    assert.equal(messages[1].role, "user");
+    assert.equal(messages[1].content[0].text, "Where is the puck?");
+    assert.match(messages[1].content[1].image_url.url, /^data:image\/png;base64,/);
   } finally {
     delete process.env.VISION_BASE_URL;
     delete process.env.VISION_MODEL;
@@ -64,19 +57,78 @@ test("bizhawk_screenshot with describe returns the vision model's text, not an i
   }
 });
 
-test("bizhawk_screenshot describe errors clearly when vision is not configured", async () => {
+test("bizhawk_screenshot describe:false returns the PNG only, no vision call", async () => {
+  const stub = await startVisionStub("should never be produced");
+  const png = tempPng();
+  process.env.VISION_BASE_URL = stub.baseUrl;
+  process.env.VISION_MODEL = "test-vlm";
+  const h = await startHarness({ screenshot: (p) => p.path });
+  try {
+    const res = await h.client.callTool({
+      name: "bizhawk_screenshot",
+      arguments: { path: png, describe: false },
+    });
+    assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG inlined");
+    assert.equal(stub.received.length, 0, "vision endpoint not called when describe:false");
+    assert.doesNotMatch(textOf(res), /Described by/);
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+    fs.rmSync(png, { force: true });
+    await h.close();
+    await stub.close();
+  }
+});
+
+test("bizhawk_screenshot degrades to image + note when vision is unconfigured", async () => {
   delete process.env.VISION_BASE_URL;
   delete process.env.VISION_MODEL;
   const png = tempPng();
   const h = await startHarness({ screenshot: (p) => p.path });
   try {
-    await assert.rejects(
-      h.client.callTool({ name: "bizhawk_screenshot", arguments: { path: png, describe: true } }),
-      /VISION_BASE_URL/,
-    );
+    // describe defaults true, but vision isn't configured: still succeed, still
+    // return the image, and append a short note instead of erroring.
+    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { path: png } });
+    assert.equal(res.isError ?? false, false);
+    assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG still returned");
+    assert.match(textOf(res), /vision caption unavailable/);
   } finally {
     fs.rmSync(png, { force: true });
     await h.close();
+  }
+});
+
+test("nhl94_state appends a vision caption by default, omits it with describe:false", async () => {
+  const stub = await startVisionStub("Faceoff at center ice; players lined up.");
+  process.env.VISION_BASE_URL = stub.baseUrl;
+  process.env.VISION_MODEL = "test-vlm";
+  const rec = (i) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0 });
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+    screenshot: writingScreenshot,
+  });
+  try {
+    // Default: structured data + caption.
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: {} }));
+    assert.match(t, /carrier:/, "structured data present");
+    assert.match(t, /Faceoff at center ice/, "caption appended by default");
+    assert.match(t, /described by test-vlm/i);
+    assert.equal(stub.received.length, 1);
+
+    // describe:false → structured only, no vision call.
+    const t2 = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
+    assert.match(t2, /carrier:/);
+    assert.doesNotMatch(t2, /Faceoff at center ice/);
+    assert.doesNotMatch(t2, /Screenshot described by/);
+    assert.equal(stub.received.length, 1, "no additional vision call for describe:false");
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+    await h.close();
+    await stub.close();
   }
 });
 

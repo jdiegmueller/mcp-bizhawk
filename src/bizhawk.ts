@@ -262,7 +262,12 @@ export class BizhawkServer {
     }
     this.inflight.set(next.id, next);
     this.awaitingResult = true;
-    const msg = JSON.stringify({ id: next.id, method: next.method, params: next.params });
+    // Stamp server version/protocol (sv/sp) onto every command. The bridge
+    // captures them on dispatch, so its OSD version line self-heals from normal
+    // traffic even when a Lua-script RELOAD reused the socket and thus missed the
+    // once-per-connection HELLO (BizHawk owns the External-Tool socket, so a
+    // reload does not re-dial and re-trigger HELLO).
+    const msg = JSON.stringify({ id: next.id, method: next.method, params: next.params, sv: VERSION, sp: PROTOCOL_VERSION });
     this.sendFramed(msg);
   }
 

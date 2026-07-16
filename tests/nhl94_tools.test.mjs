@@ -129,7 +129,9 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     }),
   });
   try {
-    const res = await h.client.callTool({ name: "nhl94_state", arguments: {} });
+    // describe:false keeps this focused on the structured decode (the vision
+    // caption is on by default now).
+    const res = await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } });
     const text = textOf(res);
     assert.match(text, /s3: x=200 y=-40/);
     assert.match(text, /pk: x=8 y=8/);
@@ -147,8 +149,65 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /layout: slot structs @ base=0xFFB04A stride=0x80 domain='M68K BUS'/);
     assert.match(text, /anim\+58 spanum\+5A/);
     // raw:true exposes each target's absolute struct address (s3 @ base+3*0x80).
-    const rawRes = await h.client.callTool({ name: "nhl94_state", arguments: { raw: true } });
+    const rawRes = await h.client.callTool({ name: "nhl94_state", arguments: { raw: true, describe: false } });
     assert.match(textOf(rawRes), /s3 @0xFFB1CA:/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_read decodes named + raw fields per target via one read_many", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    // Echo a deterministic value per requested read: x → 100<<16 (fixed),
+    // everything else → the low byte of its address.
+    read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, r.name.endsWith(".x") ? (100 << 16) : (r.address & 0xff)])),
+  });
+  try {
+    const res = await h.client.callTool({ name: "nhl94_read", arguments: { targets: ["s0", "pk"], fields: ["x", "impact", "pf", "+0x40:s16_be"] } });
+    const t = textOf(res);
+    // x is 16.16 → decoded to whole pixels (100); others are raw integers.
+    assert.match(t, /s0: x=100 impact=\d+ pf=\d+ \+0x40:s16_be=\d+/);
+    assert.match(t, /pk: x=100 /);
+    const call = h.bridge.calls.find((c) => c.method === "read_many");
+    // per-target.field naming, and impact read at the s0 struct base + 0x32.
+    assert.ok(call.params.reads.some((r) => r.name === "s0.impact"));
+    assert.ok(call.params.reads.some((r) => r.name === "pk.+0x40:s16_be" && r.width === "s16_be"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_read rejects unknown fields", async () => {
+  const h = await startHarness({ list_memory_domains: () => DOMAINS, read_many: () => ({}) });
+  try {
+    await assert.rejects(
+      h.client.callTool({ name: "nhl94_read", arguments: { targets: ["s0"], fields: ["bogus"] } }),
+      /unknown field/,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state verbose:true appends the extended per-entity line", async () => {
+  const rec = (i, over = {}) => ({
+    _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0,
+    impact: 42, impactp: 7, pos: 3, nopuck: 1, pf: 0x12, pf2: 0x34, pf3: 0x56, wgt8: 200, ...over,
+  });
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => {
+      // verbose must have requested the extended fields too.
+      assert.ok(p.fields.some((f) => f.name === "impact"));
+      return Array.from({ length: p.count }, (_, i) => rec(i));
+    },
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { verbose: true, describe: false } }));
+    assert.match(t, /impact=42 impactp=7 pos=3 nopuck=1 pf=0x12 pf2=0x34 pf3=0x56 wgt8=200/);
   } finally {
     await h.close();
   }
@@ -165,7 +224,7 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     list_frozen: () => ({ frozen: [] }),
   });
   try {
-    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: {} }));
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
     assert.match(text, /play: stopped/);
     assert.match(text, /faceoff: yes/);
     // gmode is requested as a byte read, not u16_be (the endianness fix).

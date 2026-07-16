@@ -19,7 +19,8 @@ test("bizhawk_screenshot inlines the PNG as an image content block", async () =>
   const h = await startHarness({ screenshot: fakeScreenshot });
   try {
     const out = path.join(os.tmpdir(), `mcp-bizhawk-test-${process.pid}.png`);
-    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { path: out } });
+    // describe:false isolates the image-inlining behavior from the (default-on) vision caption.
+    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { path: out, describe: false } });
     assert.match(textOf(res), /Screenshot saved: /);
     const img = res.content.find((c) => c.type === "image");
     assert.ok(img, "expected an inline image content block");
@@ -34,7 +35,7 @@ test("bizhawk_screenshot inlines the PNG as an image content block", async () =>
 test("bizhawk_screenshot works with no path (defaults to a temp file)", async () => {
   const h = await startHarness({ screenshot: fakeScreenshot });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { describe: false } });
     const img = res.content.find((c) => c.type === "image");
     assert.ok(img, "expected an inline image content block");
     const m = textOf(res).match(/Screenshot saved: (\S+)/);
@@ -53,7 +54,7 @@ test("bizhawk_screenshot degrades to text-only when the file is unreadable", asy
   try {
     const res = await h.client.callTool({
       name: "bizhawk_screenshot",
-      arguments: { path: path.join(os.tmpdir(), "does-not-exist-dir-xyz", "shot.png") },
+      arguments: { path: path.join(os.tmpdir(), "does-not-exist-dir-xyz", "shot.png"), describe: false },
     });
     assert.equal(res.isError ?? false, false);
     assert.match(textOf(res), /could not inline image/);

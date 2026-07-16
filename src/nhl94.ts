@@ -345,7 +345,11 @@ script or restarting BizHawk — use nhl94_rig to survive that.
 ── WHEN TO USE EACH TOOL ─────────────────────────────────────────────────────
 • nhl94_state    — decoded snapshot of everyone + globals. Your default read and
                    the verification step after every change. A trailing * on any
-                   value = that word is frozen.
+                   value = that word is frozen. verbose:true adds the extended
+                   per-entity fields (impact/flags/weight/nopuck).
+• nhl94_read     — read ANY entity field by name (impact,pf,wgt8,nopuck,…) or raw
+                   +0xNN offset without hand-computing 68K addresses. Reach for
+                   THIS instead of bizhawk_eval_lua/read for one-off struct fields.
 • nhl94_teleport — place a target at whole-pixel (x,y[,z]). Does NOT hold it;
                    the game moves it next frame unless you also freeze.
 • nhl94_freeze   — pin targets at their CURRENT position (x/y/z) + zero velocity.

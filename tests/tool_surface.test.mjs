@@ -6,14 +6,15 @@ const EXPECTED_BIZHAWK = [
   "bizhawk_ping", "bizhawk_get_info", "bizhawk_pause", "bizhawk_unpause",
   "bizhawk_frame_advance", "bizhawk_reset", "bizhawk_press_buttons",
   "bizhawk_play_input_sequence", "bizhawk_screenshot", "bizhawk_save_state",
-  "bizhawk_load_state", "bizhawk_read_many", "bizhawk_disassemble", "bizhawk_eval_lua",
+  "bizhawk_load_state", "bizhawk_read_many", "bizhawk_ram_snapshot", "bizhawk_disassemble",
+  "bizhawk_trap_exec", "bizhawk_eval_lua",
   "bizhawk_trace_start", "bizhawk_trace_stop", "bizhawk_trace_status", "bizhawk_trace_tail",
   "bizhawk_phys_trace_start", "bizhawk_phys_trace_stop",
   "bizhawk_phys_trace_status", "bizhawk_phys_trace_tail",
 ];
 const EXPECTED_NHL94 = [
   "nhl94_recipes", "nhl94_teleport", "nhl94_freeze", "nhl94_unfreeze",
-  "nhl94_state", "nhl94_park", "nhl94_rig", "nhl94_possession",
+  "nhl94_state", "nhl94_read", "nhl94_park", "nhl94_rig", "nhl94_possession",
   "nhl94_clock", "nhl94_camera",
 ];
 const HIDDEN_SAMPLE = [

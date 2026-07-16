@@ -19,6 +19,12 @@ test("server greets the bridge with HELLO carrying its version, once per connect
     // Normal RPC still works after the greeting.
     await h.client.callTool({ name: "bizhawk_ping", arguments: {} });
 
+    // Every command frame carries the server version/protocol (sv/sp) so the
+    // bridge OSD self-heals after a script reload that missed the HELLO.
+    const pingCall = h.bridge.calls.find((c) => c.method === "ping");
+    assert.equal(pingCall.sv, VERSION);
+    assert.equal(pingCall.sp, PROTOCOL_VERSION);
+
     // Wait a few more polls: HELLO must NOT repeat on the same connection.
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(h.bridge.helloCount, 1);
