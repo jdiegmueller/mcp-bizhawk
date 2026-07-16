@@ -82,6 +82,20 @@ leave it alone.
   external BizHawk deployment is in use, also copy the file to
   `/mnt/8tb/jason/nvnhl94-2/tools/bizhawk/BizHawk-2.11.1-linux-x64/Lua/`.
 
+## Vision screenshots across a filesystem boundary
+
+Screenshot-backed vision (`nhl94_state`/`bizhawk_screenshot` `describe`, on by
+default) writes a PNG that the **server** then reads back to inline/caption it.
+When BizHawk runs on the **same** host (e.g. the linux daemon) the default OS
+temp dir works. When BizHawk is **remote on another OS** (the windows daemon:
+Windows BizHawk, Linux server over a shared mount) the two spell the shared dir
+differently, so set both per daemon: `MCP_BIZHAWK_SHOT_DIR` = the shared dir as
+the **server** sees it (read-back), `MCP_BIZHAWK_SHOT_DIR_BRIDGE` = the same dir
+as **BizHawk** sees it (write). E.g. `X:\` (Windows) == `/mnt/8tb/jason` (Linux)
+→ `MCP_BIZHAWK_SHOT_DIR=/mnt/8tb/jason/tmp` + `MCP_BIZHAWK_SHOT_DIR_BRIDGE=X:\tmp`
+(see `deploy/bizhawk-daemon-windows.service`). Auto paths only; an explicit
+`path` arg is used verbatim. Without this, remote describe fails `ENOENT`.
+
 ## Usage logging
 
 Every MCP tool call appends one JSONL row (`ts`/`tool`/`ok`/`ms`/`args`, plus

@@ -639,7 +639,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Capture a PNG screenshot of the current emulator display and return it INLINE as an image content block (also saved to disk). " +
       "USAGE: The primary 'look at the screen' tool — call it whenever you need visual confirmation of game state. To capture a specific state, pause / advance frames / load state first. Pass `path` only if you want the PNG at a specific location; otherwise a temp file is used. For screenshots DURING an input sequence use bizhawk_play_input_sequence's screenshot_every instead. " +
-      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists. The image is read back from disk and inlined; if the file can't be read (e.g. BizHawk runs on a different filesystem than this server), the tool still succeeds and returns the path with a note instead of the image. Returns an error if the parent directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info. " +
+      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists. The image is read back from disk and inlined; if the file can't be read the tool still succeeds and returns the path with a note instead of the image. When BizHawk runs on a DIFFERENT filesystem than this server (e.g. a Windows BizHawk driven by a Linux daemon over a shared mount), set MCP_BIZHAWK_SHOT_DIR (the shared dir as the SERVER sees it) + MCP_BIZHAWK_SHOT_DIR_BRIDGE (the same dir as BizHawk sees it, e.g. 'X:\\tmp') so auto (no-`path`) screenshots — including the default-on vision caption here and in nhl94_state — write on the BizHawk side and read back on the server side. An explicit `path` is used verbatim (no translation). Returns an error if the parent directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info. " +
       "RETURNS: A text block 'Screenshot saved: PATH', an inline PNG image content block, and (unless describe:false) a vision-model caption of the screen.",
     inputSchema: {
       type: "object",
@@ -1694,6 +1694,34 @@ async function nhlSettle(bh: BizhawkServer): Promise<boolean> {
   }
 }
 
+// Screenshot path handling for cross-filesystem setups. When BizHawk runs on a
+// DIFFERENT host/OS than this server (e.g. a Windows BizHawk driven by a Linux
+// daemon over a shared mount), the two spell the SAME shared directory
+// differently, so the path we tell BizHawk to WRITE is not the path this server
+// can READ back to inline/describe the PNG. Two env vars resolve it, per daemon:
+//   MCP_BIZHAWK_SHOT_DIR         — the shared dir as THIS SERVER sees it (read-back path)
+//   MCP_BIZHAWK_SHOT_DIR_BRIDGE  — the same dir as the BRIDGE/BizHawk sees it (write path)
+// e.g. on the Windows daemon: MCP_BIZHAWK_SHOT_DIR=/mnt/8tb/jason/tmp and
+// MCP_BIZHAWK_SHOT_DIR_BRIDGE='X:\tmp' (X:\ == /mnt/8tb/jason). Defaults: both =
+// the OS temp dir — co-located BizHawk, no translation (the historical behavior).
+// Returns `local` (fs read/describe) and `remote` (sent to the bridge screenshot
+// command); they are the same file via the shared mount, spelled per side.
+export function shotPaths(name: string): { local: string; remote: string } {
+  const localDir = process.env.MCP_BIZHAWK_SHOT_DIR || os.tmpdir();
+  const local = path.join(localDir, name);
+  if (process.env.MCP_BIZHAWK_SHOT_DIR) {
+    try { fs.mkdirSync(localDir, { recursive: true }); } catch { /* best-effort */ }
+  }
+  const bridgeDir = process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE;
+  if (!bridgeDir) return { local, remote: local };
+  // Join with the separator the bridge's path implies (Windows drive/backslash
+  // → "\", otherwise "/"), trimming any trailing separator on the configured dir.
+  const isWin = /\\/.test(bridgeDir) || /^[A-Za-z]:/.test(bridgeDir);
+  const sep = isWin ? "\\" : "/";
+  const trimmed = bridgeDir.replace(/[\\/]+$/, "");
+  return { local, remote: `${trimmed}${sep}${name}` };
+}
+
 // The JD build is NHL94-focused: expose all nhl94_* tools plus a curated core
 // of bizhawk_* tools, and hide the rest to keep the surface small (the hidden
 // raw-memory/freeze tools are the endian/width footguns nhl94_* replaces). All
@@ -2381,10 +2409,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           if (!cfg) {
             return ok(`${stateText}\n\n=== Vision unavailable ===\n(describe is on by default but VISION_BASE_URL/VISION_MODEL are not set; pass describe:false to silence)`);
           }
-          const shotPath = path.join(os.tmpdir(), `mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`);
+          const { local: readPath, remote: sendPath } = shotPaths(`mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`);
           try {
-            await bh.call<string>("screenshot", { path: shotPath });
-            const desc = await describeImage(shotPath, p.describe_prompt as string | undefined, cfg);
+            await bh.call<string>("screenshot", { path: sendPath });
+            const desc = await describeImage(readPath, p.describe_prompt as string | undefined, cfg);
             return ok(`${stateText}\n\n=== Screenshot described by ${cfg.model} ===\n${desc}`);
           } catch (err) {
             return ok(`${stateText}\n\n=== Vision unavailable ===\n(${(err as Error).message})`);
@@ -2866,9 +2894,14 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         // outage degrades to image-only + a short note, never a hard error.
         const wantCaption = p.describe !== false;
         const cfg = wantCaption ? visionConfig() : null;
-        const target = (p.path as string | undefined)
-          ?? path.join(os.tmpdir(), `mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
-        const saved = await bh.call<string>("screenshot", { path: target });
+        // An explicit caller path is used verbatim (no translation); an auto path
+        // uses the shared-dir mapping so read-back works when BizHawk is on a
+        // different filesystem than this server (see shotPaths).
+        const explicit = p.path as string | undefined;
+        const { local: readPath, remote: sendPath } = explicit
+          ? { local: explicit, remote: explicit }
+          : shotPaths(`mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
+        const saved = await bh.call<string>("screenshot", { path: sendPath });
 
         // Build the caption (best-effort) before assembling the content blocks.
         let caption: string | null = null;
@@ -2877,7 +2910,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             caption = "(vision caption unavailable: VISION_BASE_URL/VISION_MODEL not set; pass describe:false to silence)";
           } else {
             try {
-              const desc = await describeImage(saved, p.describe_prompt as string | undefined, cfg);
+              const desc = await describeImage(readPath, p.describe_prompt as string | undefined, cfg);
               caption = `Described by ${cfg.model}:\n${desc}`;
             } catch (err) {
               caption = `(vision caption unavailable: ${(err as Error).message})`;
@@ -2887,11 +2920,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
 
         let bytes: Buffer;
         try {
-          bytes = fs.readFileSync(saved);
+          bytes = fs.readFileSync(readPath);
         } catch (err) {
-          // Can't inline the image (e.g. BizHawk on a different filesystem) —
-          // still return the caption if we have one.
-          const note = `Screenshot saved: ${saved} (could not inline image: ${(err as Error).message})`;
+          // Can't inline the image (e.g. BizHawk on a different filesystem with no
+          // shared-dir mapping) — still return the caption if we have one.
+          const note = `Screenshot saved: ${saved} (could not inline image: ${(err as Error).message}; for a cross-host BizHawk set MCP_BIZHAWK_SHOT_DIR + MCP_BIZHAWK_SHOT_DIR_BRIDGE)`;
           return ok(caption ? `${note}\n\n${caption}` : note);
         }
         const content: (

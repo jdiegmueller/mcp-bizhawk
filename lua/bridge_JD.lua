@@ -1,5 +1,12 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.29-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.30-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.30-jd changes (server-side only; bridge unchanged): cross-filesystem
+--   vision screenshots. When BizHawk is on a different host/OS than the server
+--   (Windows BizHawk + Linux daemon over a shared mount), the auto screenshot
+--   path is now split: MCP_BIZHAWK_SHOT_DIR_BRIDGE spells the shared dir as
+--   BizHawk sees it (write), MCP_BIZHAWK_SHOT_DIR as the server sees it (read
+--   back) — fixes the describe ENOENT on the windows daemon. Protocol unchanged.
 --
 -- v2026.7.29-jd changes (server-side only; bridge unchanged): nhl94_teleport,
 --   nhl94_park and nhl94_possession now step a few frames (best-effort) after
@@ -581,7 +588,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.29-jd",
+    version    = "2026.7.30-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

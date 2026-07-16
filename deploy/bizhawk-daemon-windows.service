@@ -46,6 +46,14 @@ Environment=BIZHAWK_HOST=0.0.0.0
 Environment=VISION_BASE_URL=https://llama-swap.nevosi.com/v1
 Environment=VISION_MODEL=Qwen3.6-35B-A3B
 Environment=VISION_API_KEY=sk-no-key-required
+# Cross-filesystem screenshots: this REMOTE Windows BizHawk cannot write the
+# server's Linux /tmp, and the server cannot read a Windows path — so auto
+# (no-`path`) screenshots (incl. the default-on vision caption) must land in a
+# dir BOTH sides can reach via the shared mount. Here X:\ (Windows) == the
+# server's /mnt/8tb/jason (Linux): the server writes/reads .../tmp, BizHawk is
+# told X:\tmp. The dir must exist (the server creates the SHOT_DIR side).
+Environment=MCP_BIZHAWK_SHOT_DIR=/mnt/8tb/jason/tmp
+Environment=MCP_BIZHAWK_SHOT_DIR_BRIDGE=X:\tmp
 
 [Install]
 WantedBy=default.target
