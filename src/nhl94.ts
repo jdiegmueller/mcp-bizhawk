@@ -42,6 +42,12 @@ export const OFF: Record<string, number> = {
   pf2: 0x63,
   pf3: 0x64,
   wgt8: 0x67,
+  // Player ratings the OSD shows for the puck carrier (mirror bridge_JD.lua's
+  // carrier readout): shotpwr/shotacc/passacc @0x6C/6D/6E, energy @0x66. u8.
+  energy: 0x66,
+  shotpwr: 0x6c,
+  shotacc: 0x6d,
+  passacc: 0x6e,
 };
 
 // Read width per field name (used by nhl94_state and nhl94_read). Mirrors the
@@ -54,6 +60,7 @@ export const FIELD_WIDTH: Record<string, string> = {
   attr: "u16_be", anim: "u16_be", spanum: "u16_be", spacnt: "s16_be",
   impact: "s16_be", impactp: "s16_be", pos: "u16_be",
   nopuck: "u8", pf: "u8", pf2: "u8", pf3: "u8", wgt8: "u8",
+  energy: "u8", shotpwr: "u8", shotacc: "u8", passacc: "u8",
 };
 
 // Fields that are 16.16 fixed-point (decode to whole pixels); everything else is
@@ -70,6 +77,13 @@ export const G: Record<string, number> = {
   vpos: 0xffbd18,
   hpos: 0xffbd1c,
   yleader: 0xffbf92,
+  // Play-context globals the OSD footer shows (mirror bridge_JD.lua TRACE_G):
+  // shotplayer/lastplayer = slot index (s16, -1/none when unset), passdir/
+  // passspeed = the last pass vector. All s16_be.
+  shotplayer: 0xffbed8,
+  lastplayer: 0xffbeda,
+  passdir: 0xffbedc,
+  passspeed: 0xffbede,
 };
 
 // Screen/session-phase byte at 0xFFC735. NHL94 has NO clean single "screen

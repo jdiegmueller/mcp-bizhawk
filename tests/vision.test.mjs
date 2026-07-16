@@ -106,7 +106,7 @@ test("nhl94_state appends a vision caption by default, omits it with describe:fa
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
-    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0 }),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0, session: 0xff, shotplayer: -1, lastplayer: -1, passdir: 0, passspeed: 0 }),
     list_frozen: () => ({ frozen: [] }),
     screenshot: writingScreenshot,
   });

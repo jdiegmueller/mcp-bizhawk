@@ -123,11 +123,11 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     read_struct_array: (p) =>
       Array.from({ length: p.count }, (_, i) => {
         if (i === 0) return rec(0, { x: 100 << 16 });
-        if (i === 3) return rec(3, { x: 200 << 16, y: (-40) << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5 });
+        if (i === 3) return rec(3, { x: 200 << 16, y: (-40) << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5, shotpwr: 6, shotacc: 5, passacc: 4, energy: 9 });
         if (i === 14) return rec(14, { x: 8 << 16, y: 8 << 16 });
         return rec(i);
       }),
-    read_many: () => ({ carrier: 3, gameclock: 1199, gsp: 0, gmode: 0, vpos: 10, hpos: -5, yleader: 50, session: 0xff }),
+    read_many: () => ({ carrier: 3, gameclock: 1199, gsp: 0, gmode: 0, vpos: 10, hpos: -5, yleader: 50, session: 0xff, shotplayer: 3, lastplayer: 7, passdir: 2, passspeed: 40 }),
     list_frozen: () => ({
       frozen: [
         { address: 0xffb04a + 0x00, width: "u32_be", value: 100 << 16, domain: "M68K BUS" }, // s0.x
@@ -145,6 +145,10 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /pk: x=8 y=8/);
     assert.match(text, /s0: x=100\*/); // s0.x is frozen
     assert.match(text, /carrier: s3/);
+    // carrier ratings (OSD parity) come from the carrying slot (s3) struct.
+    assert.match(text, /carrier_ratings: shotpwr=6 shotacc=5 passacc=4 energy=9/);
+    // play-context globals footer (OSD parity): shot/last as slots, pass vector.
+    assert.match(text, /shot: s3   last: s7   pass: dir=2 speed=40/);
     assert.match(text, /clock: 19:59 \(1199s\)/);
     assert.match(text, /period: 1st/);
     assert.match(text, /play: running/);
@@ -212,7 +216,7 @@ test("nhl94_state verbose:true appends the extended per-entity line", async () =
       assert.ok(p.fields.some((f) => f.name === "impact"));
       return Array.from({ length: p.count }, (_, i) => rec(i));
     },
-    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0, session: 0xff }),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0, session: 0xff, shotplayer: -1, lastplayer: -1, passdir: 0, passspeed: 0 }),
     list_frozen: () => ({ frozen: [] }),
   });
   try {
@@ -230,7 +234,7 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
     // gmode 1 = clock-stopped / faceoff-whistle mode; gmode must be read as a
     // byte, so bit 0 here is the C2EA flag bit.
-    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 1, vpos: 0, hpos: 0, yleader: 0, session: 0xff }),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 1, vpos: 0, hpos: 0, yleader: 0, session: 0xff, shotplayer: -1, lastplayer: -1, passdir: 0, passspeed: 0 }),
     list_frozen: () => ({ frozen: [] }),
   });
   try {

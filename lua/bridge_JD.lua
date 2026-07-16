@@ -1,5 +1,14 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.30-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.31-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.31-jd changes (OSD ⇄ nhl94_state parity): both surfaces now show the
+--   same game-state fields (minus the vision caption, which isn't realtime).
+--   BRIDGE/OSD gains: a `phase` headline (session byte 0xFFC735 + gmode bit0),
+--   a `cam v/h/yl` camera-scroll line, a 2nd indented line per skater with the
+--   SPA anim record (zv/anim/attr/spanum/spacnt), and a puck anim line —
+--   OSD_LINES 19→34. SERVER/nhl94_state gains the OSD-only fields: carrier
+--   ratings (shotpwr/shotacc/passacc/energy) and the shot/last/pass play-context
+--   globals. Protocol unchanged (2) — no wire-contract change.
 --
 -- v2026.7.30-jd changes (server-side only; bridge unchanged): cross-filesystem
 --   vision screenshots. When BizHawk is on a different host/OS than the server
@@ -588,7 +597,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.30-jd",
+    version    = "2026.7.31-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -748,6 +757,25 @@ local function period_label(p)
     if p == 0 then return "1st" elseif p == 1 then return "2nd"
     elseif p == 2 then return "3rd" elseif p == 3 then return "OT"
     else return "OT" .. (p - 2) end
+end
+
+-- Coarse game phase from the session byte (0xFFC735) + gmode bit0. Terse OSD
+-- form of the server's classifyPhase (src/nhl94.ts): 0x00 = no game loaded,
+-- 0xFE = game loaded off the ice, 0xFF = on the ice (faceoff vs live via bit0).
+-- NHL94 has no clean single screen-state byte; see memory nhl94-game-phase-flags.
+local SESSION_BYTE = 0xFFC735
+-- Camera scroll globals (mirror src/nhl94.ts G.vpos/hpos/yleader).
+local CAM_VPOS, CAM_HPOS, CAM_YLEADER = 0xFFBD18, 0xFFBD1C, 0xFFBF92
+local function phase_label(session, faceoff_bit)
+    if session == 0xFF then
+        return faceoff_bit and "faceoff/stoppage" or "gameplay"
+    elseif session == 0x00 then
+        return "pre-game menu"
+    elseif session == 0xFE then
+        return "off-ice break"
+    else
+        return string.format("unknown(0x%02X)", session)
+    end
 end
 
 local TRACE_BTN_ORDER = {"Up","Down","Left","Right","A","B","C","Start"}
@@ -917,14 +945,14 @@ end
 local frozen = {}
 
 local OSD_LINE_H = 16   -- gui.text fallback line height (fixed OSD font)
-local OSD_LINES  = 19   -- sys + clk + col-header + 12 slots + blank + 2 puck + shot
+local OSD_LINES  = 21   -- sys + phase + clk + cam + col-header + 12 slots + blank + puck + ratings + shot
 
 -- Canvas render metrics. Widened to fit the expanded per-skater / puck field
 -- set (z, heading fraction, flags, stop-gate, puck Z/Zvel, carrier ratings);
 -- font trimmed ~10% (24→22) so the longer rows fit.
 local OSD_CANVAS_LINE_H = 32
 local OSD_CANVAS_FONT   = 22
-local OSD_CANVAS_W      = 896   -- was 1280; prefix-less columns + 2-line puck fit narrower
+local OSD_CANVAS_W      = 1280  -- one line per entity (~85 cols): pos+heading+vel+anim+flags
 
 local osd_canvas = nil
 local osd_canvas_failed = false   -- don't retry a broken canvas every frame
@@ -1074,6 +1102,37 @@ local function osd_build(segs)
     return table.concat(vis), (any and table.concat(ov) or nil)
 end
 
+-- One entity (skater or puck) as a SINGLE columnar row: position, heading,
+-- velocity triple (xv,yv,zv), the SPA anim record (anim/attr/spanum/spacnt), and
+-- the flag/gate bytes — all fixed-width so every row aligns under osd_row_header.
+-- Uses %6d for x/y/z so a -32768..32767 value never widens a column (the old
+-- %5d overflowed to 6 chars on large negatives and broke alignment). Per-field
+-- freeze highlight where the freeze map is field-specific (x/y/z/d/f/vel/fl/st);
+-- the anim columns fall under the generic `other` mark (name), so they render
+-- plain here. Returns (visible, overlay) like osd_build.
+local OSD_ROW_HEADER = string.format(
+    "%-4s %6s %6s %6s %2s %5s %-20s %4s %4s %4s %6s %2s %4s",
+    "", "x", "y", "z", "d", "f", "xv,yv,zv", "anim", "attr", "spn", "spc", "fl", "st")
+local function osd_entity_row(name, base, fz)
+    fz = fz or {}
+    return osd_build({
+        { string.format("%-4s ", name), fz.other },
+        { string.format("%6d ", tr_s16(base + 0x00)), fz.x },
+        { string.format("%6d ", tr_s16(base + 0x14)), fz.y },
+        { string.format("%6d ", tr_s16(base + 0x18)), fz.z },
+        { string.format("%2d ", tr_u16(base + 0x54)), fz.d },
+        { string.format("%5d ", tr_u16(base + 0x56)), fz.f },
+        { string.format("%6d,%6d,%6d ",
+            tr_s16(base + 0x28), tr_s16(base + 0x2A), tr_s16(base + 0x2C)), fz.v or fz.zv },
+        { string.format("%04X ", tr_u16(base + 0x58)), nil },
+        { string.format("%04X ", tr_u16(base + 0x04)), nil },
+        { string.format("%4d ", tr_u16(base + 0x5A)), nil },
+        { string.format("%6d ", tr_s16(base + 0x5C)), nil },
+        { string.format("%02X ", tr_u8(base + 0x62)), fz.fl },
+        { string.format("%4d", tr_u16(base + 0x34)), fz.st },
+    })
+end
+
 -- Returns two parallel arrays: the text lines and a per-line red overlay string
 -- (nil = nothing frozen on that line). Only the frozen VALUE is highlighted.
 local function osd_lines()
@@ -1129,6 +1188,11 @@ local function osd_lines()
         lines[#lines + 1] = vis
         overlays[#lines] = ov and { str = ov, color = OSD_ORANGE } or nil
     end
+    -- Phase headline (heuristic: session byte + gmode bit0) — terse mirror of
+    -- nhl94_state's `phase:` so the OSD says whether the game is live / at a
+    -- faceoff / at a menu, not just "clock stopped".
+    lines[#lines + 1] = string.format("phase %s", phase_label(tr_u8(SESSION_BYTE), not running))
+    overlays[#lines] = nil
     -- Game-clock line — pure NHL94 now (lag moved up). Period (gsp) leads,
     -- matching the on-screen scoreboard. The carrier VALUE is its own segment so
     -- a frozen carrier (ff.carry) turns just "sN"/"--" red (like the per-field
@@ -1141,47 +1205,28 @@ local function osd_lines()
     })
     lines[#lines + 1] = vis
     overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
-    -- Column header for the skater block. Numeric columns are right-justified so
-    -- the digits sit under the labels; the values below carry no inline prefix.
-    lines[#lines + 1] = string.format("%-4s%5s %5s %4s %2s %5s %13s %2s %3s",
-        "", "x", "y", "z", "d", "f", "xv,yv", "fl", "st")
+    -- Camera scroll line (mirror nhl94_state `camera:`): vpos/hpos = scroll,
+    -- yleader = the y the camera eases toward.
+    lines[#lines + 1] = string.format("cam  v%d  h%d  yl%d",
+        tr_s16(CAM_VPOS), tr_s16(CAM_HPOS), tr_s16(CAM_YLEADER))
     overlays[#lines] = nil
-    -- Per-skater row: pos (x,y,z), heading (d octant + f fraction), velocity,
-    -- friction/flags byte (hex), stop/goalie gate. Fixed widths align with the
-    -- header above.
+    -- Column header for the entity block — one row per skater/puck now, all
+    -- fields in fixed-width columns (see osd_entity_row / OSD_ROW_HEADER).
+    lines[#lines + 1] = OSD_ROW_HEADER
+    overlays[#lines] = nil
+    -- One line per skater: pos, heading, velocity triple, anim record, flags.
     for n = 0, 11 do
         local base = SORTCORDS + n * SCSIZE
-        local fz = ff[n] or {}
-        local vis, ov = osd_build({
-            { string.format("%-4s", "s" .. n .. (n == carrier and "*" or "")), fz.other },
-            { string.format("%5d ", tr_s16(base + 0x00)), fz.x },
-            { string.format("%5d ", tr_s16(base + 0x14)), fz.y },
-            { string.format("%4d ", tr_s16(base + 0x18)), fz.z },
-            { string.format("%2d ", tr_u16(base + 0x54)), fz.d },
-            { string.format("%5d ", tr_u16(base + 0x56)), fz.f },
-            { string.format("%6d,%6d ", tr_s16(base + 0x28), tr_s16(base + 0x2A)), fz.v },
-            { string.format("%02X ", tr_u8(base + 0x62)), fz.fl },
-            { string.format("%3d", tr_u16(base + 0x34)), fz.st },
-        })
+        local vis, ov = osd_entity_row("s" .. n .. (n == carrier and "*" or ""), base, ff[n])
         lines[#lines + 1] = vis
         overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
     end
-    -- Blank separator between the skater block and the puck.
+    -- Blank separator, then the puck on the SAME columnar row, and the carrier's
+    -- ratings on their own line below it.
     lines[#lines + 1] = ""
     overlays[#lines] = nil
-    -- Puck on TWO lines (keeps the window narrow): line 1 position + velocity,
-    -- line 2 the carrier's ratings.
     do
-        local fz = ff.puck or {}
-        local vis, ov = osd_build({
-            { "pk  ", fz.other },
-            { string.format("x%-5d ", tr_s16(PUCK_ADDR + 0x00)), fz.x },
-            { string.format("y%-5d ", tr_s16(PUCK_ADDR + 0x14)), fz.y },
-            { string.format("z%-5d ", tr_s16(PUCK_ADDR + 0x18)), fz.z },
-            { string.format("v %d,%d,%d",
-                tr_s16(PUCK_ADDR + 0x28), tr_s16(PUCK_ADDR + 0x2A), tr_s16(PUCK_ADDR + 0x2C)),
-              fz.v or fz.zv },
-        })
+        local vis, ov = osd_entity_row("pk", PUCK_ADDR, ff.puck)
         lines[#lines + 1] = vis
         overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
         -- Carrier ratings (from the carrying slot's struct); dashes when loose.
@@ -1191,7 +1236,7 @@ local function osd_lines()
             sp = tostring(tr_u8(cb + 0x6C)); sa = tostring(tr_u8(cb + 0x6D))
             pa = tostring(tr_u8(cb + 0x6E)); en = tostring(tr_u8(cb + 0x66))
         end
-        lines[#lines + 1] = string.format("    sp%-3s sa%-3s pa%-3s en%-3s", sp, sa, pa, en)
+        lines[#lines + 1] = string.format("    carrier  sp%-3s sa%-3s pa%-3s en%-3s", sp, sa, pa, en)
         overlays[#lines] = nil
     end
     lines[#lines + 1] = string.format("shot s%d  last s%d  pass d%d,%d",
