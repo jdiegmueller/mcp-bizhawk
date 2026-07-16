@@ -11,6 +11,7 @@ test("nhl94_park parks every skater not in keep and freezes 5 ops each", async (
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     memory_ops: () => ({ frozen_count: 55 }),
+    frame_advance: (p) => ({ framecount: 1000 + (p.count ?? 1) }),
   });
   try {
     const res = await h.client.callTool({ name: "nhl94_park", arguments: { keep: ["s2"] } });
@@ -19,6 +20,9 @@ test("nhl94_park parks every skater not in keep and freezes 5 ops each", async (
     assert.match(text, /kept s2/);
     // 11 parked spread evenly across -32000..+32000: first at the left endpoint.
     assert.match(text, /s0 x=-32000/);
+    // Settles a few frames so the parked positions render.
+    assert.match(text, /\+5 frames so the move renders/);
+    assert.equal(h.bridge.calls.find((c) => c.method === "frame_advance").params.count, 5);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.ops.length, 55);
     assert.ok(!call.params.ops.some((o) => o.address === 0xffb04a + 2 * 0x80)); // s2 untouched

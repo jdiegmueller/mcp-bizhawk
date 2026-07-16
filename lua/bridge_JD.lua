@@ -1,5 +1,11 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.28-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.29-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.29-jd changes (server-side only; bridge unchanged): nhl94_teleport,
+--   nhl94_park and nhl94_possession now step a few frames (best-effort) after
+--   their write so BizHawk re-renders the moved sprites — otherwise a PAUSED
+--   emulator keeps showing the pre-move frame and a following screenshot/describe
+--   is stale. Skipped silently if the core can't frame-advance. Protocol unchanged.
 --
 -- v2026.7.28-jd changes (server-side only; bridge unchanged): nhl94_state now
 --   emits a `phase:` headline — a heuristic coarse label (gameplay / on-ice
@@ -575,7 +581,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.28-jd",
+    version    = "2026.7.29-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

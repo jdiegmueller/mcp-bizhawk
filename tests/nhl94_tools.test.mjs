@@ -9,6 +9,7 @@ test("nhl94_teleport writes provided axes as 16.16 and reports decoded coords", 
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     memory_ops: () => ({ applied: 2, frozen_count: 0 }),
+    frame_advance: (p) => ({ framecount: 1000 + (p.count ?? 1) }),
   });
   try {
     const res = await h.client.callTool({
@@ -16,6 +17,10 @@ test("nhl94_teleport writes provided axes as 16.16 and reports decoded coords", 
       arguments: { targets: [{ target: "s3", x: 200, y: -40 }] },
     });
     assert.match(textOf(res), /Teleported s3 → x=200 y=-40/);
+    // After the write the tool settles a few frames so the move renders.
+    assert.match(textOf(res), /\+5 frames so the move renders/);
+    const fa = h.bridge.calls.find((c) => c.method === "frame_advance");
+    assert.equal(fa.params.count, 5);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.domain, "M68K BUS");
     assert.equal(call.params.ops.length, 2);
@@ -38,6 +43,9 @@ test("nhl94_teleport pk auto-detaches when a skater carries the puck", async () 
       arguments: { targets: [{ target: "pk", x: 0, y: 0 }] },
     });
     assert.match(textOf(res), /detached from s3/);
+    // frame_advance isn't mocked here → nhlSettle degrades silently (no note),
+    // but the teleport itself still succeeds.
+    assert.doesNotMatch(textOf(res), /frames so the move renders/);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.deepEqual(call.params.ops[0], { op: "write", address: CARRIER, value: 0xffff, width: "u16_be" });
     assert.equal(call.params.ops.length, 3);

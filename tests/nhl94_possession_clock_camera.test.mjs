@@ -15,10 +15,14 @@ test("nhl94_possession gives the puck to a skater by teleporting it onto them", 
     list_memory_domains: () => DOMAINS,
     read_many: () => ({ x: 104 << 16, y: (-12) << 16 }),
     memory_ops: () => ({ frozen_count: 0 }),
+    frame_advance: (p) => ({ framecount: 1000 + (p.count ?? 1) }),
   });
   try {
     const res = await h.client.callTool({ name: "nhl94_possession", arguments: { target: "s2" } });
     assert.match(textOf(res), /Puck given to s2 \(teleported to x=104,y=-12\); carrier hold: off/);
+    // Settles a few frames so the puck's new position renders.
+    assert.match(textOf(res), /\+5 frames so the move renders/);
+    assert.equal(h.bridge.calls.find((c) => c.method === "frame_advance").params.count, 5);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.ops[0].op, "unfreeze"); // releases prior hold first
     assert.equal(call.params.ops[0].address, CARRIER);
