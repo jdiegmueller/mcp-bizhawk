@@ -1225,6 +1225,15 @@ const TOOLS: Tool[] = [
   // big-endian, 16.16 fixed-point positions, signed velocity words). Prefer
   // them over hand-built read_many/write/freeze calls against the slot grid.
   {
+    name: "nhl94_recipes",
+    description:
+      "PURPOSE: The NHL94 use-case guide — a verbose 'if you want to X, do Y' playbook mapping intent onto the right nhl94_* tool and call sequence. " +
+      "USAGE: CALL THIS FIRST before doing ANY NHL94 work — before teleporting, freezing, parking, setting up scenarios, or driving possession/clock/camera. It tells you which tool to reach for and the exact multi-step recipes (isolate a 1-on-1, set up a 2-on-1 rush, stage a breakaway, freeze a scene, save/apply a scenario across restarts) so you don't reverse-engineer the workflow from nine separate tool descriptions. No arguments. " +
+      "BEHAVIOR: No side effects — returns static reference text, no bridge round-trip (works even when BizHawk isn't connected). " +
+      "RETURNS: The full guide: when-to-use-each-tool, end-to-end scenarios as numbered nhl94_* sequences, and the verification patterns (nhl94_state read-back, the `*` frozen markers, the frozen_summary tripwire).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "nhl94_teleport",
     description:
       "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions. " +
@@ -1303,7 +1312,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
       "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Replaces hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes). Pass raw:true to also see the raw 16.16 hex and sub-pixel fraction. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block: per-target position/velocity/heading (with frozen markers), carrier, clock+period+play, camera scroll, and the frozen summary.",
+      "RETURNS: A structured text block: per-target position/velocity/heading, carrier, clock+period+play, camera scroll, and the frozen summary. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1986,6 +1995,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       // ── NHL94 game-semantic tools ───────────────────────────────────────
+      case "nhl94_recipes":
+        return ok(nhl94.RECIPES_GUIDE);
+
       case "nhl94_teleport": {
         const entries = p.targets as nhl94.TeleportEntry[];
         const domain = await nhlDomain(bh);
@@ -2083,6 +2095,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           frozenByTarget.get(m.target)!.add(m.field);
         }
         const mark = (target: string, field: string) => frozenByTarget.get(target)?.has(field) ? "*" : "";
+        // Globals (carrier/clock/period/play/camera) map onto target "global"
+        // under their G-key field name; mark them frozen with the same "*".
+        const markG = (field: string) => frozenByTarget.get("global")?.has(field) ? "*" : "";
 
         const whole = (rawv: number) => nhl94.fromFixed(rawv >>> 0).whole;
         const targetLine = (label: string, idx: number) => {
@@ -2110,8 +2125,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const period = ["1st", "2nd", "3rd", "OT"][gv.gsp] ?? `OT${gv.gsp - 2}`;
         const play = (gv.gmode & 1) ? "stopped" : "running";
         lines.push("");
-        lines.push(`carrier: ${carrier}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)   period: ${period}   play: ${play}`);
-        lines.push(`camera: vpos=${gv.vpos} hpos=${gv.hpos} yleader=${gv.yleader}`);
+        lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}`);
+        lines.push(`camera: vpos=${gv.vpos}${markG("vpos")} hpos=${gv.hpos}${markG("hpos")} yleader=${gv.yleader}${markG("yleader")}`);
+        lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
         lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);
         return ok(lines.join("\n"));
       }

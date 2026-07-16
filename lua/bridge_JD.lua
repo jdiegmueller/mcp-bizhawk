@@ -1,5 +1,19 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.16-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.18-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.18-jd changes (server-side only; bridge unchanged): new nhl94_recipes
+--   tool — a static "if you want to X, do Y" NHL94 use-case playbook (per-tool
+--   when-to-use, end-to-end scenario sequences, verification patterns). Also sets
+--   the MCP server `instructions` field to steer the model to call nhl94_recipes
+--   FIRST for any NHL94 task. No bridge protocol change.
+--   Bridge bumped in lockstep to keep the OSD version line collapsed.
+--
+-- v2026.7.17-jd changes (server-side only; bridge unchanged): nhl94_state now
+--   marks the game globals (carrier/clock/period/play + camera vpos/hpos/yleader)
+--   with a trailing `*` when their word is frozen, matching the per-target x/y/z/
+--   xv/yv/zv markers that already existed. mapFrozenAddress already resolved
+--   these to target "global"; the state renderer just wasn't displaying them.
+--   Bridge bumped in lockstep to keep the OSD version line collapsed.
 --
 -- v2026.7.16-jd changes (server-side only; bridge unchanged): new NHL94
 --   game-semantic MCP tools (nhl94_teleport / _freeze / _unfreeze / _state /
@@ -487,7 +501,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.16-jd",
+    version    = "2026.7.18-jd",
     pause_safe = true,
 }
 

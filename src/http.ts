@@ -56,7 +56,19 @@ export function createMcpHttpServer(bh: BizhawkServer): http.Server {
 
     const mcpServer = new Server(
       { name: "mcp-bizhawk", version: VERSION },
-      { capabilities: { tools: {} } },
+      {
+        capabilities: { tools: {} },
+        instructions:
+          "Drives a BizHawk emulator running NHL '94. For ANY NHL94 task — placing " +
+          "players, freezing positions, setting up faceoffs/rushes/breakaways, " +
+          "controlling possession/clock/camera — CALL nhl94_recipes FIRST. It is the " +
+          "use-case playbook that maps what you want to do onto the right nhl94_* tool " +
+          "and the exact call sequence, so you don't have to reverse-engineer the " +
+          "workflow from the individual tool descriptions. Prefer the high-level " +
+          "nhl94_* tools (they own all the 68K address/endianness/fixed-point details) " +
+          "over hand-built bizhawk_read/write/freeze calls, and verify every change " +
+          "with nhl94_state.",
+      },
     );
     registerTools(mcpServer, bh);
 
