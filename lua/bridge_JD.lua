@@ -1,5 +1,13 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.32-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.33-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.33-jd changes (server-side only; bridge unchanged): nhl94_teleport now
+--   accepts optional xv/yv/zv velocity axes (raw signed 16-bit words) alongside
+--   x/y/z, so a target can be placed AND given motion in one atomic write — the
+--   high-level way to launch a moving puck (e.g. fire it at the net, or feed a
+--   one-timer) instead of hand-writing velocity via bizhawk_freeze/memory_ops.
+--   Only the server's op-builder + tool schema changed; the wire protocol and
+--   this bridge are untouched.
 --
 -- v2026.7.32-jd changes (long-batch watchdog fix): a command handler that
 --   turbo-loops many frames inside one dispatch (frame_advance / play_input_
@@ -609,7 +617,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.32-jd",
+    version    = "2026.7.33-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

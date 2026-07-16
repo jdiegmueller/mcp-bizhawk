@@ -269,9 +269,17 @@ export interface TeleportEntry {
   x?: number;
   y?: number;
   z?: number;
+  xv?: number;
+  yv?: number;
+  zv?: number;
 }
 
-/** One u32_be write per provided axis; optionally a leading carrier-detach write. */
+/**
+ * Per provided POSITION axis (x/y/z): one u32_be write of the 16.16 fixed-point
+ * value. Per provided VELOCITY axis (xv/yv/zv): one u16_be write of the raw
+ * signed word (velocities are s16, NOT fixed-point — no scaling). Optionally a
+ * leading carrier-detach write.
+ */
 export function teleportOps(entries: TeleportEntry[], detachPuck: boolean): MemOp[] {
   const ops: MemOp[] = [];
   if (detachPuck) {
@@ -279,19 +287,24 @@ export function teleportOps(entries: TeleportEntry[], detachPuck: boolean): MemO
   }
   for (const e of entries) {
     const { base } = resolveTarget(e.target);
-    const axes: [string, number | undefined][] = [
-      ["x", e.x],
-      ["y", e.y],
-      ["z", e.z],
-    ];
     let wrote = false;
-    for (const [axis, v] of axes) {
+    // Positions: whole pixels → 16.16 fixed-point longword.
+    const posAxes: [string, number | undefined][] = [["x", e.x], ["y", e.y], ["z", e.z]];
+    for (const [axis, v] of posAxes) {
       if (v === undefined) continue;
       checkCoord(axis, v);
       ops.push({ op: "write", address: base + OFF[axis], value: toFixed(v), width: "u32_be" });
       wrote = true;
     }
-    if (!wrote) throw new Error(`teleport entry for "${e.target}" set no axis (pass x, y and/or z)`);
+    // Velocities: signed 16-bit words, written raw (two's-complement), no scaling.
+    const velAxes: [string, number | undefined][] = [["xv", e.xv], ["yv", e.yv], ["zv", e.zv]];
+    for (const [axis, v] of velAxes) {
+      if (v === undefined) continue;
+      checkCoord(axis, v);
+      ops.push({ op: "write", address: base + OFF[axis], value: (v & 0xffff) >>> 0, width: "u16_be" });
+      wrote = true;
+    }
+    if (!wrote) throw new Error(`teleport entry for "${e.target}" set no axis (pass x/y/z and/or xv/yv/zv)`);
   }
   return ops;
 }

@@ -1290,8 +1290,8 @@ const TOOLS: Tool[] = [
   {
     name: "nhl94_teleport",
     description:
-      "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions. " +
-      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts to 16.16 fixed-point, writes big-endian to the M68K BUS, and zeroes the sub-pixel fraction, so you never touch endianness/width/base arithmetic yourself. For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. " +
+      "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions AND/OR set their x/y/z velocity — place a target, launch a moving one (e.g. fire the puck at the net with a chosen xv/yv/zv, or feed a one-timer), or both in one atomic write. " +
+      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts positions to 16.16 fixed-point, writes big-endian to the M68K BUS, and zeroes the sub-pixel fraction, so you never touch endianness/width/base arithmetic yourself. Velocity axes (xv/yv/zv) are RAW signed 16-bit words written as-is (no fixed-point scaling) — set them to give a target motion the game's physics then acts on; this is the tool for an inbound/loose puck with a specific vector (nhl94_freeze/park only ZERO velocity, they can't set one). For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. " +
       "BEHAVIOR: DESTRUCTIVE: overwrites x/y/z (no undo — snapshot with nhl94_rig/save_state if needed). All writes land atomically in one frame. Teleport is PLACEMENT, not a state reset — latched per-skater flags survive it. FOOTGUN handled for you: teleporting pk while a skater carries it is futile (carry logic snaps it back next frame), so a pk teleport AUTO-DETACHES the puck (writes 'nobody' to the carrier word first) — the result is a loose puck at the given spot. To move a carried puck with its carrier, teleport the skater instead. Errors if a target is unknown, an entry sets no axis, or a coordinate is outside -32768..32767. After the write the tool steps a few frames (best-effort) so BizHawk re-renders the new positions — otherwise a paused emulator keeps showing the pre-move frame and a following screenshot/describe is stale. " +
       "RETURNS: One line per target naming the decoded coordinates written (and whether the puck was detached), plus a note when the render-settle frames ran.",
     inputSchema: {
@@ -1300,7 +1300,7 @@ const TOOLS: Tool[] = [
         targets: {
           type: "array",
           minItems: 1,
-          description: "Targets to move. Each entry needs `target` plus at least one of x/y/z.",
+          description: "Targets to move. Each entry needs `target` plus at least one of x/y/z (position) or xv/yv/zv (velocity).",
           items: {
             type: "object",
             properties: {
@@ -1308,6 +1308,9 @@ const TOOLS: Tool[] = [
               x: { type: "integer", minimum: -32768, maximum: 32767, description: "New X in whole pixels (as shown on the OSD). Omit to leave X unchanged." },
               y: { type: "integer", minimum: -32768, maximum: 32767, description: "New Y in whole pixels. Omit to leave Y unchanged." },
               z: { type: "integer", minimum: -32768, maximum: 32767, description: "New Z (height; 0 = on the ice) in whole pixels. Omit to leave Z unchanged." },
+              xv: { type: "integer", minimum: -32768, maximum: 32767, description: "New X velocity as a raw signed 16-bit word (+ = right, − = left; NOT fixed-point). Omit to leave unchanged. Use to launch a moving puck/skater — e.g. fire the puck at the net." },
+              yv: { type: "integer", minimum: -32768, maximum: 32767, description: "New Y velocity, raw signed 16-bit word (+ = down, − = up). Omit to leave unchanged." },
+              zv: { type: "integer", minimum: -32768, maximum: 32767, description: "New Z velocity (vertical), raw signed 16-bit word. Omit to leave unchanged." },
             },
             required: ["target"],
             additionalProperties: false,
@@ -2221,7 +2224,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const ops = nhl94.teleportOps(entries, detach); // validates; throws before any write
         await bh.call("memory_ops", { ops: nhlRebase(ops, domain), domain });
         const lines = entries.map((e) => {
-          const parts = (["x", "y", "z"] as const)
+          const parts = (["x", "y", "z", "xv", "yv", "zv"] as const)
             .filter((ax) => e[ax] !== undefined)
             .map((ax) => `${ax}=${e[ax]}`);
           let line = `Teleported ${e.target} → ${parts.join(" ")}`;

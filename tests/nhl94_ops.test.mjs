@@ -45,6 +45,27 @@ test("teleportOps rejects an entry with no axis and out-of-range coords", () => 
   assert.throws(() => teleportOps([{ target: "s0", y: -40000 }], false), /range|-32768/);
 });
 
+test("teleportOps writes velocity axes as RAW s16 u16_be (two's-complement), no fixed-point scaling", () => {
+  const ops = teleportOps([{ target: "s2", xv: 100, yv: -14000 }], false);
+  assert.equal(ops.length, 2);
+  assert.deepEqual(ops[0], { op: "write", address: base(2) + OFF.xv, value: 100, width: "u16_be" });
+  assert.deepEqual(ops[1], { op: "write", address: base(2) + OFF.yv, value: 0xc950, width: "u16_be" });
+});
+
+test("teleportOps mixes position (16.16 u32_be) and velocity (raw u16_be) in one entry", () => {
+  const ops = teleportOps([{ target: "pk", x: 10, xv: 50 }], false);
+  assert.equal(ops.length, 2);
+  assert.deepEqual(ops[0], { op: "write", address: base(14) + OFF.x, value: 0x000a0000, width: "u32_be" });
+  assert.deepEqual(ops[1], { op: "write", address: base(14) + OFF.xv, value: 50, width: "u16_be" });
+});
+
+test("teleportOps accepts a velocity-only entry and range-checks velocity", () => {
+  const ops = teleportOps([{ target: "s0", zv: -1 }], false);
+  assert.equal(ops.length, 1);
+  assert.deepEqual(ops[0], { op: "write", address: base(0) + OFF.zv, value: 0xffff, width: "u16_be" });
+  assert.throws(() => teleportOps([{ target: "s0", xv: 40000 }], false), /range|-32768/);
+});
+
 test("freezeOps emits 6 ops per target: x/y/z at current value, xv/yv/zv at 0", () => {
   const ops = freezeOps(["s5"], { s5: { x: 0x00d20000, y: 0x000f0000, z: -327680 } });
   assert.equal(ops.length, 6);
