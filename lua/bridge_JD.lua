@@ -1,5 +1,17 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.31-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.32-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.32-jd changes (long-batch watchdog fix): a command handler that
+--   turbo-loops many frames inside one dispatch (frame_advance / play_input_
+--   sequence / run_trials with a large count) no longer trips the dead-link
+--   watchdog. last_rx_ms is now re-stamped right after dispatch() returns, so
+--   the seconds spent executing a legitimately-received command are not counted
+--   as link silence. Previously a >DEAD_AFTER_MS (10s) batch (e.g. a 25k-frame
+--   turbo capture with an armed exec hook) made the next watchdog check declare
+--   the link dead and redial — the "bridge unresponsive to ping after a long
+--   turbo run" wedge. Protocol unchanged (2) — no wire-contract change. The
+--   safe drive pattern for long captures is still to CHUNK (bounded advances +
+--   trap_exec status between), but a single long batch can no longer wedge.
 --
 -- v2026.7.31-jd changes (OSD ⇄ nhl94_state parity): both surfaces now show the
 --   same game-state fields (minus the vision caption, which isn't realtime).
@@ -597,7 +609,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.31-jd",
+    version    = "2026.7.32-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -3042,6 +3054,21 @@ local function tick()
             local parse_ok, cmd = pcall(json.decode, incoming)
             if parse_ok and type(cmd) == "table" then
                 local result, rpc_err = dispatch(cmd)
+                -- HEARTBEAT: a command handler can run for many seconds — a
+                -- batched frame_advance / play_input_sequence / run_trials
+                -- turbo-loops thousands of emu.frameadvance() calls INSIDE this
+                -- dispatch, and the main-loop watchdog can't run until we return.
+                -- last_rx_ms was stamped when this command ARRIVED (batch start),
+                -- so without this refresh the very next watchdog check would see
+                -- (now - last_rx_ms) > DEAD_AFTER_MS and wrongly declare the link
+                -- dead → disconnect/redial → the "unresponsive after a long turbo
+                -- run" wedge. Executing a command we received IS proof the peer
+                -- was alive, so re-stamp now. (A genuinely dead server is still
+                -- caught below by socketServerSend returning -1.) We deliberately
+                -- do NOT poll the socket mid-batch: socketServerResponse() blocks
+                -- forever on a closed peer (see the BYE note above) and a mid-batch
+                -- send would corrupt the length-prefixed stream.
+                last_rx_ms = now_ms()
                 if rpc_err then
                     pending_result = { id = cmd.id, error = rpc_err }
                 else
