@@ -109,13 +109,13 @@ test("nhl94_unfreeze releases the 6 addresses per target", async () => {
 });
 
 test("nhl94_state decodes the slot grid, globals, and frozen annotations", async () => {
-  const rec = (i, over = {}) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, ...over });
+  const rec = (i, over = {}) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0, ...over });
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: (p) =>
       Array.from({ length: p.count }, (_, i) => {
         if (i === 0) return rec(0, { x: 100 << 16 });
-        if (i === 3) return rec(3, { x: 200 << 16, y: (-40) << 16 });
+        if (i === 3) return rec(3, { x: 200 << 16, y: (-40) << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5 });
         if (i === 14) return rec(14, { x: 8 << 16, y: 8 << 16 });
         return rec(i);
       }),
@@ -140,6 +140,14 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /play: running/);
     assert.match(text, /camera: vpos=10 hpos=-5 yleader=50/);
     assert.match(text, /frozen_summary: total=3 mapped=2 unmapped=1/);
+    // Animation record sub-line: s3 has attr bit3 (x-flip), spanum 8 (record 2).
+    assert.match(text, /anim=0x0046 attr=0x0008\(xflip=1\) spanum=8\(rec 2\) spacnt=5/);
+    // Layout line anchors any further hand-read to the correct base/stride.
+    assert.match(text, /layout: slot structs @ base=0xFFB04A stride=0x80 domain='M68K BUS'/);
+    assert.match(text, /anim\+58 spanum\+5A/);
+    // raw:true exposes each target's absolute struct address (s3 @ base+3*0x80).
+    const rawRes = await h.client.callTool({ name: "nhl94_state", arguments: { raw: true } });
+    assert.match(textOf(rawRes), /s3 @0xFFB1CA:/);
   } finally {
     await h.close();
   }

@@ -11,6 +11,11 @@ const EXPECTED_BIZHAWK = [
   "bizhawk_phys_trace_start", "bizhawk_phys_trace_stop",
   "bizhawk_phys_trace_status", "bizhawk_phys_trace_tail",
 ];
+const EXPECTED_NHL94 = [
+  "nhl94_recipes", "nhl94_teleport", "nhl94_freeze", "nhl94_unfreeze",
+  "nhl94_state", "nhl94_park", "nhl94_rig", "nhl94_possession",
+  "nhl94_clock", "nhl94_camera",
+];
 const HIDDEN_SAMPLE = [
   "bizhawk_read8", "bizhawk_write16", "bizhawk_memory_ops", "bizhawk_freeze",
   "bizhawk_unfreeze", "bizhawk_list_frozen", "bizhawk_read_struct_array",
@@ -18,13 +23,13 @@ const HIDDEN_SAMPLE = [
   "bizhawk_save_slot", "bizhawk_list_memory_domains",
 ];
 
-test("default surface: 9 nhl94_* + the curated bizhawk_* core, nothing else", async () => {
+test("default surface: the nhl94_* set + the curated bizhawk_* core, nothing else", async () => {
   const h = await startHarness({});
   try {
     const names = (await h.client.listTools()).tools.map((t) => t.name);
     const nhl = names.filter((n) => n.startsWith("nhl94_"));
     const biz = names.filter((n) => n.startsWith("bizhawk_"));
-    assert.equal(nhl.length, 9, "all nhl94_* exposed");
+    assert.deepEqual(nhl.sort(), [...EXPECTED_NHL94].sort(), "exactly the nhl94_* set");
     assert.deepEqual(biz.sort(), [...EXPECTED_BIZHAWK].sort(), "exactly the core bizhawk_*");
     for (const hidden of HIDDEN_SAMPLE) {
       assert.ok(!names.includes(hidden), `${hidden} should be hidden`);

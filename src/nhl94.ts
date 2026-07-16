@@ -21,6 +21,14 @@ export const OFF: Record<string, number> = {
   zv: 0x2c,
   fdir: 0x54,
   frame: 0x06,
+  // Animation (SPA) record fields — mirror bridge_JD.lua TRACE_FIELDS.
+  // attr = sprite attribute/flip bits (bit 3 = x-flip); anim = animation
+  // selector; spanum = byte offset into the SPA per-direction list (÷4 = record
+  // index); spacnt = VBL dwell countdown (signed).
+  attr: 0x04,
+  anim: 0x58,
+  spanum: 0x5a,
+  spacnt: 0x5c,
 };
 
 // Absolute (M68K BUS) addresses of game globals (mirror bridge_JD.lua TRACE_G

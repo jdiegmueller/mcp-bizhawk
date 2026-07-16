@@ -1,5 +1,25 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.18-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.20-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.20-jd changes (server-side only; bridge unchanged): the daemon now
+--   appends a JSONL usage-log row per MCP tool call (ts/tool/ok/ms/args, plus
+--   error on failure) to ~/.mcp-bizhawk/usage/usage-<MCP_HTTP_PORT>.jsonl — raw
+--   material for shaping how the tool surface grows. On by default; set
+--   MCP_BIZHAWK_USAGE_LOG=off to disable or =<path> to redirect. Best-effort:
+--   never throws into the request path, self-disables (one stderr warning) if
+--   the write fails, and caps a pathological line at 16 KB (args replaced by a
+--   size marker, line stays valid JSONL).
+--   Bridge bumped in lockstep to keep the OSD version line collapsed.
+--
+-- v2026.7.19-jd changes (server-side only; bridge unchanged): nhl94_state now
+--   decodes each target's SPA animation record (anim +0x58 / attr +0x04 with
+--   x-flip / spanum +0x5A with record index / spacnt +0x5C) on an indented
+--   sub-line, adds a `layout:` line (base/stride/domain + every field offset)
+--   and, under raw:true, each target's absolute struct address — so an agent
+--   never has to hand-derive a slot address (the base/stride/0xFF-prefix trap).
+--   Description clarifies s0-s11 = the game entity slots at base+N*0x80 (same
+--   index as the carrier word), not a sort order. Offsets mirror TRACE_FIELDS.
+--   Bridge bumped in lockstep to keep the OSD version line collapsed.
 --
 -- v2026.7.18-jd changes (server-side only; bridge unchanged): new nhl94_recipes
 --   tool — a static "if you want to X, do Y" NHL94 use-case playbook (per-tool
@@ -501,7 +521,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.18-jd",
+    version    = "2026.7.20-jd",
     pause_safe = true,
 }
 

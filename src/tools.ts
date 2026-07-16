@@ -1309,10 +1309,10 @@ const TOOLS: Tool[] = [
   {
     name: "nhl94_state",
     description:
-      "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
-      "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Replaces hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes). Pass raw:true to also see the raw 16.16 hex and sub-pixel fraction. " +
+      "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
+      "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Targets s0-s11 (skaters) and pk (puck) ARE the game's own entity slots — the struct at base+N*0x80 on the 68K bus, the SAME slot index the puck-carrier word uses; they are NOT a render/sort order. ALWAYS prefer this tool over hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes — dropping the 0xFF prefix, wrong base, wrong width). If you need a field this tool doesn't decode, DON'T guess an address: take base+stride+offsets from the `layout:` line (or the per-target `@0xADDR` shown under raw:true) and compute base+offset. Pass raw:true to also see the raw 16.16 hex, sub-pixel fraction, and each target's absolute struct address. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block: per-target position/velocity/heading, carrier, clock+period+play, camera scroll, and the frozen summary. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge.",
+      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then carrier, clock+period+play, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1485,6 +1485,47 @@ function fmtMovieStatus(r: { loaded: boolean; mode?: string; filename?: string; 
 function stateDir(): string {
   return process.env.MCP_BIZHAWK_STATE_DIR ?? path.join(os.homedir(), ".mcp-bizhawk", "states");
 }
+// ── Usage logging ────────────────────────────────────────────────────────────
+// Append one JSONL row per tool call so we can see, after the fact, which tools
+// are actually exercised, which fail, and how they're parameterized — the raw
+// material for shaping where this tool surface grows next. On by default;
+// MCP_BIZHAWK_USAGE_LOG=off disables it, MCP_BIZHAWK_USAGE_LOG=<path> redirects.
+// Per-daemon file (keyed by MCP_HTTP_PORT) so multiple emulators don't interleave.
+const USAGE_LINE_CAP = 16 * 1024; // guard against a pathological megabyte arg
+let usageWarned = false;
+function usageLogPath(): string | null {
+  const v = process.env.MCP_BIZHAWK_USAGE_LOG;
+  if (v === "off" || v === "0" || v === "false") return null;
+  if (v) return v;
+  const port = process.env.MCP_HTTP_PORT ?? "8765";
+  return path.join(os.homedir(), ".mcp-bizhawk", "usage", `usage-${port}.jsonl`);
+}
+function recordUsage(
+  tool: string,
+  args: Record<string, unknown>,
+  ok: boolean,
+  ms: number,
+  error?: string,
+): void {
+  const file = usageLogPath();
+  if (!file) return;
+  try {
+    const base = { ts: new Date().toISOString(), tool, ok, ms, ...(error ? { error } : {}) };
+    let line = JSON.stringify({ ...base, args });
+    // Keep the line valid JSONL even if a single call carries a huge payload.
+    if (line.length > USAGE_LINE_CAP) {
+      line = JSON.stringify({ ...base, args: `<args too large: ${line.length} bytes>` });
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, line + "\n");
+  } catch (e) {
+    if (!usageWarned) { // warn once, never spam, never throw into the request path
+      usageWarned = true;
+      process.stderr.write(`[mcp-bizhawk] usage log disabled (write failed: ${(e as Error).message})\n`);
+    }
+  }
+}
+
 function slotPath(hash: string, name: string): string {
   if (typeof name !== "string") throw new Error("slot name must be a string");
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
@@ -1592,7 +1633,7 @@ function exposedTools(): Tool[] {
 export function registerTools(server: Server, bh: BizhawkServer): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: exposedTools() }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const dispatchTool = async (req: { params: { name: string; arguments?: unknown } }) => {
     const { name, arguments: args = {} } = req.params;
     const p = args as Record<string, unknown>;
     const a = () => p.address as number;
@@ -2070,6 +2111,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           { name: "zv", offset: nhl94.OFF.zv, width: "s16_be" },
           { name: "fdir", offset: nhl94.OFF.fdir, width: "u16_be" },
           { name: "frame", offset: nhl94.OFF.frame, width: "u16_be" },
+          { name: "attr", offset: nhl94.OFF.attr, width: "u16_be" },
+          { name: "anim", offset: nhl94.OFF.anim, width: "u16_be" },
+          { name: "spanum", offset: nhl94.OFF.spanum, width: "u16_be" },
+          { name: "spacnt", offset: nhl94.OFF.spacnt, width: "s16_be" },
         ];
         // Slots 0..14 in one contiguous read (12 skaters + 2 unused + puck@14).
         const recs = await bh.call<Record<string, number>[]>("read_struct_array", {
@@ -2100,9 +2145,14 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const markG = (field: string) => frozenByTarget.get("global")?.has(field) ? "*" : "";
 
         const whole = (rawv: number) => nhl94.fromFixed(rawv >>> 0).whole;
-        const targetLine = (label: string, idx: number) => {
+        const hex4 = (v: number) => (v >>> 0).toString(16).toUpperCase().padStart(4, "0");
+        // Absolute (domain-relative) struct base for a slot — the same number an
+        // agent needs to read any field this tool doesn't decode (base + OFF.*).
+        const slotAddr = (idx: number) => nhlAddr(nhl94.SORTCORDS + idx * nhl94.SCSIZE, domain);
+        const targetLines = (label: string, idx: number): string[] => {
           const rec = byIndex.get(idx);
-          if (!rec) return `${label}: (no data)`;
+          const at = raw ? ` @0x${slotAddr(idx).toString(16).toUpperCase()}` : "";
+          if (!rec) return [`${label}${at}: (no data)`];
           const pos = (["x", "y", "z"] as const)
             .map((ax) => {
               const w = whole(rec[ax]);
@@ -2112,12 +2162,22 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             })
             .join(" ");
           const vel = (["xv", "yv", "zv"] as const).map((v) => `${v}=${rec[v]}${mark(label, v)}`).join(" ");
-          return `${label}: ${pos} | ${vel} | dir=${rec.fdir} frame=${rec.frame}`;
+          // Animation (SPA) record — spanum is a byte offset into the per-direction
+          // list, so ÷4 is the record index; attr bit 3 is the x-flip flag.
+          const anim =
+            `anim=0x${hex4(rec.anim)}${mark(label, "anim")} ` +
+            `attr=0x${hex4(rec.attr)}${mark(label, "attr")}(xflip=${(rec.attr >> 3) & 1}) ` +
+            `spanum=${rec.spanum}${mark(label, "spanum")}(rec ${rec.spanum >> 2}) ` +
+            `spacnt=${rec.spacnt}${mark(label, "spacnt")}`;
+          return [
+            `${label}${at}: ${pos} | ${vel} | dir=${rec.fdir} frame=${rec.frame}`,
+            `     ${anim}`,
+          ];
         };
 
         const lines: string[] = [];
-        for (let i = 0; i <= 11; i++) lines.push(targetLine(`s${i}`, i));
-        lines.push(targetLine("pk", nhl94.PUCK_SLOT));
+        for (let i = 0; i <= 11; i++) lines.push(...targetLines(`s${i}`, i));
+        lines.push(...targetLines("pk", nhl94.PUCK_SLOT));
 
         const carrier = gv.carrier >= 0 && gv.carrier <= 11
           ? `s${gv.carrier}`
@@ -2128,6 +2188,12 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}`);
         lines.push(`camera: vpos=${gv.vpos}${markG("vpos")} hpos=${gv.hpos}${markG("hpos")} yleader=${gv.yleader}${markG("yleader")}`);
         lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
+        const baseHex = nhlAddr(nhl94.SORTCORDS, domain).toString(16).toUpperCase();
+        lines.push(
+          `layout: slot structs @ base=0x${baseHex} stride=0x${nhl94.SCSIZE.toString(16).toUpperCase()} domain='${domain}' ` +
+          `(sN @ base+N*0x80, s0-s11; pk @ base+14*0x80). To read a field this tool doesn't decode, use base+offset — ` +
+          `offsets: x+00 y+14 z+18(all s32_be 16.16) xv+28 yv+2A zv+2C(s16_be) frame+06 fdir+54 attr+04 anim+58 spanum+5A(u16_be) spacnt+5C(s16_be).`,
+        );
         lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);
         return ok(lines.join("\n"));
       }
@@ -2618,6 +2684,32 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
 
       default:
         throw new Error(`Unknown tool: ${name}`);
+    }
+  };
+
+  // Timing + usage-log wrapper around the dispatcher. `ok` reflects whether the
+  // call threw (validation/bridge errors throw) OR returned an isError result;
+  // logging is best-effort and never alters the response.
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const name = req.params.name;
+    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const startedMs = Date.now();
+    let ok = true;
+    let errMsg: string | undefined;
+    try {
+      const res = await dispatchTool(req);
+      if (res && (res as { isError?: boolean }).isError) {
+        ok = false;
+        const c = (res as { content?: { type: string; text?: string }[] }).content;
+        errMsg = c?.find((x) => x.type === "text")?.text;
+      }
+      return res;
+    } catch (e) {
+      ok = false;
+      errMsg = (e as Error).message;
+      throw e;
+    } finally {
+      recordUsage(name, args, ok, Date.now() - startedMs, errMsg);
     }
   });
 }

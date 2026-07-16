@@ -72,6 +72,16 @@ leave it alone.
   external BizHawk deployment is in use, also copy the file to
   `/mnt/8tb/jason/nvnhl94-2/tools/bizhawk/BizHawk-2.11.1-linux-x64/Lua/`.
 
+## Usage logging
+
+Every MCP tool call appends one JSONL row (`ts`/`tool`/`ok`/`ms`/`args`, plus
+`error` on failure) to `~/.mcp-bizhawk/usage/usage-<MCP_HTTP_PORT>.jsonl` — a
+per-daemon record of what's actually being exercised, to inform where the tool
+surface grows next. On by default; `MCP_BIZHAWK_USAGE_LOG=off` disables it,
+`MCP_BIZHAWK_USAGE_LOG=<path>` redirects. Best-effort (never throws into the
+request path; self-disables on write failure). Tally with e.g.
+`jq -r .tool ~/.mcp-bizhawk/usage/usage-8765.jsonl | sort | uniq -c | sort -rn`.
+
 ## Verifying
 
 - `luac -p lua/bridge_JD.lua` syntax-checks the bridge.
