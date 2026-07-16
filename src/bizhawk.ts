@@ -8,8 +8,9 @@
 //   us → Lua:  "NONE\n"               (nothing pending)
 //          OR  "<json command>\n"     (next queued command)
 //          OR  "HELLO <json>\n"       (once, replying to the connection's first
-//                                      message: {"server_version": "..."} so the
-//                                      bridge can log which build it reached)
+//                                      message: {"server_version","protocol_version"}
+//                                      so the bridge can log which build it reached
+//                                      and compare RPC protocol for compatibility)
 //
 // MCP tool calls land via call(method, params) → we enqueue the command and
 // resolve the returned promise once the matching RESULT comes back. Each
@@ -17,7 +18,7 @@
 
 import net from "node:net";
 
-import { VERSION } from "./version.js";
+import { VERSION, PROTOCOL_VERSION } from "./version.js";
 
 interface PendingCmd {
   id:      number;
@@ -246,7 +247,7 @@ export class BizhawkServer {
       // Greet the bridge before any other traffic so it can log which server
       // build it reached. Costs one round-trip (~1 frame) per connection.
       this.helloSent = true;
-      this.sendFramed(`HELLO ${JSON.stringify({ server_version: VERSION })}`);
+      this.sendFramed(`HELLO ${JSON.stringify({ server_version: VERSION, protocol_version: PROTOCOL_VERSION })}`);
       return;
     }
     if (this.awaitingResult) {

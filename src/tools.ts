@@ -1312,11 +1312,13 @@ const TOOLS: Tool[] = [
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
       "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Targets s0-s11 (skaters) and pk (puck) ARE the game's own entity slots — the struct at base+N*0x80 on the 68K bus, the SAME slot index the puck-carrier word uses; they are NOT a render/sort order. ALWAYS prefer this tool over hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes — dropping the 0xFF prefix, wrong base, wrong width). If you need a field this tool doesn't decode, DON'T guess an address: take base+stride+offsets from the `layout:` line (or the per-target `@0xADDR` shown under raw:true) and compute base+offset. Pass raw:true to also see the raw 16.16 hex, sub-pixel fraction, and each target's absolute struct address. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then carrier, clock+period+play, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge.",
+      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then carrier, clock+period+play+faceoff, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. `play` is running|stopped and `faceoff` is yes|no — BOTH decode the same gmode(0xFFC2EA) bit 0 (set = clock-stopped = whistle/faceoff/stoppage, when the game also disables body-checks); faceoff:yes always coincides with play:stopped. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge.",
     inputSchema: {
       type: "object",
       properties: {
         raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
+        describe: { type: "boolean", default: false, description: "If true, also capture a screenshot and send it to the configured vision model, returning a text description of the visible game state alongside the structured data. Requires VISION_BASE_URL + VISION_MODEL on the server." },
+        describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot when `describe` is true. Falls back to the server's VISION_DEFAULT_PROMPT." },
       },
       additionalProperties: false,
     },
@@ -1325,8 +1327,8 @@ const TOOLS: Tool[] = [
     name: "nhl94_park",
     description:
       "PURPOSE: Get every skater except the one(s) under study off the ice and pinned, in one call — the standard 'clear the rink' experiment rig. " +
-      "USAGE: Pass `keep` with the skaters to leave alone; all other skaters (s0-s11) are teleported to an off-ice latitude, spread out in X, and frozen there (position + zeroed velocity). The puck is never touched. Release with nhl94_unfreeze on the parked targets, or apply a clean nhl94_rig. Unlike nhl94_freeze (which pins at CURRENT position, incl. z), park commands off-ice positions and leaves z alone. " +
-      "BEHAVIOR: DESTRUCTIVE: freezes x/y and zeroes+freezes xv/yv/zv for each parked skater every frame until released (5 freezes each). One atomic memory_ops round-trip. Positions are commanded (no read needed). Errors if every skater is in `keep` (nothing to park) or a `keep`/coordinate value is invalid. " +
+      "USAGE: Pass `keep` with the skaters to leave alone; all other skaters (s0-s11) are teleported far off-ice (fixed y=32000) and frozen there (position + zeroed velocity). The puck is never touched. Release with nhl94_unfreeze on the parked targets, or apply a clean nhl94_rig. Unlike nhl94_freeze (which pins at CURRENT position, incl. z), park commands off-ice positions and leaves z alone. " +
+      "BEHAVIOR: DESTRUCTIVE: freezes x/y and zeroes+freezes xv/yv/zv for each parked skater every frame until released (5 freezes each). One atomic memory_ops round-trip. Positions are commanded (no read needed) — parked skaters are spread evenly across x=-32000..+32000 by count (1 parked → x=0; 2 → ±32000; N → endpoints ±32000, spacing 64000/(N-1)) so they never overlap. Errors if every skater is in `keep` (nothing to park). " +
       "RETURNS: A summary (count, y latitude, X range, kept list) plus the per-skater X assignments.",
     inputSchema: {
       type: "object",
@@ -1336,9 +1338,6 @@ const TOOLS: Tool[] = [
           items: { type: "string", description: "Skater id 's0'..'s11' to leave alone." },
           description: "Skaters to leave in place (default none — parks all 12).",
         },
-        y: { type: "integer", minimum: -32768, maximum: 32767, default: -300, description: "Off-ice Y latitude to park at (default -300)." },
-        x_start: { type: "integer", minimum: -32768, maximum: 32767, default: -160, description: "X of the first parked skater (default -160)." },
-        x_spacing: { type: "integer", default: 32, description: "X gap between parked skaters (default 32)." },
       },
       additionalProperties: false,
     },
@@ -2122,8 +2121,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           domain,
         });
         const byIndex = new Map<number, Record<string, number>>(recs.map((r) => [r._index, r]));
+        // gmode is a BYTE flag register at 0xFFC2EA (the game tests it with
+        // `btst #n,($C2EA)`, a byte op) — read it as u8, NOT u16_be, or `& 1`
+        // would test the wrong byte (0xFFC2EB). Matches the bridge OSD's tr_u8.
         const gReads = (["carrier", "gameclock", "gsp", "gmode", "vpos", "hpos", "yleader"] as const).map((k) => ({
-          name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u16_be" : (k === "vpos" || k === "hpos" || k === "yleader" ? "s16_be" : "u16_be"), domain,
+          name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u8" : (k === "vpos" || k === "hpos" || k === "yleader" ? "s16_be" : "u16_be"), domain,
         }));
         const gv = await bh.call<Record<string, number>>("read_many", { reads: gReads });
         const frozen = await bh.call<{ frozen?: { address: number; width: string; value: number; domain?: string }[] }>("list_frozen");
@@ -2183,9 +2185,13 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           ? `s${gv.carrier}`
           : `none (0x${(gv.carrier >>> 0).toString(16).toUpperCase()})`;
         const period = ["1st", "2nd", "3rd", "OT"][gv.gsp] ?? `OT${gv.gsp - 2}`;
+        // gmode bit 0 SET = clock stopped = whistle/faceoff/stoppage mode
+        // (verified: RETAIL_OFFSETS.md; the game gates the clock, goal processing
+        // and body-checks on it). `faceoff` is that same bit surfaced explicitly.
         const play = (gv.gmode & 1) ? "stopped" : "running";
+        const faceoff = (gv.gmode & 1) ? "yes" : "no";
         lines.push("");
-        lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}`);
+        lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}   faceoff: ${faceoff}`);
         lines.push(`camera: vpos=${gv.vpos}${markG("vpos")} hpos=${gv.hpos}${markG("hpos")} yleader=${gv.yleader}${markG("yleader")}`);
         lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
         const baseHex = nhlAddr(nhl94.SORTCORDS, domain).toString(16).toUpperCase();
@@ -2195,20 +2201,28 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           `offsets: x+00 y+14 z+18(all s32_be 16.16) xv+28 yv+2A zv+2C(s16_be) frame+06 fdir+54 attr+04 anim+58 spanum+5A(u16_be) spacnt+5C(s16_be).`,
         );
         lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);
-        return ok(lines.join("\n"));
+        const stateText = lines.join("\n");
+
+        // Optional screenshot + vision description
+        if (p.describe === true) {
+          const cfg = requireVisionConfig();
+          const shotPath = path.join(os.tmpdir(), `mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`);
+          await bh.call<string>("screenshot", { path: shotPath });
+          const desc = await describeImage(shotPath, p.describe_prompt as string | undefined, cfg);
+          return ok(`${stateText}\n\n=== Screenshot described by ${cfg.model} ===\n${desc}`);
+        }
+
+        return ok(stateText);
       }
 
       case "nhl94_park": {
         const keep = (p.keep as string[] | undefined) ?? [];
         for (const k of keep) nhl94.resolveTarget(k); // validate keep entries
-        const y = (p.y as number | undefined) ?? -300;
-        const xStart = (p.x_start as number | undefined) ?? -160;
-        const xSpacing = (p.x_spacing as number | undefined) ?? 32;
         const domain = await nhlDomain(bh);
-        const { ops, assignments } = nhl94.parkOps(keep, y, xStart, xSpacing); // validates
+        const { ops, assignments } = nhl94.parkOps(keep); // validates
         const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
         const xs = assignments.map((a) => a.x);
-        const head = `Parked ${assignments.length} skater(s) at y=${y} (x ${Math.min(...xs)}..${Math.max(...xs)}, spacing ${xSpacing})` +
+        const head = `Parked ${assignments.length} skater(s) at y=${nhl94.PARK_Y} (x ${Math.min(...xs)}..${Math.max(...xs)})` +
           (keep.length ? `; kept ${keep.join(", ")}` : "");
         const detail = assignments.map((a) => `${a.target} x=${a.x}`).join(", ");
         return ok(`${head}\n${detail}\n${r.frozen_count} address(es) frozen.`);

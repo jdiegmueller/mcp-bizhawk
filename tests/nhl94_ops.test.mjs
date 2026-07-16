@@ -67,22 +67,22 @@ test("unfreezeOps emits the 6 matching addresses per target", () => {
 });
 
 test("parkOps parks every skater not in keep, spreading x and freezing 5 ops each", () => {
-  const { ops, assignments } = parkOps(["s2"], -300, -160, 32);
+  const { ops, assignments } = parkOps(["s2"]);
   // 11 skaters parked * 5 ops
   assert.equal(assignments.length, 11);
   assert.equal(ops.length, 55);
   assert.ok(!assignments.some((a) => a.target === "s2"));
-  // first parked skater is s0 at x_start
-  assert.deepEqual(assignments[0], { target: "s0", x: -160 });
+  // first parked skater is s0 at the left endpoint of the -32000..+32000 spread
+  assert.deepEqual(assignments[0], { target: "s0", x: -32000 });
   const s0x = ops.find((o) => o.address === base(0) + OFF.x);
-  assert.deepEqual(s0x, { op: "freeze", address: base(0) + OFF.x, value: 0xff600000, width: "u32_be" });
+  assert.deepEqual(s0x, { op: "freeze", address: base(0) + OFF.x, value: 0x83000000, width: "u32_be" }); // -32000 << 16
   const s0y = ops.find((o) => o.address === base(0) + OFF.y);
-  assert.equal(s0y.value, 0xfed40000); // -300 << 16
+  assert.equal(s0y.value, 0x7d000000); // 32000 << 16 (fixed off-rink latitude)
   // park never freezes z
   assert.ok(!ops.some((o) => o.address === base(0) + OFF.z));
 });
 
 test("parkOps rejects when every skater is kept", () => {
   const all = Array.from({ length: 12 }, (_, i) => `s${i}`);
-  assert.throws(() => parkOps(all, -300, -160, 32), /nothing to park/);
+  assert.throws(() => parkOps(all), /nothing to park/);
 });

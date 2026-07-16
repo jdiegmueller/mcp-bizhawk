@@ -1,5 +1,23 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.20-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.22-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.22-jd changes: introduced an RPC PROTOCOL version (BRIDGE.protocol,
+--   server-side version.ts PROTOCOL_VERSION), advertised in the HELLO handshake
+--   ({server_version, protocol_version}). The OSD's stale-component (orange)
+--   warning now fires on a PROTOCOL mismatch, not a display-version-string diff:
+--   a bridge-only or server-only release with the same protocol shows both
+--   versions plainly, no warning. Falls back to version-string age only when the
+--   server predates the protocol field. Protocol starts at 1 (current contract).
+--
+-- v2026.7.21-jd changes: added a `faceoff` column to BOTH trace CSVs — the main
+--   per-frame trace (right after `clockrun`) and the phys-sync trace (appended
+--   after `frac`). It is gmode(0xFFC2EA) bit 0 (1 = whistle/faceoff/stoppage
+--   mode, clock stopped + body-checks off; the same bit `clockrun` already
+--   carried in the main trace). Server-side in lockstep: nhl94_state now reads
+--   gmode as a BYTE (was u16_be — `& 1` had been testing the wrong byte 0xC2EB)
+--   and surfaces an explicit `faceoff: yes|no` field next to `play`; nhl94_park
+--   now spreads parked skaters evenly across x=-32000..+32000 at a fixed
+--   y=32000 (dropped the y/x_start/x_spacing params).
 --
 -- v2026.7.20-jd changes (server-side only; bridge unchanged): the daemon now
 --   appends a JSONL usage-log row per MCP tool call (ts/tool/ok/ms/args, plus
@@ -521,7 +539,13 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.20-jd",
+    version    = "2026.7.22-jd",
+    -- RPC PROTOCOL version — the wire contract with the server (framing,
+    -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
+    -- stale-component warning only when this number differs from the server's
+    -- (see version.ts PROTOCOL_VERSION), NOT when the display versions differ.
+    -- Bump only on an actual wire-contract change.
+    protocol   = 1,
     pause_safe = true,
 }
 
@@ -710,7 +734,7 @@ local function trace_pad_string(port)
 end
 
 local function trace_header()
-    local cols = {"frame", "clockraw", "clockrun",
+    local cols = {"frame", "clockraw", "clockrun", "faceoff",
         "puck_x","puck_y","puck_z","puck_xv","puck_yv","puck_zv","puckc","puck_frame",
         "rngseed","collflag","evalue","shotplayer","lastplayer","passdir","passspeed",
         "p1_pad","p2_pad"}
@@ -727,7 +751,8 @@ local function trace_row(frame)
     local out = {
         frame,
         string.format("%04X", tr_u16(TRACE_G.gameclock)),
-        gmode & 1,
+        gmode & 1,        -- clockrun (raw gmode bit0; misnamed — it is clock-STOPPED)
+        gmode & 1,        -- faceoff (same bit0: 1 = whistle/faceoff/stoppage mode)
         tr_s16(PUCK_ADDR + 0x00), tr_s16(PUCK_ADDR + 0x14), tr_s16(PUCK_ADDR + 0x18),
         tr_s16(PUCK_ADDR + 0x28), tr_s16(PUCK_ADDR + 0x2A), tr_s16(PUCK_ADDR + 0x2C),
         tr_s16(TRACE_G.puckc), tr_u16(PUCK_ADDR + 0x06),
@@ -795,18 +820,19 @@ local function phys_emit_cb()
     if phys_latch_d7 == 0 then return end
     phys_tick = phys_tick + 1
     local b = PHYS_SLOT2
-    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d\n",
+    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
         phys_tick, emu.framecount(), phys_latch_d7, trace_pad_string(1),
         tr_s16(b + 0x00), tr_u16(b + 0x02),      -- X 16.16: whole, sub
         tr_s16(b + 0x14), tr_u16(b + 0x16),      -- Y 16.16: whole, sub
         tr_s16(b + 0x28), tr_s16(b + 0x2A),      -- xv, yv
         tr_u16(b + 0x54),                        -- fdir = octant (high word of heading longword @+0x54)
-        tr_u16(b + 0x56)))                       -- frac = low word of the 32-bit heading longword @+0x54; octant (fdir) is the high word
+        tr_u16(b + 0x56),                        -- frac = low word of the 32-bit heading longword @+0x54; octant (fdir) is the high word
+        tr_u8(TRACE_G.gmode) & 1))               -- faceoff = gmode(0xC2EA) bit0 (1 = whistle/faceoff/stoppage mode)
     if phys_tick % TRACE_FLUSH == 0 then phys_fh:flush() end
 end
 
 local function phys_header()
-    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac"
+    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac,faceoff"
 end
 
 -- ── Live state OSD ──────────────────────────────────────────────────────────
@@ -964,6 +990,26 @@ local function version_cmp(a, b)
     return 0
 end
 
+-- Decide which half of a client/server pair (if any) to flag orange as the
+-- stale component on the OSD. Compatibility is judged by RPC PROTOCOL number:
+-- identical protocols → no warning even when the display strings differ. Only a
+-- genuine protocol difference flags the older-protocol side. When the server's
+-- protocol is unknown (nil — a pre-protocol server) fall back to ranking by
+-- version-string age. Returns two booleans: warn_cli, warn_srv.
+local function version_warn(cliver, srvver, cliproto, srvproto)
+    if srvproto ~= nil then
+        if cliproto ~= srvproto then
+            return cliproto < srvproto, srvproto < cliproto
+        end
+        return false, false
+    end
+    if tostring(cliver):match("%d") and tostring(srvver):match("%d") then
+        local cmp = version_cmp(cliver, srvver)
+        return cmp < 0, cmp > 0
+    end
+    return false, false
+end
+
 -- Build a visible line from {text, hot} segments plus a same-length "overlay"
 -- string that carries ONLY the hot (frozen) segments' characters, spaces
 -- elsewhere. Drawing the overlay in red over the white line highlights exactly
@@ -993,9 +1039,12 @@ local function osd_lines()
     local carrier = osd_carrier()
     -- System/emulation line: client+server version, reconnect count (rc), the
     -- emulated frame counter, and lag frames — all the non-game telemetry on ONE
-    -- line at the top. Versions COLLAPSE to a single "v…" when client and server match (the
-    -- normal case); when they differ they split to "cli v… srv v…" and the OLDER
-    -- build is drawn orange+bold to flag the stale component.
+    -- line at the top. Versions COLLAPSE to a single "v…" when client and server
+    -- match (the normal case); when they differ they split to "cli v… srv v…".
+    -- The orange+bold "stale component" highlight is driven by the RPC PROTOCOL
+    -- number (BRIDGE.protocol vs BRIDGE.server_protocol), NOT the string diff — so
+    -- a bridge-only or server-only version bump shows both plainly with no warning
+    -- as long as the protocol matches.
     -- Lag frames: emu.lagcount() is the cumulative total; a trailing '*' marks
     -- the current frame as itself a lag frame (emu.islagged()). Guarded with
     -- has() rather than CAPS because CAPS is declared after this function.
@@ -1016,13 +1065,16 @@ local function osd_lines()
         lines[#lines + 1] = string.format("v%s  rc %d  %s%s", cliver, reconnect_count, frame, lag)
         overlays[#lines] = nil
     else
-        -- Only rank the pair when BOTH carry version digits; a bare "?" (no
-        -- HELLO from the server yet) is shown but highlights nothing.
-        local cmp = 0
-        if cliver:match("%d") and srvver:match("%d") then cmp = version_cmp(cliver, srvver) end
+        -- Versions differ. Compatibility is judged by RPC PROTOCOL, not the
+        -- display string: same protocol → shown side-by-side in plain white (a
+        -- bridge-only / server-only bump is NOT a mismatch). Only a genuine
+        -- protocol difference flags the older-protocol half orange+bold. When the
+        -- server's protocol is unknown (pre-protocol server, no HELLO yet), fall
+        -- back to ranking by version-string age so old servers still get flagged.
+        local warn_cli, warn_srv = version_warn(cliver, srvver, BRIDGE.protocol, BRIDGE.server_protocol)
         local vis, ov = osd_build({
-            { "cli v" .. cliver,          cmp < 0 },
-            { "  srv v" .. srvver,        cmp > 0 },
+            { "cli v" .. cliver,          warn_cli },
+            { "  srv v" .. srvver,        warn_srv },
             { string.format("  rc %d  %s%s", reconnect_count, frame, lag), false },
         })
         lines[#lines + 1] = vis
@@ -2736,6 +2788,10 @@ local function tick()
             -- Stash it so the OSD can show which server build we're paired with
             -- alongside the bridge's own version.
             BRIDGE.server_version = tostring(v)
+            -- RPC protocol number (nil on a pre-protocol server → OSD falls back
+            -- to version-string age). Drives the compatibility warning instead of
+            -- the display-version comparison.
+            BRIDGE.server_protocol = (ok and type(h) == "table" and tonumber(h.protocol_version)) or nil
             -- Force the OSD to repaint even if paused: HELLO usually lands while
             -- the game is still paused at boot, and the paused throttle otherwise
             -- keeps showing the pre-HELLO "srv v?" until something advances a

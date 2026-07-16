@@ -138,6 +138,7 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /clock: 19:59 \(1199s\)/);
     assert.match(text, /period: 1st/);
     assert.match(text, /play: running/);
+    assert.match(text, /faceoff: no/); // gmode bit0 clear
     assert.match(text, /camera: vpos=10 hpos=-5 yleader=50/);
     assert.match(text, /frozen_summary: total=3 mapped=2 unmapped=1/);
     // Animation record sub-line: s3 has attr bit3 (x-flip), spanum 8 (record 2).
@@ -148,6 +149,29 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     // raw:true exposes each target's absolute struct address (s3 @ base+3*0x80).
     const rawRes = await h.client.callTool({ name: "nhl94_state", arguments: { raw: true } });
     assert.match(textOf(rawRes), /s3 @0xFFB1CA:/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set", async () => {
+  const rec = (i) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0 });
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
+    // gmode 1 = clock-stopped / faceoff-whistle mode; gmode must be read as a
+    // byte, so bit 0 here is the C2EA flag bit.
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 1, vpos: 0, hpos: 0, yleader: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: {} }));
+    assert.match(text, /play: stopped/);
+    assert.match(text, /faceoff: yes/);
+    // gmode is requested as a byte read, not u16_be (the endianness fix).
+    const call = h.bridge.calls.find((c) => c.method === "read_many");
+    const gmodeRead = call.params.reads.find((r) => r.name === "gmode");
+    assert.equal(gmodeRead.width, "u8");
   } finally {
     await h.close();
   }

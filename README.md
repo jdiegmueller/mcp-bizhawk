@@ -117,14 +117,14 @@ npm run daemon        # or: node dist/index.js
 ```
 
 For always-on operation, install the systemd **user** unit in
-[`deploy/bizhawk-daemon.service`](deploy/bizhawk-daemon.service):
+[`deploy/bizhawk-daemon-windows.service`](deploy/bizhawk-daemon-windows.service):
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp deploy/bizhawk-daemon.service ~/.config/systemd/user/   # edit WorkingDirectory first
+cp deploy/bizhawk-daemon-windows.service ~/.config/systemd/user/   # edit WorkingDirectory first
 systemctl --user daemon-reload
-systemctl --user enable --now bizhawk-daemon
-systemctl --user restart bizhawk-daemon    # after `npm run build` on a version bump
+systemctl --user enable --now bizhawk-daemon-windows
+systemctl --user restart bizhawk-daemon-windows    # after `npm run build` on a version bump
 ```
 
 ## Register with your MCP client

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startHarness } from "./helpers/harness.mjs";
-import { VERSION } from "../dist/version.js";
+import { VERSION, PROTOCOL_VERSION } from "../dist/version.js";
 
 test("server greets the bridge with HELLO carrying its version, once per connection", async () => {
   const h = await startHarness({ ping: () => ({ pong: true }) });
@@ -12,7 +12,8 @@ test("server greets the bridge with HELLO carrying its version, once per connect
       if (Date.now() > deadline) throw new Error("bridge never received HELLO");
       await new Promise((r) => setTimeout(r, 5));
     }
-    assert.deepEqual(h.bridge.hello, { server_version: VERSION });
+    assert.deepEqual(h.bridge.hello, { server_version: VERSION, protocol_version: PROTOCOL_VERSION });
+    assert.equal(typeof PROTOCOL_VERSION, "number");
     assert.equal(h.bridge.helloCount, 1);
 
     // Normal RPC still works after the greeting.

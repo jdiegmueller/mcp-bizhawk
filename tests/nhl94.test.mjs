@@ -11,7 +11,50 @@ import {
   mapFrozenAddress,
   parseClock,
   formatClock,
+  parkOps,
+  PARK_Y,
 } from "../dist/nhl94.js";
+
+// Decode the x whole-pixel each parked skater's frozen x-op was set to, in
+// slot order, from a parkOps result.
+function parkXs(keep) {
+  return parkOps(keep).assignments.map((a) => a.x);
+}
+
+test("parkOps spreads parked skaters evenly across -32000..+32000 by count", () => {
+  // Keep all but one → N=1 → lone skater dead center.
+  const one = parkOps(Array.from({ length: 11 }, (_, i) => `s${i}`)); // keep s0..s10, park s11
+  assert.deepEqual(one.assignments.map((a) => a.x), [0]);
+
+  // N=2 → the two endpoints.
+  assert.deepEqual(parkXs(Array.from({ length: 10 }, (_, i) => `s${i}`)), [-32000, 32000]);
+
+  // N=3 → endpoints + center (spacing 32000).
+  assert.deepEqual(parkXs(Array.from({ length: 9 }, (_, i) => `s${i}`)), [-32000, 0, 32000]);
+
+  // N=4 → spacing 64000/3 ≈ 21333, endpoints exact.
+  assert.deepEqual(parkXs(Array.from({ length: 8 }, (_, i) => `s${i}`)), [-32000, -10667, 10667, 32000]);
+});
+
+test("parkOps freezes x/y (y=PARK_Y) + zeroes xv/yv/zv, 5 ops per parked skater", () => {
+  const { ops, assignments } = parkOps(["s2"]); // park 11
+  assert.equal(assignments.length, 11);
+  assert.equal(ops.length, 55);
+  assert.ok(ops.every((o) => o.op === "freeze"));
+  // Every parked skater's y is frozen at PARK_Y (16.16).
+  const yOps = ops.filter((o) => (o.address - SORTCORDS) % SCSIZE === OFF.y);
+  assert.equal(yOps.length, 11);
+  assert.ok(yOps.every((o) => o.value === toFixed(PARK_Y)));
+  // s2 is untouched.
+  assert.ok(!ops.some((o) => o.address === SORTCORDS + 2 * SCSIZE + OFF.x));
+});
+
+test("parkOps throws when every skater is kept", () => {
+  assert.throws(
+    () => parkOps(Array.from({ length: 12 }, (_, i) => `s${i}`)),
+    /nothing to park/,
+  );
+});
 
 test("resolveTarget maps s0..s11 onto the slot grid", () => {
   assert.deepEqual(resolveTarget("s0"), { slot: 0, base: SORTCORDS });

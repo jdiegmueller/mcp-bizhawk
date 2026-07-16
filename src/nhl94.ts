@@ -29,7 +29,36 @@ export const OFF: Record<string, number> = {
   anim: 0x58,
   spanum: 0x5a,
   spacnt: 0x5c,
+  // Extended per-entity fields (mirror bridge_JD.lua TRACE_FIELDS) that agents
+  // otherwise hand-read via eval_lua. impact/impactp = body-check accumulators
+  // (+0x32 is the accumulator the check routine slams to 256 during a stoppage);
+  // pos = a positional/state word; nopuck = has-no-puck flag; pf/pf2/pf3 = player
+  // flag bytes; wgt8 = weight byte.
+  impact: 0x32,
+  impactp: 0x2e,
+  pos: 0x34,
+  nopuck: 0x5e,
+  pf: 0x62,
+  pf2: 0x63,
+  pf3: 0x64,
+  wgt8: 0x67,
 };
+
+// Read width per field name (used by nhl94_state and nhl94_read). Mirrors the
+// widths bridge_JD.lua TRACE_FIELDS / the state reader use. x/y/z are 16.16
+// longwords (read s32_be, decoded to whole pixels elsewhere).
+export const FIELD_WIDTH: Record<string, string> = {
+  x: "s32_be", y: "s32_be", z: "s32_be",
+  xv: "s16_be", yv: "s16_be", zv: "s16_be",
+  fdir: "u16_be", frame: "u16_be",
+  attr: "u16_be", anim: "u16_be", spanum: "u16_be", spacnt: "s16_be",
+  impact: "s16_be", impactp: "s16_be", pos: "u16_be",
+  nopuck: "u8", pf: "u8", pf2: "u8", pf3: "u8", wgt8: "u8",
+};
+
+// Fields that are 16.16 fixed-point (decode to whole pixels); everything else is
+// a plain integer at its declared width.
+export const FIXED_FIELDS = new Set(["x", "y", "z"]);
 
 // Absolute (M68K BUS) addresses of game globals (mirror bridge_JD.lua TRACE_G
 // + camera consts). Keyed by the semantic field name used in freeze mapping.
@@ -100,6 +129,41 @@ export function mapFrozenAddress(
   if (slot === PUCK_SLOT) return { target: "pk", field };
   return null;
 }
+
+export interface ReadField {
+  field: string;
+  offset: number;
+  width: string;
+  fixed: boolean;
+}
+
+const RAW_FIELD = /^\+?(0x[0-9a-fA-F]+|\d+)(?::(u8|s8|u16|s16|u32|s32|u16_be|s16_be|u32_be|s32_be))?$/;
+
+/**
+ * Resolve a field token for nhl94_read into {field, offset, width, fixed}. A
+ * token is either a KNOWN name (any key of OFF, e.g. "x", "impact", "pf") or a
+ * RAW in-struct offset "+0xNN[:width]" / "0xNN[:width]" / "NN[:width]" (width
+ * defaults to u8). This is the game-aware alternative to hand-computing
+ * base+offset in eval_lua. Throws on an unknown name / malformed token.
+ */
+export function resolveField(token: string): ReadField {
+  if (token in OFF) {
+    return { field: token, offset: OFF[token], width: FIELD_WIDTH[token] ?? "u16_be", fixed: FIXED_FIELDS.has(token) };
+  }
+  const m = RAW_FIELD.exec(token);
+  if (m) {
+    const offset = m[1].startsWith("0x") ? parseInt(m[1], 16) : parseInt(m[1], 10);
+    if (offset < 0 || offset >= SCSIZE) {
+      throw new Error(`field offset ${token} out of struct range 0..0x${(SCSIZE - 1).toString(16)}`);
+    }
+    return { field: token, offset, width: m[2] ?? "u8", fixed: false };
+  }
+  throw new Error(`unknown field "${token}" (use a name like x/y/impact/pf/wgt8/nopuck or a raw offset like "+0x32:s16_be")`);
+}
+
+/** Default field set for nhl94_read — the extended per-entity fields nhl94_state
+ * does NOT decode (the ones agents keep hand-reading via eval_lua). */
+export const READ_DEFAULT_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf", "pf2", "pf3", "wgt8"];
 
 /** "MM:SS" or raw seconds -> seconds (0..3599). Throws on malformed / out-of-range. */
 export function parseClock(v: string | number): number {
@@ -216,37 +280,50 @@ export function unfreezeOps(targets: string[]): MemOp[] {
   return ops;
 }
 
+// Off-ice parking geometry (fixed — no longer caller-tunable). Parked skaters
+// sit at a far off-rink Y latitude and are spread evenly across the full X range
+// so they never overlap regardless of how many are parked.
+export const PARK_Y = 32000; // off-rink Y latitude
+export const PARK_X_HALF = 32000; // parked skaters span [-PARK_X_HALF, +PARK_X_HALF]
+
 /**
- * Park every skater (slots 0-11) not in `keep` at a commanded (x,y): freeze x
- * and y at the computed 16.16 values and freeze xv/yv/zv at 0 (5 ops each).
- * z is deliberately left untouched (parked skaters sit on the ground).
+ * Park every skater (slots 0-11) not in `keep` off-ice: freeze x and y at the
+ * computed 16.16 values and freeze xv/yv/zv at 0 (5 ops each). z is deliberately
+ * left untouched (parked skaters sit on the ground).
+ *
+ * Y is fixed at PARK_Y. X positions are spread evenly across
+ * [-PARK_X_HALF, +PARK_X_HALF] based on how many skaters are parked (N):
+ * N=1 → x=0; N≥2 → the endpoints hit ±PARK_X_HALF with equal spacing between,
+ * i.e. spacing = 2·PARK_X_HALF/(N-1) (N=2 → ±32000; N=3 → -32000,0,+32000;
+ * N=4 → -32000,-10667,+10667,+32000; …).
  */
 export function parkOps(
   keep: string[],
-  y: number,
-  xStart: number,
-  xSpacing: number,
 ): { ops: MemOp[]; assignments: { target: string; x: number }[] } {
-  checkCoord("y", y);
   const kept = new Set(keep);
+  const slots: number[] = [];
+  for (let slot = 0; slot <= 11; slot++) {
+    if (!kept.has(`s${slot}`)) slots.push(slot);
+  }
+  if (slots.length === 0) throw new Error("nothing to park (every skater is in keep)");
+  const n = slots.length;
+  // Evenly distribute across the full X span; a lone skater sits dead center.
+  const xAt = (i: number) =>
+    n === 1 ? 0 : Math.round(-PARK_X_HALF + (i * (2 * PARK_X_HALF)) / (n - 1));
   const ops: MemOp[] = [];
   const assignments: { target: string; x: number }[] = [];
-  let i = 0;
-  for (let slot = 0; slot <= 11; slot++) {
+  slots.forEach((slot, i) => {
     const target = `s${slot}`;
-    if (kept.has(target)) continue;
-    const x = xStart + i * xSpacing;
+    const x = xAt(i);
     checkCoord("x", x);
     const base = SORTCORDS + slot * SCSIZE;
     ops.push({ op: "freeze", address: base + OFF.x, value: toFixed(x), width: "u32_be" });
-    ops.push({ op: "freeze", address: base + OFF.y, value: toFixed(y), width: "u32_be" });
+    ops.push({ op: "freeze", address: base + OFF.y, value: toFixed(PARK_Y), width: "u32_be" });
     ops.push({ op: "freeze", address: base + OFF.xv, value: 0, width: "u16_be" });
     ops.push({ op: "freeze", address: base + OFF.yv, value: 0, width: "u16_be" });
     ops.push({ op: "freeze", address: base + OFF.zv, value: 0, width: "u16_be" });
     assignments.push({ target, x });
-    i++;
-  }
-  if (assignments.length === 0) throw new Error("nothing to park (every skater is in keep)");
+  });
   return { ops, assignments };
 }
 

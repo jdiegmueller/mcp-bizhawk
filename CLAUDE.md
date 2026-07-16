@@ -18,8 +18,8 @@ emulator — **no arbitration, last-writer-wins**.
   queue, id-correlated `RESULT` handling, HELLO/version handshake.
 - `src/http.ts` — the streamable-HTTP front end (`createMcpHttpServer(bh)`).
 - `src/index.ts` — wires the two together, handles startup/shutdown.
-- `deploy/bizhawk-daemon.service` — systemd **user** unit for always-on
-  operation (`systemctl --user {enable --now,restart,status} bizhawk-daemon`).
+- `deploy/bizhawk-daemon-windows.service` — systemd **user** unit for always-on
+  operation (`systemctl --user {enable --now,restart,status} bizhawk-daemon-windows`).
 
 Sessions configure this as an **HTTP** MCP server (by `url`), not a `command`
 stdio subprocess. There is no stdio transport — point `npm run inspector` at
@@ -41,11 +41,21 @@ and `bizhawk_linux` (daemon `:8763`/BizHawk `:8764`, unit
 
 ## Versioning — keep the two halves in sync
 
-The **server** and the **Lua bridge** ship a version string each, and they are
-displayed side-by-side on the OSD. **Always bump BOTH to the same value on any
-release, even when only one side actually changed** — a mismatch makes the OSD
-split the version line and draw the older half orange+bold as a "stale
-component" warning, so drift is visible and undesirable.
+The **server** and the **Lua bridge** ship a version string each, displayed
+side-by-side on the OSD. Convention is still to **bump BOTH to the same value on
+any release** so the OSD version line collapses to one `v…` and drift stays
+visible. As of `2026.7.22-jd`, however, differing version strings are **no longer
+a warning by themselves**: the OSD's orange+bold "stale component" highlight is
+driven by the **RPC protocol version**, not the version string.
+
+- `src/version.ts` `PROTOCOL_VERSION` (int) and `lua/bridge_JD.lua` `BRIDGE.protocol`
+  are the wire-contract version, sent in the HELLO handshake. Same protocol on
+  both halves → NO warning even if the display versions differ (so a bridge-only
+  or server-only release is fine). Bump `PROTOCOL_VERSION`/`BRIDGE.protocol`
+  together **only when the RPC contract itself changes** (command framing,
+  command/RESULT shapes, HELLO) — a tool-surface or OSD change does NOT touch it.
+  Currently `1`. (A pre-protocol server that sends no `protocol_version` falls
+  back to the old version-string-age comparison.)
 
 Version lives in three files — update all three together:
 
@@ -65,7 +75,7 @@ leave it alone.
 
 - **Server** (`src/**`): run `npm run build` (compiles to `dist/`, what the
   server actually runs), then restart the daemon so the running instance
-  reports the new version — `systemctl --user restart bizhawk-daemon` (or, if
+  reports the new version — `systemctl --user restart bizhawk-daemon-windows` (or, if
   running it by hand, kill and re-run `npm run daemon`). The bridge
   auto-reconnects on restart.
 - **Bridge** (`lua/bridge_JD.lua`): reload the Lua script in BizHawk. If the

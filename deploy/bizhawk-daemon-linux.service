@@ -1,6 +1,6 @@
 # mcp-bizhawk (JD build) — SECOND always-on daemon, for a LOCAL Linux BizHawk.
 #
-# Sibling of bizhawk-daemon.service. Same code (dist/index.js), different ports
+# Sibling of bizhawk-daemon-windows.service. Same code (dist/index.js), different ports
 # so the two daemons don't collide:
 #
 #             MCP HTTP endpoint      BizHawk (Lua bridge) listener   MCP server name
@@ -29,7 +29,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/mnt/8tb/jason/mcp-bizhawk_jd
-# Absolute path to node — see the note in bizhawk-daemon.service (nvm's node is
+# Absolute path to node — see the note in bizhawk-daemon-windows.service (nvm's node is
 # not on the systemd user PATH; update after an nvm node upgrade).
 ExecStart=/mnt/8tb/jason/.nvm/versions/node/v26.5.0/bin/node dist/index.js
 Restart=on-failure
@@ -39,6 +39,10 @@ Environment=MCP_HTTP_HOST=127.0.0.1
 Environment=MCP_HTTP_PORT=8763
 Environment=BIZHAWK_HOST=127.0.0.1
 Environment=BIZHAWK_PORT=8764
+# Vision model for screenshot descriptions (nhl94_state describe, bizhawk_screenshot describe)
+Environment=VISION_BASE_URL=https://llama-swap.nevosi.com/v1
+Environment=VISION_MODEL=Qwen3.6-35B-A3B
+Environment=VISION_API_KEY=sk-no-key-required
 
 [Install]
 WantedBy=default.target

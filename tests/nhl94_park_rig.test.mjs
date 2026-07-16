@@ -15,9 +15,10 @@ test("nhl94_park parks every skater not in keep and freezes 5 ops each", async (
   try {
     const res = await h.client.callTool({ name: "nhl94_park", arguments: { keep: ["s2"] } });
     const text = textOf(res);
-    assert.match(text, /Parked 11 skater\(s\) at y=-300/);
+    assert.match(text, /Parked 11 skater\(s\) at y=32000/);
     assert.match(text, /kept s2/);
-    assert.match(text, /s0 x=-160/);
+    // 11 parked spread evenly across -32000..+32000: first at the left endpoint.
+    assert.match(text, /s0 x=-32000/);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.ops.length, 55);
     assert.ok(!call.params.ops.some((o) => o.address === 0xffb04a + 2 * 0x80)); // s2 untouched
