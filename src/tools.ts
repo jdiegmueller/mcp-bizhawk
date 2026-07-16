@@ -1366,7 +1366,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
       "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Targets s0-s11 (skaters) and pk (puck) ARE the game's own entity slots — the struct at base+N*0x80 on the 68K bus, the SAME slot index the puck-carrier word uses; they are NOT a render/sort order. ALWAYS prefer this tool over hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes — dropping the 0xFF prefix, wrong base, wrong width). If you need a field this tool doesn't decode, DON'T guess an address: take base+stride+offsets from the `layout:` line (or the per-target `@0xADDR` shown under raw:true) and compute base+offset. Pass raw:true to also see the raw 16.16 hex, sub-pixel fraction, and each target's absolute struct address. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then carrier, clock+period+play+faceoff, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. `play` is running|stopped and `faceoff` is yes|no — BOTH decode the same gmode(0xFFC2EA) bit 0 (set = clock-stopped = whistle/faceoff/stoppage, when the game also disables body-checks); faceoff:yes always coincides with play:stopped. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge. Pass verbose:true to add a per-entity extended line (impact/impactp/pos/nopuck/pf/pf2/pf3/wgt8); for any other field use nhl94_read.",
+      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then a `phase:` headline, carrier, clock+period+play+faceoff, camera scroll, a `layout:` line (base/stride/domain + every field offset), and the frozen summary. `phase:` is a HEURISTIC coarse label (from the session byte 0xFFC735 + gmode bit0) answering the question a positions read can't — is this LIVE gameplay, an on-ice faceoff/stoppage, a pre-game menu (title/team-select/setup, no game loaded), or an off-ice break (intermission/post-game) where NOTHING moves until you press START. NHL94 has no clean single screen-state byte, so the specific menu is named by the vision caption, not the phase label. `play` is running|stopped and `faceoff` is yes|no — BOTH decode the same gmode(0xFFC2EA) bit 0 (set = clock-stopped = whistle/faceoff/stoppage, when the game also disables body-checks); faceoff:yes always coincides with play:stopped. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge. Pass verbose:true to add a per-entity extended line (impact/impactp/pos/nopuck/pf/pf2/pf3/wgt8); for any other field use nhl94_read.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2252,9 +2252,13 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         // gmode is a BYTE flag register at 0xFFC2EA (the game tests it with
         // `btst #n,($C2EA)`, a byte op) — read it as u8, NOT u16_be, or `& 1`
         // would test the wrong byte (0xFFC2EB). Matches the bridge OSD's tr_u8.
-        const gReads = (["carrier", "gameclock", "gsp", "gmode", "vpos", "hpos", "yleader"] as const).map((k) => ({
-          name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u8" : (k === "vpos" || k === "hpos" || k === "yleader" ? "s16_be" : "u16_be"), domain,
-        }));
+        const gReads: { name: string; address: number; width: string; domain: string }[] =
+          (["carrier", "gameclock", "gsp", "gmode", "vpos", "hpos", "yleader"] as const).map((k) => ({
+            name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u8" : (k === "vpos" || k === "hpos" || k === "yleader" ? "s16_be" : "u16_be"), domain,
+          }));
+        // Session/phase byte (0xFFC735) — read in the same round-trip; drives the
+        // `phase:` label below (see nhl94.classifyPhase / SESSION_BYTE comment).
+        gReads.push({ name: "session", address: nhlAddr(nhl94.SESSION_BYTE, domain), width: "u8", domain });
         const gv = await bh.call<Record<string, number>>("read_many", { reads: gReads });
         const frozen = await bh.call<{ frozen?: { address: number; width: string; value: number; domain?: string }[] }>("list_frozen");
         const frozenList = Array.isArray(frozen.frozen) ? frozen.frozen : [];
@@ -2328,7 +2332,13 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         // and body-checks on it). `faceoff` is that same bit surfaced explicitly.
         const play = (gv.gmode & 1) ? "stopped" : "running";
         const faceoff = (gv.gmode & 1) ? "yes" : "no";
+        // Coarse phase headline (heuristic: session byte + gmode bit0). Answers
+        // the "is this a menu waiting for START, or live/faceoff on the ice?"
+        // question that a bare positions read can't — see nhl94.classifyPhase.
+        const phase = nhl94.classifyPhase(gv.session, (gv.gmode & 1) === 1);
+        const phaseRaw = raw ? `  [session=0x${hex2(gv.session)} gmode=0x${hex2(gv.gmode)}]` : "";
         lines.push("");
+        lines.push(`phase: ${phase}${phaseRaw}`);
         lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}   faceoff: ${faceoff}`);
         lines.push(`camera: vpos=${gv.vpos}${markG("vpos")} hpos=${gv.hpos}${markG("hpos")} yleader=${gv.yleader}${markG("yleader")}`);
         lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);

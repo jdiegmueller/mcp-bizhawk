@@ -119,7 +119,7 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
         if (i === 14) return rec(14, { x: 8 << 16, y: 8 << 16 });
         return rec(i);
       }),
-    read_many: () => ({ carrier: 3, gameclock: 1199, gsp: 0, gmode: 0, vpos: 10, hpos: -5, yleader: 50 }),
+    read_many: () => ({ carrier: 3, gameclock: 1199, gsp: 0, gmode: 0, vpos: 10, hpos: -5, yleader: 50, session: 0xff }),
     list_frozen: () => ({
       frozen: [
         { address: 0xffb04a + 0x00, width: "u32_be", value: 100 << 16, domain: "M68K BUS" }, // s0.x
@@ -141,6 +141,8 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /period: 1st/);
     assert.match(text, /play: running/);
     assert.match(text, /faceoff: no/); // gmode bit0 clear
+    // phase headline: session=0xFF + gmode bit0 clear ⇒ live gameplay.
+    assert.match(text, /phase: gameplay \(live play/);
     assert.match(text, /camera: vpos=10 hpos=-5 yleader=50/);
     assert.match(text, /frozen_summary: total=3 mapped=2 unmapped=1/);
     // Animation record sub-line: s3 has attr bit3 (x-flip), spanum 8 (record 2).
@@ -202,7 +204,7 @@ test("nhl94_state verbose:true appends the extended per-entity line", async () =
       assert.ok(p.fields.some((f) => f.name === "impact"));
       return Array.from({ length: p.count }, (_, i) => rec(i));
     },
-    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0 }),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0, session: 0xff }),
     list_frozen: () => ({ frozen: [] }),
   });
   try {
@@ -220,13 +222,15 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
     // gmode 1 = clock-stopped / faceoff-whistle mode; gmode must be read as a
     // byte, so bit 0 here is the C2EA flag bit.
-    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 1, vpos: 0, hpos: 0, yleader: 0 }),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 1, vpos: 0, hpos: 0, yleader: 0, session: 0xff }),
     list_frozen: () => ({ frozen: [] }),
   });
   try {
     const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
     assert.match(text, /play: stopped/);
     assert.match(text, /faceoff: yes/);
+    // phase headline: session=0xFF + gmode bit0 set ⇒ on-ice faceoff/stoppage.
+    assert.match(text, /phase: faceoff\/stoppage \(on ice/);
     // gmode is requested as a byte read, not u16_be (the endianness fix).
     const call = h.bridge.calls.find((c) => c.method === "read_many");
     const gmodeRead = call.params.reads.find((r) => r.name === "gmode");

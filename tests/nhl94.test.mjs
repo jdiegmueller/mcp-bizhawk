@@ -15,7 +15,24 @@ import {
   PARK_Y,
   resolveField,
   READ_DEFAULT_FIELDS,
+  classifyPhase,
+  SESSION_BYTE,
 } from "../dist/nhl94.js";
+
+test("classifyPhase maps session byte + gmode bit0 to the coarse phase buckets", () => {
+  // session 0xFF = on ice; gmode bit0 splits live vs faceoff/stoppage.
+  assert.match(classifyPhase(0xff, false), /^gameplay \(live play/);
+  assert.match(classifyPhase(0xff, true), /^faceoff\/stoppage \(on ice/);
+  // session 0x00 = no game loaded (title/menus); 0xFE = off-ice break.
+  assert.match(classifyPhase(0x00, false), /^pre-game .*no game loaded/);
+  assert.match(classifyPhase(0xfe, false), /^off-ice break/);
+  // gmode bit0 is irrelevant off the ice (still a "waiting for START" screen).
+  assert.match(classifyPhase(0x00, true), /^pre-game/);
+  assert.match(classifyPhase(0xfe, true), /^off-ice break/);
+  // Anything unexpected degrades gracefully, echoing the raw byte.
+  assert.match(classifyPhase(0x42, false), /^unknown \(session=0x42\)/);
+  assert.equal(SESSION_BYTE, 0xffc735);
+});
 
 test("resolveField maps known names to offset/width and flags fixed-point axes", () => {
   assert.deepEqual(resolveField("impact"), { field: "impact", offset: 0x32, width: "s16_be", fixed: false });

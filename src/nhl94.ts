@@ -72,6 +72,43 @@ export const G: Record<string, number> = {
   yleader: 0xffbf92,
 };
 
+// Screen/session-phase byte at 0xFFC735. NHL94 has NO clean single "screen
+// state" enum — a two-playthrough full-RAM diff (2026-07-16, see memory
+// nhl94-game-phase-flags.md) found every scalar candidate was either
+// run-dependent scratch (0xFFCF2C/CF25) or opaque table data. This byte is
+// itself opaque table data (part of a big-endian -1/-2 sentinel array), but it
+// was the ONE signal that tracked the three coarse phase buckets IDENTICALLY
+// across both independent runs:
+//   0x00 = no game loaded  (title / EA-logo / team-select / setup menu / matchups intro)
+//   0xFE = game loaded, OFF the ice  (pre-faceoff zamboni intro, inter-period intermission menu, post-game)
+//   0xFF = ON the ice  (faceoff or live play — and only those)
+// Combined with gmode(0xFFC2EA) bit0 (clock-stopped = faceoff/whistle) it yields
+// the phase label from classifyPhase(). It is a HEURISTIC, not a documented mode
+// variable — treat the vision caption as the authority for naming which menu.
+export const SESSION_BYTE = 0xffc735;
+
+/**
+ * Coarse game-phase label from the two reliable instantaneous signals: the
+ * session byte (SESSION_BYTE) and gmode bit0 (faceoffBit — set = clock stopped).
+ * Deliberately conservative: it distinguishes live-play / on-ice-stoppage /
+ * not-in-play (the "nothing moves until you press START" case the agent most
+ * needs) and defers naming the specific menu to the vision caption.
+ */
+export function classifyPhase(sessionByte: number, faceoffBit: boolean): string {
+  switch (sessionByte) {
+    case 0xff:
+      return faceoffBit
+        ? "faceoff/stoppage (on ice, clock stopped — whistle or faceoff)"
+        : "gameplay (live play, clock running)";
+    case 0x00:
+      return "pre-game (title / team-select / setup menu / intro — no game loaded; nothing moves until START — see caption)";
+    case 0xfe:
+      return "off-ice break (inter-period intermission, post-game, or pre-faceoff intro — nothing moves until START — see caption)";
+    default:
+      return `unknown (session=0x${(sessionByte >>> 0).toString(16).toUpperCase().padStart(2, "0")}${faceoffBit ? ", clock stopped" : ""}) — rely on the caption below`;
+  }
+}
+
 const RAM_BASE = 0xff0000; // "68K RAM" domain is offset from the full bus by this
 
 /** Parse a target name ("s0".."s11" | "pk") into its slot index + base address. */

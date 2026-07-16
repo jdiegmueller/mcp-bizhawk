@@ -1,5 +1,13 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.27-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.28-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.28-jd changes (server-side only; bridge unchanged): nhl94_state now
+--   emits a `phase:` headline — a heuristic coarse label (gameplay / on-ice
+--   faceoff-stoppage / pre-game menu / off-ice break) from the session byte
+--   0xFFC735 + gmode bit0, so an agent can tell "menu waiting for START" from
+--   "live play" without vision. Backed by a two-playthrough RAM diff that
+--   confirmed NHL94 has NO clean single screen-state byte; the specific menu is
+--   still named by the (default-on) vision caption. Protocol unchanged (2).
 --
 -- v2026.7.27-jd changes (server-side only; bridge unchanged): vision upgrades.
 --   (1) Every describe request now carries a persistent NHL94-specific SYSTEM
@@ -567,7 +575,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.27-jd",
+    version    = "2026.7.28-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
