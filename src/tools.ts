@@ -7,6 +7,7 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { BizhawkServer } from "./bizhawk.js";
 import { VERSION } from "./version.js";
 import { describeImage, requireVisionConfig, type VisionConfig } from "./vision.js";
+import * as nhl94 from "./nhl94.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1217,6 +1218,198 @@ const TOOLS: Tool[] = [
       additionalProperties: false,
     },
   },
+
+  // ── NHL94 game-semantic tools ─────────────────────────────────────────────
+  // These speak in NHL94 nouns (skaters s0-s11, puck pk) and whole-pixel
+  // coordinates, and own ALL the 68K details internally (M68K BUS domain,
+  // big-endian, 16.16 fixed-point positions, signed velocity words). Prefer
+  // them over hand-built read_many/write/freeze calls against the slot grid.
+  {
+    name: "nhl94_teleport",
+    description:
+      "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions. " +
+      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts to 16.16 fixed-point, writes big-endian to the M68K BUS, and zeroes the sub-pixel fraction, so you never touch endianness/width/base arithmetic yourself. For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites x/y/z (no undo — snapshot with nhl94_rig/save_state if needed). All writes land atomically in one frame. Teleport is PLACEMENT, not a state reset — latched per-skater flags survive it. FOOTGUN handled for you: teleporting pk while a skater carries it is futile (carry logic snaps it back next frame), so a pk teleport AUTO-DETACHES the puck (writes 'nobody' to the carrier word first) — the result is a loose puck at the given spot. To move a carried puck with its carrier, teleport the skater instead. Errors if a target is unknown, an entry sets no axis, or a coordinate is outside -32768..32767. " +
+      "RETURNS: One line per target naming the decoded coordinates written (and whether the puck was detached).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targets: {
+          type: "array",
+          minItems: 1,
+          description: "Targets to move. Each entry needs `target` plus at least one of x/y/z.",
+          items: {
+            type: "object",
+            properties: {
+              target: { type: "string", description: "Target id: 's0'..'s11' (skaters) or 'pk' (puck)." },
+              x: { type: "integer", minimum: -32768, maximum: 32767, description: "New X in whole pixels (as shown on the OSD). Omit to leave X unchanged." },
+              y: { type: "integer", minimum: -32768, maximum: 32767, description: "New Y in whole pixels. Omit to leave Y unchanged." },
+              z: { type: "integer", minimum: -32768, maximum: 32767, description: "New Z (height; 0 = on the ice) in whole pixels. Omit to leave Z unchanged." },
+            },
+            required: ["target"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["targets"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_freeze",
+    description:
+      "PURPOSE: Pin one or more NHL94 targets (s0-s11, pk) in place and stop all motion. " +
+      "USAGE: Use to hold positions during an experiment (freeze everyone, then test one interaction). Freezes each target's x/y/z at its CURRENT position and zeroes+freezes its velocity (xv/yv/zv). Counterpart: nhl94_unfreeze. To place THEN pin, nhl94_teleport first, then nhl94_freeze. To park bench players off-ice in one call use nhl94_park; to persist a freeze set across restarts use nhl94_rig. " +
+      "BEHAVIOR: DESTRUCTIVE: re-asserts the frozen values every frame until released; the game's own writes are overridden. Freezes live in the bridge and are cleared by reloading the Lua script or restarting BizHawk (use nhl94_rig to survive that). Positions are captured at call time (reads current x/y/z), so two round-trips total regardless of target count. Errors if a target is unknown or targets is empty. " +
+      "RETURNS: One line per target with the pinned x/y/z and a note that velocity was zeroed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targets: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", description: "Target id: 's0'..'s11' or 'pk'." },
+          description: "Targets to freeze in place.",
+        },
+      },
+      required: ["targets"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_unfreeze",
+    description:
+      "PURPOSE: Release the position+velocity freezes created by nhl94_freeze (or nhl94_park) for one or more targets. " +
+      "USAGE: Counterpart to nhl94_freeze/nhl94_park — pass the same targets to let them move again. To clear EVERY freeze in the bridge (including non-NHL94 ones) use bizhawk_unfreeze all=true. " +
+      "BEHAVIOR: Stops the per-frame re-writes for each target's x/y/z + xv/yv/zv; does NOT restore any prior value (memory keeps whatever the freeze last wrote until the game overwrites it). Unfreezing an address that isn't frozen is a no-op, so unfreezing a never-frozen (or park-only) target is harmless. Errors if a target is unknown or targets is empty. " +
+      "RETURNS: Per-target confirmation and the count of addresses released.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targets: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", description: "Target id: 's0'..'s11' or 'pk'." },
+          description: "Targets to unfreeze.",
+        },
+      },
+      required: ["targets"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_state",
+    description:
+      "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
+      "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Replaces hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes). Pass raw:true to also see the raw 16.16 hex and sub-pixel fraction. " +
+      "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
+      "RETURNS: A structured text block: per-target position/velocity/heading (with frozen markers), carrier, clock+period+play, camera scroll, and the frozen summary.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_park",
+    description:
+      "PURPOSE: Get every skater except the one(s) under study off the ice and pinned, in one call — the standard 'clear the rink' experiment rig. " +
+      "USAGE: Pass `keep` with the skaters to leave alone; all other skaters (s0-s11) are teleported to an off-ice latitude, spread out in X, and frozen there (position + zeroed velocity). The puck is never touched. Release with nhl94_unfreeze on the parked targets, or apply a clean nhl94_rig. Unlike nhl94_freeze (which pins at CURRENT position, incl. z), park commands off-ice positions and leaves z alone. " +
+      "BEHAVIOR: DESTRUCTIVE: freezes x/y and zeroes+freezes xv/yv/zv for each parked skater every frame until released (5 freezes each). One atomic memory_ops round-trip. Positions are commanded (no read needed). Errors if every skater is in `keep` (nothing to park) or a `keep`/coordinate value is invalid. " +
+      "RETURNS: A summary (count, y latitude, X range, kept list) plus the per-skater X assignments.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keep: {
+          type: "array",
+          items: { type: "string", description: "Skater id 's0'..'s11' to leave alone." },
+          description: "Skaters to leave in place (default none — parks all 12).",
+        },
+        y: { type: "integer", minimum: -32768, maximum: 32767, default: -300, description: "Off-ice Y latitude to park at (default -300)." },
+        x_start: { type: "integer", minimum: -32768, maximum: 32767, default: -160, description: "X of the first parked skater (default -160)." },
+        x_spacing: { type: "integer", default: 32, description: "X gap between parked skaters (default 32)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_rig",
+    description:
+      "PURPOSE: Save, apply, list, and delete named NHL94 'rigs' — a savestate plus the exact freeze set active when it was saved — so an experiment setup survives daemon/BizHawk restarts and can be re-applied atomically. " +
+      "USAGE: `save {name}` after arranging a scenario (positions frozen, clock set, etc.); `apply {name}` to restore it later (even in a fresh session); `list` to see saved rigs; `delete {name}` to remove one. This is the durable alternative to hand re-applying freezes after loading a state, and the fix for stale-freeze contamination (apply clears all freezes first). Rigs are namespaced by ROM hash. " +
+      "BEHAVIOR: `save` writes a savestate + JSON metadata to the server's rig store (DESTRUCTIVE to any same-named rig). `apply` is atomic: clears ALL freezes, loads the savestate paused, then re-asserts the saved freeze set in one batch; it errors before touching anything if the rig's ROM hash doesn't match the running ROM. `delete` removes the files. Errors on a missing name (apply/delete) or an invalid name. " +
+      "RETURNS: `save`/`apply` a confirmation with freeze count; `list` the rigs with freeze counts, timestamps, and ROM-match flags; `delete` a confirmation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["save", "apply", "list", "delete"], description: "Which rig operation to perform." },
+        name: { type: "string", description: "Rig name (required for save/apply/delete; ignored for list). 1-64 chars: letters, digits, dot, underscore, hyphen." },
+        note: { type: "string", description: "Optional free-text note stored with the rig (save only)." },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_possession",
+    description:
+      "PURPOSE: Give the puck to a skater (or make it loose) without fighting the game's carry logic. " +
+      "USAGE: `target:'sN'` teleports the puck onto skater sN's position so the game's own proximity-pickup makes sN the carrier — nothing needs to 'stick'. `target:'none'` writes 'nobody' to the carrier word for a loose puck. `hold:true` additionally freezes the carrier word so possession can't change (EMPIRICAL — may not hold against the game's per-frame rewrite; verify live). Every call first releases any prior carrier hold. Side benefit: the camera follows the puck/carrier, so `target:'sN'` also eases the camera onto sN. " +
+      "BEHAVIOR: DESTRUCTIVE: moves the puck and/or writes the carrier word (one atomic memory_ops). For `target:'sN'` reads sN's x/y first (one extra round-trip). Errors if target is not 's0'..'s11' or 'none'. " +
+      "RETURNS: What was done — puck recipient and destination, and whether the carrier is held.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "'s0'..'s11' to give the puck to that skater, or 'none' for a loose puck." },
+        hold: { type: "boolean", default: false, description: "Also freeze the carrier word so possession can't change (empirical — verify it holds)." },
+      },
+      required: ["target"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_clock",
+    description:
+      "PURPOSE: Set, freeze, or release the NHL94 game clock. " +
+      "USAGE: `set` writes the clock (accepts 'MM:SS' or raw seconds); `freeze:true` stops time so nothing expires mid-experiment (freezes at the just-set value, or the current value if no `set`); `release:true` lets it run again. Combine `set` + `freeze` to set-and-hold in one call. This owns the correct clock address so you never guess it. " +
+      "BEHAVIOR: DESTRUCTIVE: writes/freezes the clock word (one atomic memory_ops). At least one of set/freeze/release is required; freeze and release are mutually exclusive. `set`/clock values must be 0:00-59:59. " +
+      "RETURNS: A confirmation of the clock value and freeze state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        set: { type: ["string", "integer"], description: "New clock as 'MM:SS' (e.g. '19:59') or seconds (0-3599)." },
+        freeze: { type: "boolean", description: "Freeze the clock at the set/current value." },
+        release: { type: "boolean", description: "Release a frozen clock." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_camera",
+    description:
+      "PURPOSE: Control the NHL94 camera scroll — pin it at a chosen position or release it. " +
+      "USAGE: The camera is a FOLLOWER that eases toward the puck/carrier each frame. The reliable way to center a skater is focus-steering: give them the puck (nhl94_possession target:'sN') and the camera eases to them. This tool's direct `pin` freezes Vpos and/or Hpos at chosen scroll values (EMPIRICAL — the game rewrites the scroll every frame, so a pin is a freeze-vs-game fight that may jitter; verify live). `release` unfreezes both camera words. Read the current camera with nhl94_state. " +
+      "BEHAVIOR: DESTRUCTIVE: freezes/unfreezes the camera scroll words (one atomic memory_ops). Exactly one of pin/release. Pin values are validated against the rink-edge clamps: v ∈ [-199,256], h ∈ [-59,61]. " +
+      "RETURNS: A confirmation of the pinned axes or the release.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pin: {
+          type: "object",
+          properties: {
+            v: { type: "integer", minimum: -199, maximum: 256, description: "Vertical scroll (Vpos) to pin. Omit to leave the Y camera live." },
+            h: { type: "integer", minimum: -59, maximum: 61, description: "Horizontal scroll (Hpos) to pin. Omit to leave the X camera live." },
+          },
+          additionalProperties: false,
+          description: "Freeze the camera at these scroll values (at least one of v/h).",
+        },
+        release: { type: "boolean", description: "Unfreeze both camera scroll words." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 function ok(text: string) {
@@ -1295,8 +1488,100 @@ async function currentRomHash(bh: BizhawkServer): Promise<string> {
   return info.rom_hash && info.rom_hash !== "unavailable" ? info.rom_hash : "unknown-rom";
 }
 
+// Named NHL94 rigs (savestate + captured freeze set), namespaced per ROM hash
+// under $MCP_BIZHAWK_RIG_DIR or ~/.mcp-bizhawk/rigs. Read at call time so tests
+// can override the dir.
+interface RigFreeze { address: number; width: string; value: number; domain?: string }
+interface Rig {
+  name: string;
+  rom_md5: string;
+  created_at: string;
+  savestate_path: string;
+  freezes: RigFreeze[];
+  freeze_count: number;
+  note?: string;
+}
+function rigRoot(): string {
+  return process.env.MCP_BIZHAWK_RIG_DIR ?? path.join(os.homedir(), ".mcp-bizhawk", "rigs");
+}
+function rigName(name: unknown): string {
+  if (typeof name !== "string") throw new Error("rig name must be a string");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+    throw new Error("rig name must be 1-64 chars of letters, digits, dot, underscore, hyphen");
+  }
+  return name;
+}
+function rigJsonPath(hash: string, name: string): string {
+  return path.join(rigRoot(), hash, `${name}.json`);
+}
+function availableRigs(hash: string): string {
+  const dir = path.join(rigRoot(), hash);
+  if (!fs.existsSync(dir)) return "No rigs saved for this ROM.";
+  const names = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
+  return names.length ? `Available: ${names.join(", ")}.` : "No rigs saved for this ROM.";
+}
+
+// NHL94 tools address absolute M68K bus locations (0xFFxxxx). Resolve the
+// right domain once per BizhawkServer: prefer "M68K BUS" (base 0, addresses
+// used as-is); fall back to "68K RAM" (base 0xFF0000, addresses rebased). The
+// choice is cached per-bh so tests (fresh bh each harness) don't leak.
+const nhlDomainCache = new WeakMap<BizhawkServer, string>();
+async function nhlDomain(bh: BizhawkServer): Promise<string> {
+  const hit = nhlDomainCache.get(bh);
+  if (hit) return hit;
+  const domains = await bh.call<string[]>("list_memory_domains");
+  const d = domains.includes("M68K BUS") ? "M68K BUS"
+    : domains.includes("68K RAM") ? "68K RAM"
+    : null;
+  if (!d) throw new Error("no Genesis 68K memory domain (M68K BUS / 68K RAM) on the loaded core");
+  nhlDomainCache.set(bh, d);
+  return d;
+}
+// Rebase an absolute M68K bus address into the resolved domain's offset space.
+function nhlAddr(abs: number, domain: string): number {
+  return domain === "68K RAM" ? abs - 0xff0000 : abs;
+}
+// Rebase every op's address for the resolved domain (builders emit absolute).
+function nhlRebase(ops: nhl94.MemOp[], domain: string): nhl94.MemOp[] {
+  return ops.map((o) => ({ ...o, address: nhlAddr(o.address, domain) }));
+}
+
+// The JD build is NHL94-focused: expose all nhl94_* tools plus a curated core
+// of bizhawk_* tools, and hide the rest to keep the surface small (the hidden
+// raw-memory/freeze tools are the endian/width footguns nhl94_* replaces). All
+// tools still DISPATCH — this only filters what tools/list advertises — so
+// nhl94_* internals and the BIZHAWK_ALL_TOOLS=1 override keep working.
+const EXPOSED_BIZHAWK = new Set([
+  "bizhawk_ping",
+  "bizhawk_get_info",
+  "bizhawk_pause",
+  "bizhawk_unpause",
+  "bizhawk_frame_advance",
+  "bizhawk_reset",
+  "bizhawk_press_buttons",
+  "bizhawk_play_input_sequence",
+  "bizhawk_screenshot",
+  "bizhawk_save_state",
+  "bizhawk_load_state",
+  "bizhawk_read_many",
+  "bizhawk_disassemble",
+  "bizhawk_eval_lua",
+  "bizhawk_trace_start",
+  "bizhawk_trace_stop",
+  "bizhawk_trace_status",
+  "bizhawk_trace_tail",
+  "bizhawk_phys_trace_start",
+  "bizhawk_phys_trace_stop",
+  "bizhawk_phys_trace_status",
+  "bizhawk_phys_trace_tail",
+]);
+function exposedTools(): Tool[] {
+  if (process.env.BIZHAWK_ALL_TOOLS) return TOOLS;
+  return TOOLS.filter((t) => t.name.startsWith("nhl94_") || EXPOSED_BIZHAWK.has(t.name));
+}
+
 export function registerTools(server: Server, bh: BizhawkServer): void {
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: exposedTools() }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
@@ -1698,6 +1983,319 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           return `${o.op === "freeze" ? "Froze" : "Wrote"} ${loc} = ${fmtHex(o.value)}`;
         });
         return ok(`${lines.join("\n")}\n${r.applied} op(s) applied in one frame. ${r.frozen_count} address(es) frozen.`);
+      }
+
+      // ── NHL94 game-semantic tools ───────────────────────────────────────
+      case "nhl94_teleport": {
+        const entries = p.targets as nhl94.TeleportEntry[];
+        const domain = await nhlDomain(bh);
+        // Auto-detach: if pk is being teleported and a skater carries it, write
+        // "nobody" to the carrier word first (else carry logic snaps it back).
+        const hasPk = entries.some((e) => e.target === "pk");
+        let carrier = -1;
+        let detach = false;
+        if (hasPk) {
+          carrier = await bh.call<number>("read16", { address: nhlAddr(nhl94.G.carrier, domain), byteorder: "be", domain });
+          detach = carrier >= 0 && carrier <= 11;
+        }
+        const ops = nhl94.teleportOps(entries, detach); // validates; throws before any write
+        await bh.call("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const lines = entries.map((e) => {
+          const parts = (["x", "y", "z"] as const)
+            .filter((ax) => e[ax] !== undefined)
+            .map((ax) => `${ax}=${e[ax]}`);
+          let line = `Teleported ${e.target} → ${parts.join(" ")}`;
+          if (e.target === "pk") line += detach ? ` (detached from s${carrier})` : " (loose puck)";
+          return line;
+        });
+        return ok(lines.join("\n"));
+      }
+
+      case "nhl94_freeze": {
+        const targets = p.targets as string[];
+        if (!targets.length) throw new Error("targets must be a non-empty array");
+        const domain = await nhlDomain(bh);
+        const reads = targets.flatMap((t) => {
+          const { base } = nhl94.resolveTarget(t); // validates target
+          return (["x", "y", "z"] as const).map((ax) => ({
+            name: `${t}.${ax}`, address: nhlAddr(base + nhl94.OFF[ax], domain), width: "s32_be", domain,
+          }));
+        });
+        const vals = await bh.call<Record<string, number>>("read_many", { reads });
+        const positions: Record<string, { x: number; y: number; z: number }> = {};
+        for (const t of targets) {
+          positions[t] = { x: vals[`${t}.x`], y: vals[`${t}.y`], z: vals[`${t}.z`] };
+        }
+        const ops = nhl94.freezeOps(targets, positions);
+        const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const whole = (raw: number) => nhl94.fromFixed(raw >>> 0).whole;
+        const lines = targets.map((t) => {
+          const pos = positions[t];
+          return `Froze ${t} in place @ (x=${whole(pos.x)},y=${whole(pos.y)},z=${whole(pos.z)}); zeroed xv/yv/zv`;
+        });
+        return ok(`${lines.join("\n")}\n${r.frozen_count} address(es) frozen.`);
+      }
+
+      case "nhl94_unfreeze": {
+        const targets = p.targets as string[];
+        if (!targets.length) throw new Error("targets must be a non-empty array");
+        const domain = await nhlDomain(bh);
+        const ops = nhl94.unfreezeOps(targets); // validates targets
+        const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const lines = targets.map((t) => `Released freezes on ${t}`);
+        return ok(`${lines.join("\n")}\n${r.frozen_count} address(es) still frozen.`);
+      }
+
+      case "nhl94_state": {
+        const raw = p.raw === true;
+        const domain = await nhlDomain(bh);
+        const fields = [
+          { name: "x", offset: nhl94.OFF.x, width: "s32_be" },
+          { name: "y", offset: nhl94.OFF.y, width: "s32_be" },
+          { name: "z", offset: nhl94.OFF.z, width: "s32_be" },
+          { name: "xv", offset: nhl94.OFF.xv, width: "s16_be" },
+          { name: "yv", offset: nhl94.OFF.yv, width: "s16_be" },
+          { name: "zv", offset: nhl94.OFF.zv, width: "s16_be" },
+          { name: "fdir", offset: nhl94.OFF.fdir, width: "u16_be" },
+          { name: "frame", offset: nhl94.OFF.frame, width: "u16_be" },
+        ];
+        // Slots 0..14 in one contiguous read (12 skaters + 2 unused + puck@14).
+        const recs = await bh.call<Record<string, number>[]>("read_struct_array", {
+          base: nhlAddr(nhl94.SORTCORDS, domain), stride: nhl94.SCSIZE, count: 15, fields,
+          domain,
+        });
+        const byIndex = new Map<number, Record<string, number>>(recs.map((r) => [r._index, r]));
+        const gReads = (["carrier", "gameclock", "gsp", "gmode", "vpos", "hpos", "yleader"] as const).map((k) => ({
+          name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u16_be" : (k === "vpos" || k === "hpos" || k === "yleader" ? "s16_be" : "u16_be"), domain,
+        }));
+        const gv = await bh.call<Record<string, number>>("read_many", { reads: gReads });
+        const frozen = await bh.call<{ frozen?: { address: number; width: string; value: number; domain?: string }[] }>("list_frozen");
+        const frozenList = Array.isArray(frozen.frozen) ? frozen.frozen : [];
+
+        // Map frozen addresses onto {target, field}; tally mapped/unmapped.
+        const frozenByTarget = new Map<string, Set<string>>();
+        let mapped = 0, unmapped = 0;
+        for (const f of frozenList) {
+          const m = nhl94.mapFrozenAddress(f.address, f.domain ?? domain);
+          if (!m) { unmapped++; continue; }
+          mapped++;
+          if (!frozenByTarget.has(m.target)) frozenByTarget.set(m.target, new Set());
+          frozenByTarget.get(m.target)!.add(m.field);
+        }
+        const mark = (target: string, field: string) => frozenByTarget.get(target)?.has(field) ? "*" : "";
+
+        const whole = (rawv: number) => nhl94.fromFixed(rawv >>> 0).whole;
+        const targetLine = (label: string, idx: number) => {
+          const rec = byIndex.get(idx);
+          if (!rec) return `${label}: (no data)`;
+          const pos = (["x", "y", "z"] as const)
+            .map((ax) => {
+              const w = whole(rec[ax]);
+              if (!raw) return `${ax}=${w}${mark(label, ax)}`;
+              const f = nhl94.fromFixed(rec[ax] >>> 0);
+              return `${ax}=${w}${mark(label, ax)}(0x${(rec[ax] >>> 0).toString(16).padStart(8, "0")},frac=${f.frac})`;
+            })
+            .join(" ");
+          const vel = (["xv", "yv", "zv"] as const).map((v) => `${v}=${rec[v]}${mark(label, v)}`).join(" ");
+          return `${label}: ${pos} | ${vel} | dir=${rec.fdir} frame=${rec.frame}`;
+        };
+
+        const lines: string[] = [];
+        for (let i = 0; i <= 11; i++) lines.push(targetLine(`s${i}`, i));
+        lines.push(targetLine("pk", nhl94.PUCK_SLOT));
+
+        const carrier = gv.carrier >= 0 && gv.carrier <= 11
+          ? `s${gv.carrier}`
+          : `none (0x${(gv.carrier >>> 0).toString(16).toUpperCase()})`;
+        const period = ["1st", "2nd", "3rd", "OT"][gv.gsp] ?? `OT${gv.gsp - 2}`;
+        const play = (gv.gmode & 1) ? "stopped" : "running";
+        lines.push("");
+        lines.push(`carrier: ${carrier}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)   period: ${period}   play: ${play}`);
+        lines.push(`camera: vpos=${gv.vpos} hpos=${gv.hpos} yleader=${gv.yleader}`);
+        lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);
+        return ok(lines.join("\n"));
+      }
+
+      case "nhl94_park": {
+        const keep = (p.keep as string[] | undefined) ?? [];
+        for (const k of keep) nhl94.resolveTarget(k); // validate keep entries
+        const y = (p.y as number | undefined) ?? -300;
+        const xStart = (p.x_start as number | undefined) ?? -160;
+        const xSpacing = (p.x_spacing as number | undefined) ?? 32;
+        const domain = await nhlDomain(bh);
+        const { ops, assignments } = nhl94.parkOps(keep, y, xStart, xSpacing); // validates
+        const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const xs = assignments.map((a) => a.x);
+        const head = `Parked ${assignments.length} skater(s) at y=${y} (x ${Math.min(...xs)}..${Math.max(...xs)}, spacing ${xSpacing})` +
+          (keep.length ? `; kept ${keep.join(", ")}` : "");
+        const detail = assignments.map((a) => `${a.target} x=${a.x}`).join(", ");
+        return ok(`${head}\n${detail}\n${r.frozen_count} address(es) frozen.`);
+      }
+
+      case "nhl94_rig": {
+        const action = p.action as string;
+        const hash = await currentRomHash(bh);
+
+        if (action === "list") {
+          const root = rigRoot();
+          const rows: string[] = [];
+          if (fs.existsSync(root)) {
+            for (const hd of fs.readdirSync(root)) {
+              const dir = path.join(root, hd);
+              if (!fs.statSync(dir).isDirectory()) continue;
+              for (const fn of fs.readdirSync(dir)) {
+                if (!fn.endsWith(".json")) continue;
+                try {
+                  const rig = JSON.parse(fs.readFileSync(path.join(dir, fn), "utf8")) as Rig;
+                  const flag = rig.rom_md5 === hash ? "" : " [other ROM]";
+                  rows.push(`${rig.name} — ${rig.freeze_count} freeze(s), ${rig.created_at}${flag}`);
+                } catch { /* skip unreadable */ }
+              }
+            }
+          }
+          return ok(rows.length ? rows.join("\n") : "(no rigs saved)");
+        }
+
+        const name = rigName(p.name);
+        const jsonPath = rigJsonPath(hash, name);
+
+        if (action === "save") {
+          fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+          const savestatePath = path.join(path.dirname(jsonPath), `${name}.State`);
+          await bh.call("save_state", { path: savestatePath });
+          const fl = await bh.call<{ frozen?: RigFreeze[] }>("list_frozen");
+          const freezes = Array.isArray(fl.frozen) ? fl.frozen : [];
+          const rig: Rig = {
+            name, rom_md5: hash, created_at: new Date().toISOString(),
+            savestate_path: savestatePath, freezes, freeze_count: freezes.length,
+            ...(typeof p.note === "string" ? { note: p.note } : {}),
+          };
+          fs.writeFileSync(jsonPath, JSON.stringify(rig, null, 2));
+          return ok(`Saved rig "${name}" (${freezes.length} freeze(s)) for ROM ${hash}.`);
+        }
+
+        if (action === "apply") {
+          if (!fs.existsSync(jsonPath)) {
+            throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash)}`);
+          }
+          const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as Rig;
+          if (rig.rom_md5 !== hash) {
+            throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
+          }
+          await bh.call("unfreeze", { all: true });
+          const ld = await bh.call<{ path: string }>("load_state", { path: rig.savestate_path, pause: true });
+          let frozenCount = 0;
+          if (rig.freezes.length) {
+            const ops = rig.freezes.map((f) => ({
+              op: "freeze" as const, address: f.address, value: f.value, width: f.width,
+              ...(f.domain ? { domain: f.domain } : {}),
+            }));
+            const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops });
+            frozenCount = r.frozen_count;
+          }
+          return ok(`Applied rig "${name}": loaded ${ld.path} (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
+        }
+
+        // delete
+        if (!fs.existsSync(jsonPath)) {
+          throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash)}`);
+        }
+        const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as Rig;
+        fs.rmSync(jsonPath, { force: true });
+        if (rig.savestate_path) fs.rmSync(rig.savestate_path, { force: true });
+        return ok(`Deleted rig "${name}".`);
+      }
+
+      case "nhl94_possession": {
+        const target = p.target as string;
+        const hold = p.hold === true;
+        const domain = await nhlDomain(bh);
+        const carrierAddr = nhlAddr(nhl94.G.carrier, domain);
+        // Every call releases any prior hold first, then applies the new state.
+        const ops: nhl94.MemOp[] = [{ op: "unfreeze", address: carrierAddr, width: "u16_be" }];
+        let summary: string;
+        if (target === "none") {
+          if (hold) ops.push({ op: "freeze", address: carrierAddr, value: 0xffff, width: "u16_be" });
+          else ops.push({ op: "write", address: carrierAddr, value: 0xffff, width: "u16_be" });
+          summary = `Puck set loose (nobody carrying); carrier hold: ${hold ? "on" : "off"}`;
+        } else {
+          const { slot, base } = nhl94.resolveTarget(target); // validates sN
+          if (target === "pk" || slot > 11) throw new Error("possession target must be 's0'..'s11' or 'none'");
+          const pos = await bh.call<Record<string, number>>("read_many", {
+            reads: [
+              { name: "x", address: nhlAddr(base + nhl94.OFF.x, domain), width: "s32_be", domain },
+              { name: "y", address: nhlAddr(base + nhl94.OFF.y, domain), width: "s32_be", domain },
+            ],
+          });
+          const pkBase = nhl94.PUCK_BASE;
+          // Assign the carrier word directly: proximity pickup alone doesn't
+          // transfer when another skater already carries (its carry logic yanks
+          // the puck back every frame). hold freezes it; otherwise a one-shot
+          // write, which sticks because the puck is placed on this skater in the
+          // same batch, so the game re-derives the same carrier next frame.
+          if (hold) ops.push({ op: "freeze", address: carrierAddr, value: slot, width: "u16_be" });
+          else ops.push({ op: "write", address: carrierAddr, value: slot, width: "u16_be" });
+          ops.push({ op: "write", address: nhlAddr(pkBase + nhl94.OFF.x, domain), value: pos.x >>> 0, width: "u32_be" });
+          ops.push({ op: "write", address: nhlAddr(pkBase + nhl94.OFF.y, domain), value: pos.y >>> 0, width: "u32_be" });
+          const w = (raw: number) => nhl94.fromFixed(raw >>> 0).whole;
+          summary = `Puck given to ${target} (teleported to x=${w(pos.x)},y=${w(pos.y)}); carrier hold: ${hold ? "on" : "off"}`;
+        }
+        await bh.call("memory_ops", { ops, domain });
+        return ok(summary);
+      }
+
+      case "nhl94_clock": {
+        const hasSet = p.set !== undefined;
+        const freeze = p.freeze === true;
+        const release = p.release === true;
+        if (freeze && release) throw new Error("freeze and release are mutually exclusive");
+        if (!hasSet && !freeze && !release) throw new Error("pass at least one of set, freeze, release");
+        const domain = await nhlDomain(bh);
+        const clockAddr = nhlAddr(nhl94.G.gameclock, domain);
+        const ops: nhl94.MemOp[] = [];
+        let seconds: number | undefined;
+        if (hasSet) seconds = nhl94.parseClock(p.set as string | number);
+
+        if (release) {
+          ops.push({ op: "unfreeze", address: clockAddr, width: "u16_be" });
+        } else if (freeze) {
+          if (seconds === undefined) {
+            seconds = await bh.call<number>("read16", { address: clockAddr, byteorder: "be", domain });
+          }
+          ops.push({ op: "freeze", address: clockAddr, value: seconds, width: "u16_be" });
+        } else {
+          ops.push({ op: "write", address: clockAddr, value: seconds as number, width: "u16_be" });
+        }
+        await bh.call("memory_ops", { ops, domain });
+        const state = release ? "released" : freeze ? "frozen" : "set";
+        const shown = seconds !== undefined ? ` to ${nhl94.formatClock(seconds)}` : "";
+        return ok(`Clock ${state}${shown}.`);
+      }
+
+      case "nhl94_camera": {
+        const pin = p.pin as { v?: number; h?: number } | undefined;
+        const release = p.release === true;
+        if ((pin && release) || (!pin && !release)) {
+          throw new Error("pass exactly one of pin or release");
+        }
+        const domain = await nhlDomain(bh);
+        const vAddr = nhlAddr(nhl94.G.vpos, domain);
+        const hAddr = nhlAddr(nhl94.G.hpos, domain);
+        const ops: nhl94.MemOp[] = [];
+        if (release) {
+          ops.push({ op: "unfreeze", address: vAddr, width: "u16_be" });
+          ops.push({ op: "unfreeze", address: hAddr, width: "u16_be" });
+          await bh.call("memory_ops", { ops, domain });
+          return ok("Camera released.");
+        }
+        if (pin!.v === undefined && pin!.h === undefined) {
+          throw new Error("pin needs at least one of v, h");
+        }
+        const parts: string[] = [];
+        if (pin!.v !== undefined) { ops.push({ op: "freeze", address: vAddr, value: nhl94.toWord(pin!.v), width: "u16_be" }); parts.push(`v=${pin!.v}`); }
+        if (pin!.h !== undefined) { ops.push({ op: "freeze", address: hAddr, value: nhl94.toWord(pin!.h), width: "u16_be" }); parts.push(`h=${pin!.h}`); }
+        await bh.call("memory_ops", { ops, domain });
+        return ok(`Camera pinned @ ${parts.join(" ")}`);
       }
 
       case "bizhawk_eval_lua": {

@@ -1,6 +1,6 @@
 {
   "name": "mcp-bizhawk",
-  "version": "2026.7.15-jd",
+  "version": "2026.7.16-jd",
   "description": "MCP server for BizHawk — drive NES/SNES/GB/GBC/GBA/Genesis/N64/PSX/Saturn and more through one Lua bridge",
   "license": "MIT",
   "type": "module",

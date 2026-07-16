@@ -1,5 +1,18 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.15-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.16-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.16-jd changes (server-side only; bridge unchanged): new NHL94
+--   game-semantic MCP tools (nhl94_teleport / _freeze / _unfreeze / _state /
+--   _park / _rig / _possession / _clock / _camera). They translate game nouns
+--   (skaters s0-s11, puck pk) and whole-pixel coords into 68K addresses/widths/
+--   endianness server-side and drive the EXISTING bridge commands (memory_ops /
+--   read_struct_array / read_many / list_frozen / save_state / load_state) — no
+--   new bridge protocol. Also trims the advertised tool surface to the nhl94_*
+--   set plus a curated bizhawk_* core (ping/get_info/pause/unpause/frame_advance/
+--   reset/press_buttons/play_input_sequence/screenshot/save_state/load_state/
+--   read_many/disassemble/eval_lua + the trace and phys_trace suites); the rest are hidden from
+--   tools/list but still dispatch, and BIZHAWK_ALL_TOOLS=1 re-exposes everything.
+--   Bridge bumped in lockstep to keep the OSD version line collapsed.
 --
 -- v2026.7.15-jd changes (OSD paused-refresh + window hide/show):
 --   * End key now HIDES/SHOWS the OSD window (WinForms Hide()/Show(), reachable
@@ -474,7 +487,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.15-jd",
+    version    = "2026.7.16-jd",
     pause_safe = true,
 }
 
