@@ -1,0 +1,1 @@
+../../../nvnhl94-2/docs/rom-reference/RETAIL_OFFSETS.md

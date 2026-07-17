@@ -282,3 +282,48 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     await h.close();
   }
 });
+
+test("nhl94_state reports RAM-backed faceoff line-change window", async () => {
+  const rec = (i) => ({
+    _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0,
+    attr: 0, anim: 0, spanum: 0, spacnt: 0,
+  });
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
+    read_many: (p) => {
+      assert.ok(p.reads.some((r) => r.name === "faceoff_window_latch" && r.address === 0xffc304 && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "home_line" && r.address === 0xffc6e5 && r.width === "u8"));
+      assert.ok(p.reads.some((r) => r.name === "away_line" && r.address === 0xffca48 && r.width === "u8"));
+      assert.ok(!p.reads.some((r) => r.address === 0xffc2ee), "line-change detector must not read the rejected C2EE flag");
+      return {
+        carrier: 0xff02,
+        gameclock: 300,
+        gsp: 0,
+        gmode: 1,
+        vpos: 0,
+        hpos: 0,
+        yleader: 0,
+        session: 0xff,
+        shotplayer: -1,
+        lastplayer: -1,
+        passdir: 0,
+        passspeed: 0,
+        faceoff_window_latch: 0x2710,
+        home_line: 2,
+        away_line: 0,
+      };
+    },
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
+    assert.match(text, /phase: faceoff_line_change/);
+    assert.match(text, /phase_label: faceoff \/ line-change \(pre-drop\)/);
+    assert.match(text, /faceoff_window: active=true latch=0x2710\(10000\) home=Chk\(2\) away=Sc1\(0\)/);
+    assert.match(text, /evidence: latch_nonzero=true stoppage_gate_closed=true puck_loose=true/);
+    assert.doesNotMatch(text, /c2ea_bit8/);
+  } finally {
+    await h.close();
+  }
+});

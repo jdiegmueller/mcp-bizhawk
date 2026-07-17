@@ -18,12 +18,16 @@ import {
   classifyPhase,
   SESSION_BYTE,
   RECIPES_GUIDE,
+  lineLabel,
+  G,
 } from "../dist/nhl94.js";
 
 test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool semantics", () => {
   assert.match(RECIPES_GUIDE, /read once .* do not repeat before every call/);
   assert.match(RECIPES_GUIDE, /nhl94_unfreeze \{"all":true\}/);
   assert.match(RECIPES_GUIDE, /Velocity xv\/yv\/zv uses RAW signed 16-bit/);
+  assert.match(RECIPES_GUIDE, /nhl94_fields — semantic field read\/write\/freeze\/unfreeze/);
+  assert.match(RECIPES_GUIDE, /nhl94_stage — batch clean\/rig\/park\/place\/possession\/field setup/);
   assert.match(RECIPES_GUIDE, /assign the carrier directly/);
   assert.match(RECIPES_GUIDE, /Clock freeze .* does NOT close the collision stoppage gate/s);
   assert.match(RECIPES_GUIDE, /OPEN only proves this ONE prerequisite is clear/);
@@ -46,6 +50,20 @@ test("classifyPhase maps session byte + gmode bit0 to the coarse phase buckets",
   // Anything unexpected degrades gracefully, echoing the raw byte.
   assert.match(classifyPhase(0x42, false), /^unknown \(session=0x42\)/);
   assert.equal(SESSION_BYTE, 0xffc735);
+});
+
+test("lineLabel maps selected-line bytes and preserves unknowns via caller raw fields", () => {
+  assert.equal(lineLabel(0), "Sc1");
+  assert.equal(lineLabel(1), "Sc2");
+  assert.equal(lineLabel(2), "Chk");
+  assert.equal(lineLabel(3), "unknown");
+  assert.equal(lineLabel(255), "unknown");
+});
+
+test("global table exposes faceoff-window and selected-line addresses", () => {
+  assert.equal(G.faceoff_window_latch, 0xffc304);
+  assert.equal(G.home_line, 0xffc6e5);
+  assert.equal(G.away_line, 0xffca48);
 });
 
 test("resolveField maps known names to offset/width and flags fixed-point axes", () => {

@@ -101,3 +101,76 @@ test("nhl94_rig apply on a missing name errors with available rigs", async () =>
     fs.rmSync(rigDir, { recursive: true, force: true });
   }
 });
+
+test("nhl94_stage rejects puck placement with skater possession", async () => {
+  const h = await startHarness({ list_memory_domains: () => DOMAINS });
+  try {
+    await assert.rejects(
+      h.client.callTool({
+        name: "nhl94_stage",
+        arguments: {
+          place: [{ target: "pk", x: 0, y: 0, xv: 25000 }],
+          possession: "s0",
+        },
+      }),
+      /pk.*possession/i,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_stage clears freezes before applying a rig", async () => {
+  const rigDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-stage-rig-"));
+  process.env.MCP_BIZHAWK_RIG_DIR = rigDir;
+  const h = await startHarness({
+    get_info: () => ({ rom_hash: "ABC123" }),
+    list_memory_domains: () => DOMAINS,
+    save_state: (p) => ({ path: p.path }),
+    load_state: (p) => ({ path: p.path, paused: true }),
+    unfreeze: () => ({ frozen_count: 0 }),
+    list_frozen: () => ({ frozen: [{ address: 0xffb04a, width: "s32_be", value: 100, domain: "M68K BUS" }] }),
+    memory_ops: (p) => ({ frozen_count: p.ops.length }),
+  });
+  try {
+    await h.client.callTool({ name: "nhl94_rig", arguments: { action: "save", name: "stagebase" } });
+    h.bridge.calls.length = 0;
+    const res = await h.client.callTool({
+      name: "nhl94_stage",
+      arguments: { clear_freezes: true, rig: "stagebase", settle_frames: 0 },
+    });
+    assert.match(textOf(res), /Applied rig "stagebase"/);
+    const methods = h.bridge.calls.map((c) => c.method);
+    const unfreezeAt = methods.indexOf("unfreeze");
+    const loadAt = methods.indexOf("load_state");
+    const refreezeAt = methods.indexOf("memory_ops");
+    assert.ok(unfreezeAt !== -1 && loadAt !== -1 && refreezeAt !== -1);
+    assert.ok(unfreezeAt < loadAt, "explicit clear_freezes must run before rig load");
+    assert.ok(loadAt < refreezeAt, "rig freeze table must be restored after load");
+  } finally {
+    await h.close();
+    delete process.env.MCP_BIZHAWK_RIG_DIR;
+    fs.rmSync(rigDir, { recursive: true, force: true });
+  }
+});
+
+test("nhl94_stage supports fdir-only placement without teleport fields", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: (p) => {
+      assert.deepEqual(p.ops, [
+        { op: "write", address: 0xffb04a + 0x54, value: 4, width: "u16_be" },
+      ]);
+      return { applied: 1, frozen_count: 0 };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_stage",
+      arguments: { place: [{ target: "s0", fdir: 4 }] },
+    });
+    assert.match(textOf(res), /Placed 1 target\(s\) \(1 op\(s\)\)/);
+  } finally {
+    await h.close();
+  }
+});

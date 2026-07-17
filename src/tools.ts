@@ -1369,7 +1369,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
       "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For an unlisted entity field, pass its name or raw in-struct offset to nhl94_read; never compute the address yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context. A trailing `*` marks a frozen word.",
+      "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. When the faceoff-window latch at $FFC304 is nonzero, phase is the stable token `faceoff_line_change` and a `faceoff_window` line reports latch + selected lines (Sc1/Sc2/Chk). CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context except for the RAM-backed faceoff_line_change token. A trailing `*` marks a frozen word.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1401,6 +1401,83 @@ const TOOLS: Tool[] = [
           items: { type: "string" },
           description: "Field names or raw '+0xNN[:width]' offsets (default: impact,impactp,pos,nopuck,pf,pf2,pf3,wgt8).",
         },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_fields",
+    description:
+      "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
+      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, read global.clock plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
+      "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words. Write/freeze ops default to post-write readback so contested game rewrites are visible. " +
+      "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ops: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              op: { type: "string", enum: ["read", "write", "freeze", "unfreeze"], description: "Per-field operation." },
+              target: { type: "string", description: "'s0'..'s11', 'pk', or 'global'." },
+              field: { type: "string", description: "Named field/global, e.g. fdir, lockout, carrier, clock, faceoff_window_latch." },
+              offset: { type: "string", description: "Raw entity-relative offset such as '0x71'. Requires allow_raw:true." },
+              address: { type: "string", description: "Raw absolute M68K bus address such as '0xFFC304'. Requires target:'global' and allow_raw:true." },
+              width: { type: "string", enum: WIDTH_ENUM, description: "Width for raw offsets/addresses. Defaults to u8 for raw entity offsets." },
+              value: { description: "Value for write/freeze. Named fields accept decoded values; raw fields use raw integer values." },
+              freeze: { type: "boolean", description: "For op:'write', freeze this field at the written value instead of a one-time write." },
+              allow_raw: { type: "boolean", description: "Required for raw offset/address operations." },
+            },
+            required: ["op", "target"],
+            additionalProperties: false,
+          },
+        },
+        readback: { type: "string", enum: ["post_write", "none"], default: "post_write", description: "Post-mutation RAM readback for write/freeze operations. Default post_write." },
+      },
+      required: ["ops"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_stage",
+    description:
+      "PURPOSE: Stage a compact NHL94 experiment setup in one high-level call: clear freezes, apply a rig, park skaters, place targets, set possession, write/freeze selected fields, optionally settle frames, and optionally read back. " +
+      "USAGE: Use when setting up RE experiments where ordering matters. `clear_freezes` runs before `rig` so a rig's saved freeze table is not destroyed. Do not combine puck placement with skater possession; possession snaps the puck to the carrier. " +
+      "BEHAVIOR: DESTRUCTIVE: mutates live emulator RAM/state. Operations run in deterministic order: clear freezes, rig, park, place, possession, fields, settle, readback. Default settle_frames is 0 for RE precision. " +
+      "RETURNS: A concise ordered summary of what was staged.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rig: { type: "string", description: "Named nhl94_rig to apply." },
+        clear_freezes: { type: "boolean", description: "Clear the bridge freeze table before other staging operations." },
+        park: {
+          type: "object",
+          properties: {
+            keep: { type: "array", items: { type: "string" }, description: "Skaters s0-s11 to leave alone." },
+          },
+          additionalProperties: false,
+        },
+        place: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              target: { type: "string" },
+              x: { type: "integer" }, y: { type: "integer" }, z: { type: "integer" },
+              xv: { type: "integer" }, yv: { type: "integer" }, zv: { type: "integer" },
+              fdir: { type: "integer" },
+            },
+            required: ["target"],
+            additionalProperties: false,
+          },
+        },
+        possession: { type: "string", description: "'s0'..'s11' or 'none'." },
+        fields: { type: "array", items: { type: "object" }, description: "nhl94_fields-style write/freeze ops without the op property; op defaults to write." },
+        settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0 },
+        readback: { type: "boolean", default: false },
       },
       additionalProperties: false,
     },
@@ -1675,6 +1752,112 @@ function nhlAddr(abs: number, domain: string): number {
 // Rebase every op's address for the resolved domain (builders emit absolute).
 function nhlRebase(ops: nhl94.MemOp[], domain: string): nhl94.MemOp[] {
   return ops.map((o) => ({ ...o, address: nhlAddr(o.address, domain) }));
+}
+
+const RAW_ADDR_RE = /^(0x[0-9a-fA-F]+|\d+)$/;
+
+function parseRawNumber(label: string, v: unknown): number {
+  if (typeof v === "number") {
+    if (!Number.isInteger(v) || v < 0) throw new Error(`${label} must be a non-negative integer`);
+    return v;
+  }
+  if (typeof v !== "string" || !RAW_ADDR_RE.test(v)) {
+    throw new Error(`${label} must be decimal or 0x-prefixed hex`);
+  }
+  return v.startsWith("0x") || v.startsWith("0X") ? parseInt(v, 16) : parseInt(v, 10);
+}
+
+interface NhlFieldRef {
+  label: string;
+  address: number;
+  width: string;
+  fixed: boolean;
+  field: string;
+  target: string;
+  global: boolean;
+}
+
+function globalWidth(field: string): string {
+  if (field === "gmode" || field === "session_byte" || field === "home_line" || field === "away_line") return "u8";
+  if (field === "vpos" || field === "hpos" || field === "yleader" || field === "shotplayer" || field === "lastplayer" || field === "passdir" || field === "passspeed") return "s16_be";
+  return "u16_be";
+}
+
+function resolveNhlFieldOp(op: Record<string, unknown>): NhlFieldRef {
+  const target = String(op.target ?? "");
+  const field = typeof op.field === "string" ? op.field : "";
+  const allowRaw = op.allow_raw === true;
+  const width = typeof op.width === "string" ? op.width : "u8";
+
+  if (target === "global") {
+    if (typeof op.address === "string" || typeof op.address === "number") {
+      if (!allowRaw) throw new Error(`raw global address ${String(op.address)} requires allow_raw:true`);
+      return { label: `global.${String(op.address)}`, address: parseRawNumber("address", op.address), width, fixed: false, field: String(op.address), target, global: true };
+    }
+    if (!field || !(field in nhl94.G)) {
+      throw new Error(`unknown global field "${field}" (use carrier, clock, gameclock, period, gsp, gmode, faceoff_window_latch, home_line, away_line; raw address requires allow_raw:true)`);
+    }
+    return { label: `global.${field}`, address: nhl94.G[field], width: globalWidth(field), fixed: false, field, target, global: true };
+  }
+
+  const { base } = nhl94.resolveTarget(target);
+  if (typeof op.offset === "string" || typeof op.offset === "number") {
+    if (!allowRaw) throw new Error(`raw entity offset ${String(op.offset)} requires allow_raw:true`);
+    const offset = parseRawNumber("offset", op.offset);
+    if (offset < 0 || offset >= nhl94.SCSIZE) throw new Error(`raw entity offset ${String(op.offset)} out of struct range 0..0x${(nhl94.SCSIZE - 1).toString(16)}`);
+    return { label: `${target}.${String(op.offset)}`, address: base + offset, width, fixed: false, field: String(op.offset), target, global: false };
+  }
+  if (!field || !(field in nhl94.OFF)) {
+    throw new Error(`unknown field "${field}" (use a named NHL94 field, or raw offset with allow_raw:true)`);
+  }
+  return {
+    label: `${target}.${field}`,
+    address: base + nhl94.OFF[field],
+    width: nhl94.FIELD_WIDTH[field] ?? "u16_be",
+    fixed: nhl94.FIXED_FIELDS.has(field),
+    field,
+    target,
+    global: false,
+  };
+}
+
+function lineValue(v: unknown): number {
+  if (typeof v === "string") {
+    const key = v.toLowerCase();
+    if (key === "sc1") return 0;
+    if (key === "sc2") return 1;
+    if (key === "chk") return 2;
+  }
+  if (typeof v === "number" && Number.isInteger(v)) return v;
+  throw new Error("line value must be Sc1, Sc2, Chk, or an integer");
+}
+
+function encodeNhlValue(ref: NhlFieldRef, value: unknown): number {
+  if (ref.global && ref.field === "carrier") {
+    if (value === "none") return 0xffff;
+    if (typeof value === "string") return nhl94.resolveTarget(value).slot;
+  }
+  if (ref.global && (ref.field === "clock" || ref.field === "gameclock")) {
+    return nhl94.parseClock(value as string | number);
+  }
+  if (ref.global && (ref.field === "home_line" || ref.field === "away_line")) {
+    return lineValue(value);
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${ref.label} value must be an integer`);
+  }
+  if (ref.fixed) return nhl94.toFixed(value);
+  if (ref.width === "s16_be" || ref.width === "u16_be" || ref.width === "s16" || ref.width === "u16") return value & 0xffff;
+  if (ref.width === "s32_be" || ref.width === "u32_be" || ref.width === "s32" || ref.width === "u32") return value >>> 0;
+  return value & 0xff;
+}
+
+function decodeNhlValue(ref: NhlFieldRef, raw: number): string {
+  if (ref.fixed) return String(nhl94.fromFixed(raw >>> 0).whole);
+  if (ref.global && (ref.field === "clock" || ref.field === "gameclock")) return `${nhl94.formatClock(raw)} (${raw}s)`;
+  if (ref.global && (ref.field === "home_line" || ref.field === "away_line")) return `${nhl94.lineLabel(raw)} (${raw})`;
+  if (ref.global && ref.field === "carrier") return raw >= 0 && raw <= 11 ? `s${raw}` : `none (0x${(raw >>> 0).toString(16).toUpperCase()})`;
+  return String(raw);
 }
 
 // Frames to step after a sprite-moving write so BizHawk re-renders the new
@@ -2322,6 +2505,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             "shotplayer", "lastplayer", "passdir", "passspeed"] as const).map((k) => ({
             name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u8" : (S16G.has(k) ? "s16_be" : "u16_be"), domain,
           }));
+        gReads.push(
+          { name: "faceoff_window_latch", address: nhlAddr(nhl94.G.faceoff_window_latch, domain), width: "u16_be", domain },
+          { name: "home_line", address: nhlAddr(nhl94.G.home_line, domain), width: "u8", domain },
+          { name: "away_line", address: nhlAddr(nhl94.G.away_line, domain), width: "u8", domain },
+        );
         // Session/phase byte (0xFFC735) — read in the same round-trip; drives the
         // `phase:` label below (see nhl94.classifyPhase / SESSION_BYTE comment).
         gReads.push({ name: "session", address: nhlAddr(nhl94.SESSION_BYTE, domain), width: "u8", domain });
@@ -2401,10 +2589,27 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         // Coarse phase headline (heuristic: session byte + gmode bit0). Answers
         // the "is this a menu waiting for START, or live/faceoff on the ice?"
         // question that a bare positions read can't — see nhl94.classifyPhase.
-        const phase = nhl94.classifyPhase(gv.session, (gv.gmode & 1) === 1);
+        const phaseLabel = nhl94.classifyPhase(gv.session, (gv.gmode & 1) === 1);
+        const faceoffLatch = gv.faceoff_window_latch ?? 0;
+        const inFaceoffWindow = faceoffLatch !== 0;
+        const phase = inFaceoffWindow ? "faceoff_line_change" : phaseLabel;
         const phaseRaw = raw ? `  [session=0x${hex2(gv.session)} gmode=0x${hex2(gv.gmode)}]` : "";
         lines.push("");
         lines.push(`phase: ${phase}${phaseRaw}`);
+        if (inFaceoffWindow) {
+          const homeRaw = gv.home_line ?? -1;
+          const awayRaw = gv.away_line ?? -1;
+          const puckLoose = (gv.carrier & 0xff00) === 0xff00;
+          lines.push(`phase_label: faceoff / line-change (pre-drop)`);
+          lines.push(
+            `faceoff_window: active=true latch=0x${hex4(faceoffLatch)}(${faceoffLatch}) ` +
+            `home=${nhl94.lineLabel(homeRaw)}(${homeRaw}) away=${nhl94.lineLabel(awayRaw)}(${awayRaw})`,
+          );
+          lines.push(
+            `evidence: latch_nonzero=true stoppage_gate_closed=${(gv.gmode & 1) === 1 ? "true" : "false"} ` +
+            `puck_loose=${puckLoose ? "true" : "false"}`,
+          );
+        }
         lines.push((gv.gmode & 1)
           ? `interaction_gate: CLOSED (gmode.bit0=1; collision/check dispatch is blocked during whistle/faceoff mode)`
           : `interaction_gate: OPEN (gmode.bit0=0; stoppage gate is clear — necessary, not proof that contact/resolver dispatch occurred)`);
@@ -2476,6 +2681,199 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           return `${t}: ${parts.join(" ")}`;
         });
         return ok(lines.join("\n"));
+      }
+
+      case "nhl94_fields": {
+        const domain = await nhlDomain(bh);
+        const opsIn = p.ops as Record<string, unknown>[] | undefined;
+        if (!Array.isArray(opsIn) || opsIn.length === 0) throw new Error("nhl94_fields requires a non-empty ops array");
+        const refs = opsIn.map((op) => ({ input: op, ref: resolveNhlFieldOp(op) }));
+        const memOps: nhl94.MemOp[] = [];
+        const readReqs: { name: string; address: number; width: string; domain: string }[] = [];
+        const readbackRefs: NhlFieldRef[] = [];
+        const currentFreezeReads = refs
+          .filter(({ input }) => input.op === "freeze" && input.value === undefined)
+          .map(({ ref }) => ({ name: ref.label, address: nhlAddr(ref.address, domain), width: ref.width, domain }));
+        const currentFreezeVals = currentFreezeReads.length
+          ? await bh.call<Record<string, number>>("read_many", { reads: currentFreezeReads })
+          : {};
+
+        for (const { input, ref } of refs) {
+          const op = input.op;
+          if (op === "read") {
+            readReqs.push({ name: ref.label, address: nhlAddr(ref.address, domain), width: ref.width, domain });
+          } else if (op === "write") {
+            const value = encodeNhlValue(ref, input.value);
+            memOps.push({ op: input.freeze === true ? "freeze" : "write", address: ref.address, value, width: ref.width });
+            if (p.readback !== "none") readbackRefs.push(ref);
+          } else if (op === "freeze") {
+            const value = input.value === undefined
+              ? (currentFreezeVals[ref.label] ?? 0)
+              : encodeNhlValue(ref, input.value);
+            memOps.push({ op: "freeze", address: ref.address, value, width: ref.width });
+            if (p.readback !== "none") readbackRefs.push(ref);
+          } else if (op === "unfreeze") {
+            memOps.push({ op: "unfreeze", address: ref.address, width: ref.width });
+          } else {
+            throw new Error(`unknown nhl94_fields op "${String(op)}"`);
+          }
+        }
+
+        const lines: string[] = [];
+        let readVals: Record<string, number> = {};
+        if (readReqs.length) {
+          readVals = await bh.call<Record<string, number>>("read_many", { reads: readReqs });
+          for (const { input, ref } of refs) {
+            if (input.op !== "read") continue;
+            lines.push(`${ref.label}=${decodeNhlValue(ref, readVals[ref.label] ?? 0)}`);
+          }
+        }
+
+        if (memOps.length) {
+          await bh.call("memory_ops", { ops: nhlRebase(memOps, domain), domain });
+        }
+
+        if (readbackRefs.length) {
+          const rbReads = readbackRefs.map((ref) => ({ name: ref.label, address: nhlAddr(ref.address, domain), width: ref.width, domain }));
+          const rbVals = await bh.call<Record<string, number>>("read_many", { reads: rbReads });
+          let rbIndex = 0;
+          for (const { input, ref } of refs) {
+            if (input.op !== "write" && input.op !== "freeze") continue;
+            const raw = rbVals[ref.label] ?? 0;
+            const verb = input.op === "freeze" || input.freeze === true ? "froze" : "wrote";
+            lines.push(`${verb} ${ref.label}=${decodeNhlValue(ref, raw)} (readback ${decodeNhlValue(ref, raw)})`);
+            rbIndex++;
+          }
+        } else {
+          for (const { input, ref } of refs) {
+            if (input.op === "unfreeze") lines.push(`unfroze ${ref.label}`);
+            else if (input.op === "write") lines.push(`${input.freeze === true ? "froze" : "wrote"} ${ref.label}`);
+            else if (input.op === "freeze") lines.push(`froze ${ref.label}`);
+          }
+        }
+
+        return ok(lines.join("\n"));
+      }
+
+      case "nhl94_stage": {
+        const place = (p.place as Record<string, unknown>[] | undefined) ?? [];
+        const possession = typeof p.possession === "string" ? p.possession : undefined;
+        if (possession && possession !== "none" && place.some((e) => e.target === "pk")) {
+          throw new Error("nhl94_stage cannot combine pk placement with skater possession; possession snaps pk to the carrier");
+        }
+
+        const lines: string[] = [];
+        let domain: string | undefined;
+        const getDomain = async () => domain ??= await nhlDomain(bh);
+
+        if (p.clear_freezes === true) {
+          const r = await bh.call<{ frozen_count: number }>("unfreeze", { all: true });
+          lines.push(`Cleared freezes before staging (${r.frozen_count} remaining).`);
+        }
+
+        if (typeof p.rig === "string") {
+          const hash = await currentRomHash(bh);
+          const name = rigName(p.rig);
+          const jsonPath = rigJsonPath(hash, name);
+          if (!fs.existsSync(jsonPath)) {
+            throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash)}`);
+          }
+          const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as Rig;
+          if (rig.rom_md5 !== hash) {
+            throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
+          }
+          await bh.call("unfreeze", { all: true });
+          const ld = await bh.call<{ path: string }>("load_state", { path: rig.savestate_path, pause: true });
+          let frozenCount = 0;
+          if (rig.freezes.length) {
+            const ops = rig.freezes.map((f) => ({
+              op: "freeze" as const, address: f.address, value: f.value, width: f.width,
+              ...(f.domain ? { domain: f.domain } : {}),
+            }));
+            const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops });
+            frozenCount = r.frozen_count;
+          }
+          lines.push(`Applied rig "${name}": loaded ${ld.path} (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
+        }
+
+        if (p.park && typeof p.park === "object") {
+          const keep = (((p.park as Record<string, unknown>).keep as string[] | undefined) ?? []);
+          for (const k of keep) {
+            if (!/^s\d{1,2}$/.test(k)) throw new Error("nhl94_stage park.keep accepts skaters s0-s11 only");
+            nhl94.resolveTarget(k);
+          }
+          const d = await getDomain();
+          const { ops, assignments } = nhl94.parkOps(keep);
+          const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, d), domain: d });
+          lines.push(`Parked ${assignments.length} skater(s); ${r.frozen_count} address(es) frozen.`);
+        }
+
+        if (place.length) {
+          const d = await getDomain();
+          const num = (v: unknown) => typeof v === "number" ? v : undefined;
+          const hasTeleportAxis = (e: Record<string, unknown>) =>
+            ["x", "y", "z", "xv", "yv", "zv"].some((k) => typeof e[k] === "number");
+          const teleportSources = place.filter(hasTeleportAxis);
+          const teleportEntries: nhl94.TeleportEntry[] = teleportSources.map((e) => ({
+            target: String(e.target),
+            x: num(e.x), y: num(e.y), z: num(e.z),
+            xv: num(e.xv), yv: num(e.yv), zv: num(e.zv),
+          }));
+          const ops = teleportEntries.length
+            ? nhl94.teleportOps(teleportEntries, teleportSources.some((e) => e.target === "pk"))
+            : [];
+          const fdirOps: nhl94.MemOp[] = [];
+          for (const e of place) {
+            if (typeof e.fdir !== "number") continue;
+            const { base } = nhl94.resolveTarget(String(e.target));
+            fdirOps.push({ op: "write", address: base + nhl94.OFF.fdir, value: e.fdir & 0xffff, width: "u16_be" });
+          }
+          const r = await bh.call<{ applied: number; frozen_count: number }>("memory_ops", { ops: nhlRebase([...ops, ...fdirOps], d), domain: d });
+          lines.push(`Placed ${place.length} target(s) (${r.applied ?? [...ops, ...fdirOps].length} op(s)).`);
+        }
+
+        if (possession) {
+          const d = await getDomain();
+          const carrierAddr = nhlAddr(nhl94.G.carrier, d);
+          if (possession === "none") {
+            await bh.call("memory_ops", { ops: [{ op: "write", address: carrierAddr, value: 0xffff, width: "u16_be" }], domain: d });
+            lines.push("Set possession: none.");
+          } else {
+            const { slot, base } = nhl94.resolveTarget(possession);
+            if (slot < 0 || slot > 11) throw new Error("possession must be s0-s11 or none");
+            const pos = await bh.call<Record<string, number>>("read_many", { reads: [
+              { name: "x", address: nhlAddr(base + nhl94.OFF.x, d), width: "s32_be", domain: d },
+              { name: "y", address: nhlAddr(base + nhl94.OFF.y, d), width: "s32_be", domain: d },
+            ] });
+            const pkBase = nhl94.PUCK_BASE;
+            await bh.call("memory_ops", { ops: [
+              { op: "write", address: carrierAddr, value: slot, width: "u16_be" },
+              { op: "write", address: nhlAddr(pkBase + nhl94.OFF.x, d), value: pos.x >>> 0, width: "u32_be" },
+              { op: "write", address: nhlAddr(pkBase + nhl94.OFF.y, d), value: pos.y >>> 0, width: "u32_be" },
+            ], domain: d });
+            lines.push(`Set possession: ${possession}.`);
+          }
+        }
+
+        const stageFields = (p.fields as Record<string, unknown>[] | undefined) ?? [];
+        if (stageFields.length) {
+          const d = await getDomain();
+          const memOps: nhl94.MemOp[] = stageFields.map((raw) => {
+            const input: Record<string, unknown> = { op: "write", ...raw };
+            const ref = resolveNhlFieldOp(input);
+            return { op: input.freeze === true ? "freeze" : "write", address: ref.address, value: encodeNhlValue(ref, input.value), width: ref.width };
+          });
+          await bh.call("memory_ops", { ops: nhlRebase(memOps, d), domain: d });
+          lines.push(`Wrote ${stageFields.length} field(s).`);
+        }
+
+        const settleFrames = typeof p.settle_frames === "number" ? p.settle_frames : 0;
+        if (settleFrames > 0) {
+          await bh.call("frame_advance", { count: settleFrames }, { timeoutMs: frameTimeout(settleFrames) });
+          lines.push(`Settled ${settleFrames} frame(s).`);
+        }
+
+        return ok(lines.length ? lines.join("\n") : "No staging operations requested.");
       }
 
       case "nhl94_park": {

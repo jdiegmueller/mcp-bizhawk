@@ -38,7 +38,9 @@ export const OFF: Record<string, number> = {
   impactp: 0x2e,
   pos: 0x34,
   nopuck: 0x5e,
+  lockout: 0x5e,
   pf: 0x62,
+  team_flags: 0x62,
   pf2: 0x63,
   pf3: 0x64,
   wgt8: 0x67,
@@ -48,6 +50,7 @@ export const OFF: Record<string, number> = {
   shotpwr: 0x6c,
   shotacc: 0x6d,
   passacc: 0x6e,
+  puck_control_rating: 0x71,
 };
 
 // Read width per field name (used by nhl94_state and nhl94_read). Mirrors the
@@ -60,7 +63,9 @@ export const FIELD_WIDTH: Record<string, string> = {
   attr: "u16_be", anim: "u16_be", spanum: "u16_be", spacnt: "s16_be",
   impact: "s16_be", impactp: "s16_be", pos: "u16_be",
   nopuck: "u8", pf: "u8", pf2: "u8", pf3: "u8", wgt8: "u8",
+  lockout: "u8", team_flags: "u8",
   energy: "u8", shotpwr: "u8", shotacc: "u8", passacc: "u8",
+  puck_control_rating: "u8",
 };
 
 // Fields that are 16.16 fixed-point (decode to whole pixels); everything else is
@@ -71,7 +76,9 @@ export const FIXED_FIELDS = new Set(["x", "y", "z"]);
 // + camera consts). Keyed by the semantic field name used in freeze mapping.
 export const G: Record<string, number> = {
   carrier: 0xffb7aa,
+  clock: 0xffc468,
   gameclock: 0xffc468,
+  period: 0xffc466,
   gsp: 0xffc466,
   gmode: 0xffc2ea,
   vpos: 0xffbd18,
@@ -84,6 +91,10 @@ export const G: Record<string, number> = {
   lastplayer: 0xffbeda,
   passdir: 0xffbedc,
   passspeed: 0xffbede,
+  faceoff_window_latch: 0xffc304,
+  line_change_latch: 0xffc304,
+  home_line: 0xffc6e5,
+  away_line: 0xffca48,
 };
 
 // Screen/session-phase byte at 0xFFC735. NHL94 has NO clean single "screen
@@ -120,6 +131,16 @@ export function classifyPhase(sessionByte: number, faceoffBit: boolean): string 
       return "off-ice break (inter-period intermission, post-game, or pre-faceoff intro — nothing moves until START — see caption)";
     default:
       return `unknown (session=0x${(sessionByte >>> 0).toString(16).toUpperCase().padStart(2, "0")}${faceoffBit ? ", clock stopped" : ""}) — rely on the caption below`;
+  }
+}
+
+/** Selected-line byte -> short NHL94 line label. Raw values are reported separately. */
+export function lineLabel(v: number): "Sc1" | "Sc2" | "Chk" | "unknown" {
+  switch (v) {
+    case 0: return "Sc1";
+    case 1: return "Sc2";
+    case 2: return "Chk";
+    default: return "unknown";
   }
 }
 
@@ -417,9 +438,14 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   combines structured RAM with visual placement/contact/animation evidence.
   Use describe:false only for a fast RAM-only read. verbose:true adds impact,
   flags, weight, and nopuck. A trailing * marks that exact frozen word.
-• nhl94_read — arbitrary entity fields by known name or raw in-struct offset,
-  e.g. fields:["impact","+0x40:s16_be"]. Use this instead of calculating a
-  slot address or using eval_lua for entity reads.
+• nhl94_read — curated entity snapshots by known field list. Use this instead
+  of calculating a slot address or using eval_lua for entity reads.
+• nhl94_fields — semantic field read/write/freeze/unfreeze for selected entity
+  and global fields. Raw offsets/addresses require allow_raw:true and should be
+  temporary verification scaffolding, not the default path.
+• nhl94_stage — batch clean/rig/park/place/possession/field setup for one
+  experiment scene. Use it when a multi-step setup would otherwise drift across
+  frames or leave stale freezes.
 • nhl94_teleport — set any subset of x/y/z and/or xv/yv/zv atomically. Moving
   pk automatically detaches it so the result is a loose puck. It does not pin.
 • nhl94_freeze — pin targets at their CURRENT x/y/z and zero+pin velocity.
@@ -441,8 +467,9 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
 1. BASELINE: nhl94_state. Inspect carrier, positions/velocity/animation,
    interaction_gate, and frozen_summary.
 2. CLEAN: if the old freeze set is unwanted, nhl94_unfreeze {"all":true}.
-3. STAGE: park, teleport, possession, and/or clock operations. When setting a
-   moving target, include velocity in the same teleport call.
+3. STAGE: prefer nhl94_stage for multi-step setups; otherwise use park,
+   teleport, possession, fields, and/or clock operations. When setting a moving
+   target, include velocity in the same placement call.
 4. VERIFY STIMULUS: nhl94_state with describe:true. Confirm actual positions,
    motion, carrier, visible contact/formation, and expected animation. Do this
    before interpreting code traps.
@@ -458,13 +485,17 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
 
 ── COPYABLE RECIPES ─────────────────────────────────────────────────────────
 Clean 1-on-1 baseline (s0 vs s6, s0 carrying):
-  1. nhl94_unfreeze {"all":true}
-  2. nhl94_park {"keep":["s0","s6"]}
-  3. nhl94_teleport {"targets":[
-       {"target":"s0","x":0,"y":0,"xv":0,"yv":0,"zv":0},
-       {"target":"s6","x":40,"y":0,"xv":0,"yv":0,"zv":0}]}
-  4. nhl94_possession {"target":"s0"}
-  5. nhl94_state {}
+  1. nhl94_stage {"clear_freezes":true,"park":{"keep":["s0","s6"]},
+       "place":[{"target":"s0","x":0,"y":0,"xv":0,"yv":0,"zv":0},
+                {"target":"s6","x":40,"y":0,"xv":0,"yv":0,"zv":0}],
+       "possession":"s0"}
+  2. nhl94_state {}
+
+Force a facing/lockout value without address math:
+  1. nhl94_fields {"ops":[
+       {"op":"write","target":"s6","field":"lockout","value":0},
+       {"op":"freeze","target":"s6","field":"fdir","value":4}]}
+  2. nhl94_state {"describe":true}
 
 Loose moving puck (teleport auto-detaches):
   1. nhl94_teleport {"targets":[

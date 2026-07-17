@@ -109,8 +109,8 @@ Entity fields:
 | `impact` | `0x32` | `s16_be` | yes | body-check accumulator | Existing verbose/read field |
 | `impactp` | `0x2E` | `s16_be` | yes | prior/body-check accumulator | Existing verbose/read field |
 | `pos` | `0x34` | `u16_be` | no | state/position word | Existing verbose/read field |
-| `lockout` | `0x5E` | `u8` | no | lockout / no-puck timer | Alias for existing `nopuck` |
-| `nopuck` | `0x5E` | `u8` | no | lockout / no-puck timer | Keep for compatibility |
+| `lockout` | `0x5E` | `u8` | no | lockout / no-puck flag/counter | Alias for existing `nopuck`; timer behavior must be verified per use |
+| `nopuck` | `0x5E` | `u8` | no | has-no-puck flag/counter | Keep for compatibility |
 | `team_flags` | `0x62` | `u8` | no | player flag byte | Alias for existing `pf` |
 | `pf` | `0x62` | `u8` | no | player flag byte | Existing read field |
 | `pf2` | `0x63` | `u8` | no | player flag byte | Existing read field |
@@ -130,16 +130,16 @@ Global fields:
 | `carrier` | `0xFFB7AA` | `u16_be` | no | `0-11 = sN`, other = loose/none | Observed loose sentinel `0xFF02`; explicit none write uses `0xFFFF` |
 | `clock` / `gameclock` | `0xFFC468` | `u16_be` | no | seconds remaining | Render as `M:SS` |
 | `period` / `gsp` | `0xFFC466` | `u16_be` | no | `0=1st`, `1=2nd`, `2=3rd`, `3=OT` | Existing state field |
-| `gmode` | `0xFFC2EA` | `u8` | no | bitfield | bit 0 = stoppage gate closed; bit 8 is line-change corroboration when read as word |
+| `gmode` | `0xFFC2EA` | `u8` | no | bitfield | bit 0 = stoppage gate closed |
 | `session_byte` | `0xFFC735` | `u8` | no | coarse screen/session signal | Existing phase heuristic input |
-| `vpos` | `0xFFBD18` | current impl reads raw | unverified | camera Y scroll | Existing state field |
-| `hpos` | `0xFFBD1C` | current impl reads raw | unverified | camera X scroll | Existing state field |
-| `yleader` | `0xFFBF92` | current impl reads raw | unverified | camera bias accumulator | Existing state field |
+| `vpos` | `0xFFBD18` | `s16_be` | yes | camera Y scroll | Existing state field |
+| `hpos` | `0xFFBD1C` | `s16_be` | yes | camera X scroll | Existing state field |
+| `yleader` | `0xFFBF92` | `s16_be` | yes | camera bias accumulator | Existing state field |
 | `shotplayer` | `0xFFBED8` | `s16_be` | yes | slot or `-1` | Existing play-context field |
 | `lastplayer` | `0xFFBEDA` | `s16_be` | yes | slot or `-1` | Existing play-context field |
 | `passdir` | `0xFFBEDC` | `s16_be` | yes | raw pass direction | Existing play-context field |
 | `passspeed` | `0xFFBEDE` | `s16_be` | yes | raw pass speed | Existing play-context field |
-| `line_change_latch` | `0xFFC304` | `u16_be` | no | nonzero = pre-drop line-change window | Set to `0x2710`, cleared at puck drop; do not call this a countdown unless decrementing is verified |
+| `faceoff_window_latch` / `line_change_latch` | `0xFFC304` | `u16_be` | no | nonzero = pre-drop faceoff/line-change window | Set to `0x2710`, cleared at puck drop; do not call this a countdown unless decrementing is verified |
 | `home_line` | `0xFFC6E5` | `u8` | no | `0=Sc1`, `1=Sc2`, `2=Chk`, other=`unknown` | Low byte of word `0xFFC6E4` |
 | `away_line` | `0xFFCA48` | `u8` | no | `0=Sc1`, `1=Sc2`, `2=Chk`, other=`unknown` | Treat as the selected-line byte; verify any surrounding word semantics separately |
 
@@ -148,9 +148,12 @@ Unresolved field-table work that must happen before implementation:
 - confirm `fdir` range and direction labels;
 - confirm `puck_control_rating` menu-facing name;
 - pin `hitrating` offset before exposing it as a named field;
-- verify camera field widths if the implementation expands camera writes;
+- RAM-diff an away-team A/B/C press and confirm whether the selected away line
+  byte is `0xFFCA48` or the low byte `0xFFCA49` of the `0xFFCA48` word before
+  trusting symmetry assumptions;
 - live-check whether `0xFFC304` decrements. If it does not, keep the
-  `line_change_latch` name and avoid `countdown` terminology.
+  `faceoff_window_latch` / `line_change_latch` name and avoid `countdown`
+  terminology.
 
 ## `nhl94_state` Line-Change Detection
 
@@ -163,15 +166,18 @@ Primary detector:
 
 Documented provenance:
 
-- set to `0x2710` by the faceoff-setup routine at PC `0xF952`;
-- cleared to `0` at the puck-drop routine at PC `0xFE4C`;
-- documented in `docs/rom-reference/RETAIL_OFFSETS.md` under
-  "Game-mode / faceoff + line-change selection".
+- observed as `0x2710` in the screenshot-confirmed line-change window and `0`
+  in live play;
+- the ROM doc symlinked at `docs/rom-reference/RETAIL_OFFSETS.md` documents
+  this under "Game-mode / faceoff + line-change selection" and points at the
+  canonical `nvnhl94-2` source;
+- specific set/clear PCs `0xF952` / `0xFE4C` came from session evidence and
+  should be added to that ROM doc or re-verified before being treated as a
+  durable citation.
 
 Corroborating evidence:
 
-- `$FFC2EA` bit 8 (`0x0100`) set;
-- stoppage gate / clock-not-running evidence from readable mode flags;
+- stoppage gate / clock-not-running evidence from `$FFC2EA` bit 0;
 - puck carrier `$FFB7AA` high byte `0xFF`, meaning loose puck.
 
 Important negative rule:
@@ -186,24 +192,26 @@ Selected line fields:
 - encoding: `0 = Sc1`, `1 = Sc2`, `2 = Chk`, any other value = `unknown`
   with the raw byte preserved.
 
-When `$FFC304 != 0`, `nhl94_state` should report the distinct machine-stable
-phase before the generic faceoff/stoppage bucket:
+When `$FFC304 != 0`, `nhl94_state` should report a stable phase token before
+the generic faceoff/stoppage bucket. Existing descriptive phase text should
+remain available as `phase_label` so the state contract is not split between
+machine tokens and prose.
 
 ```ts
 {
   phase: "faceoff_line_change",
   phase_label: "faceoff / line-change (pre-drop)",
-  line_change: {
+  faceoff_window: {
     active: true,
     latch: 10000,
     latch_hex: "0x2710",
+    line_menu_visible: "unknown",
     home: "Chk",
     away: "Sc1",
     home_raw: 2,
     away_raw: 0,
     evidence: {
       latch_nonzero: true,
-      c2ea_bit8: true,
       stoppage_gate_closed: true,
       puck_loose: true
     }
@@ -211,14 +219,14 @@ phase before the generic faceoff/stoppage bucket:
 }
 ```
 
-`$FFC2EA` bit 8, stoppage-gate evidence, and puck-loose are evidence fields,
-not required gates. `clock_frozen` is intentionally not part of the one-snapshot
-state contract because frozen-ness is a cross-frame property.
+Stoppage-gate evidence and puck-loose are evidence fields, not required gates.
+`clock_frozen` is intentionally not part of the one-snapshot state contract
+because frozen-ness is a cross-frame property.
 
 The primary detector is `$FFC304 != 0`. If live verification finds false
 positives for this exact ROM MD5, tighten the detector by promoting the
-corroborating fields to required gates in this order: puck loose, stoppage gate
-closed, `$FFC2EA` bit 8.
+corroborating fields to required gates in this order: puck loose, then stoppage
+gate closed.
 
 Vision captions are not authoritative for this mode. `nhl94_state` should
 prefer the RAM-backed phase even if vision says "mid-gameplay".
@@ -326,7 +334,7 @@ Schema:
 Behavior:
 
 - apply operations in a deterministic order: stop semantic overrides if
-  requested, stop semantic traps if requested, rig, clear freezes, park, place,
+  requested, stop semantic traps if requested, clear freezes, rig, park, place,
   possession, field writes/freezes, optional settle, readback;
 - default `settle_frames` to `0` for RE precision;
 - let agents request render settle explicitly when they need a fresh screenshot;
@@ -345,10 +353,14 @@ Conflict handling:
   operation is requested;
 - `clear_freezes` clears the bridge freeze table only. It does not stop
   `nhl94_exec_override` hooks or native Lua hooks.
+- when both `clear_freezes:true` and `rig` are present, clear freezes before
+  applying the rig. `nhl94_rig apply` already clears freezes and then restores
+  the rig's saved freeze table; clearing after rig apply would destroy that
+  freeze table.
 
 Park semantics:
 
-- `park.keep` leaves listed targets untouched;
+- `park.keep` accepts skater targets only and leaves listed skaters untouched;
 - every other skater is moved off-rink, has x/y frozen, and has xv/yv/zv frozen
   at zero;
 - z is left untouched unless implementation discovers this causes a collision
@@ -587,12 +599,12 @@ Pure helper tests:
 
 Tool behavior tests with mocked bridge:
 
-- `nhl94_state` includes `line_change` and gives it phase priority;
+- `nhl94_state` includes `faceoff_window` and gives it phase priority;
 - `nhl94_fields` compiles named entity/global reads, writes, freezes, and
   unfreezes;
 - `nhl94_fields` write/freeze responses return post-mutation decoded readback;
 - `nhl94_stage` emits operations in the specified order: stop overrides/traps,
-  rig, clear freezes, park, place, possession, writes/freezes, settle, readback;
+  clear freezes, rig, park, place, possession, writes/freezes, settle, readback;
 - `nhl94_stage` defaults `settle_frames` to `0`;
 - `nhl94_stage` rejects `pk` placement plus skater possession in one request;
 - `clear_freezes` does not stop overrides;
