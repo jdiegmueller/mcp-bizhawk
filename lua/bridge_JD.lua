@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.34-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.35-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.35-jd changes (server-side only; bridge unchanged): daemon service
+--   templates point screenshot vision at Qwen3.6-27B:nonthinking_reasoning.
+--   Bridge bumped in lockstep for OSD consistency.
 --
 -- v2026.7.34-jd changes (server-side only; bridge unchanged): NHL94 tool-flow
 --   guidance now separates the RAM stoppage gate, visible interaction stimulus,
@@ -624,7 +628,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.34-jd",
+    version    = "2026.7.35-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

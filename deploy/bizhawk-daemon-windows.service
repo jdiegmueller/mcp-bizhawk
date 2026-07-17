@@ -44,7 +44,7 @@ Environment=BIZHAWK_HOST=0.0.0.0
 # Environment=BIZHAWK_PORT=8766
 # Vision model for screenshot descriptions (nhl94_state describe, bizhawk_screenshot describe)
 Environment=VISION_BASE_URL=https://llama-swap.nevosi.com/v1
-Environment=VISION_MODEL=Qwen3.6-35B-A3B
+Environment=VISION_MODEL=Qwen3.6-27B:nonthinking_reasoning
 Environment=VISION_API_KEY=sk-no-key-required
 # Cross-filesystem screenshots: this REMOTE Windows BizHawk cannot write the
 # server's Linux /tmp, and the server cannot read a Windows path — so auto
