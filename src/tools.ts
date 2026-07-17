@@ -197,7 +197,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_trap_exec",
     description:
       "PURPOSE: Persistent, multi-address execution-site capture — arm exec hooks at ROM addresses that ACCUMULATE register/memory snapshots into per-trap buffers across normally-driven frames, then read them back. The built-in replacement for hand-rolling event.on_bus_exec capture loops in bizhawk_eval_lua (the dominant reverse-engineering use). " +
-      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle via `action`: 'start' arms `traps`; then advance frames; 'read' fetches the buffers; 'status' returns just counts; 'stop' unregisters and clears. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
+      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle: 'start', drive frames/input, verify the intended stimulus actually occurred, then 'read', and finally 'stop'. ZERO HITS alone does not prove a code path is unreachable: first verify frames advanced and, for NHL94 interaction experiments, use nhl94_state to confirm interaction_gate is OPEN plus actual movement/contact/animation. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
       "BEHAVIOR: 'start' registers event.on_bus_exec hooks (errors if the core lacks it) that persist until 'stop' or a bridge reload — REMEMBER to stop when done, as live hooks cost emulation speed. Buffers are bounded by `limit` (default 200/trap). Memory reads use the active domain (M68K BUS on Genesis); addresses masked to 24 bits. " +
       "RETURNS: 'start' the armed trap names; 'read' per-trap counts + the captured entries (JSON); 'status'/'stop' the counts.",
     inputSchema: {
@@ -1281,10 +1281,10 @@ const TOOLS: Tool[] = [
   {
     name: "nhl94_recipes",
     description:
-      "PURPOSE: The NHL94 use-case guide — a verbose 'if you want to X, do Y' playbook mapping intent onto the right nhl94_* tool and call sequence. " +
-      "USAGE: CALL THIS FIRST before doing ANY NHL94 work — before teleporting, freezing, parking, setting up scenarios, or driving possession/clock/camera. It tells you which tool to reach for and the exact multi-step recipes (isolate a 1-on-1, set up a 2-on-1 rush, stage a breakaway, freeze a scene, save/apply a scenario across restarts) so you don't reverse-engineer the workflow from nine separate tool descriptions. No arguments. " +
+      "PURPOSE: One-time NHL94 primer covering the state model, tool routing, experiment lifecycle, copyable setup recipes, and evidence rules. " +
+      "USAGE: Call once at the start of an NHL94 task or when changing to an unfamiliar workflow; do not repeat before every nhl94_* call. Read it before staging scenarios or reverse-engineering interactions so clean-baseline, verification, gate, and trap sequencing are established first. No arguments. " +
       "BEHAVIOR: No side effects — returns static reference text, no bridge round-trip (works even when BizHawk isn't connected). " +
-      "RETURNS: The full guide: when-to-use-each-tool, end-to-end scenarios as numbered nhl94_* sequences, and the verification patterns (nhl94_state read-back, the `*` frozen markers, the frozen_summary tripwire).",
+      "RETURNS: Core semantics; a router for every nhl94_* tool; baseline→clean→stage→verify→gate→trace→conclude workflow; copyable JSON-shaped calls; address and evidence safety rules.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -1345,10 +1345,10 @@ const TOOLS: Tool[] = [
   {
     name: "nhl94_unfreeze",
     description:
-      "PURPOSE: Release the position+velocity freezes created by nhl94_freeze (or nhl94_park) for one or more targets. " +
-      "USAGE: Counterpart to nhl94_freeze/nhl94_park — pass the same targets to let them move again. To clear EVERY freeze in the bridge (including non-NHL94 ones) use bizhawk_unfreeze all=true. " +
-      "BEHAVIOR: Stops the per-frame re-writes for each target's x/y/z + xv/yv/zv; does NOT restore any prior value (memory keeps whatever the freeze last wrote until the game overwrites it). Unfreezing an address that isn't frozen is a no-op, so unfreezing a never-frozen (or park-only) target is harmless. Errors if a target is unknown or targets is empty. " +
-      "RETURNS: Per-target confirmation and the count of addresses released.",
+      "PURPOSE: Release selected NHL94 target pins, or clear every freeze for a clean experiment baseline. " +
+      "USAGE: Pass targets:['s0',...] to release only those entities' x/y/z + velocity pins created by nhl94_freeze/park. Pass all:true for 'drop all freezes' in one call — this is the preferred clean-slate operation before applying a new rig or experiment. " +
+      "BEHAVIOR: Exactly one of targets or all:true is required. all:true clears the bridge's ENTIRE freeze table, including target fields, clock, carrier, camera, stale, non-NHL94, and unmapped addresses. Releasing a freeze stops future per-frame rewrites but does not restore an earlier value; memory keeps the last frozen value until the game overwrites it. " +
+      "RETURNS: What scope was released and the number of addresses still frozen.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1356,10 +1356,10 @@ const TOOLS: Tool[] = [
           type: "array",
           minItems: 1,
           items: { type: "string", description: "Target id: 's0'..'s11' or 'pk'." },
-          description: "Targets to unfreeze.",
+          description: "Targets whose position/velocity pins should be released. Mutually exclusive with all:true.",
         },
+        all: { type: "boolean", description: "Set true to clear every bridge freeze, including globals and unmapped/non-NHL94 addresses. Mutually exclusive with targets." },
       },
-      required: ["targets"],
       additionalProperties: false,
     },
   },
@@ -1367,15 +1367,15 @@ const TOOLS: Tool[] = [
     name: "nhl94_state",
     description:
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
-      "USAGE: The default way to answer 'where is everyone and what's the game doing', and the standard verification read after nhl94_teleport/freeze/park. Targets s0-s11 (skaters) and pk (puck) ARE the game's own entity slots — the struct at base+N*0x80 on the 68K bus, the SAME slot index the puck-carrier word uses; they are NOT a render/sort order. ALWAYS prefer this tool over hand-built read_many/read_struct_array calls against the slot grid (the #1 source of base/stride/endian mistakes — dropping the 0xFF prefix, wrong base, wrong width). If you need a field this tool doesn't decode, DON'T guess an address: take base+stride+offsets from the `layout:` line (or the per-target `@0xADDR` shown under raw:true) and compute base+offset. Pass raw:true to also see the raw 16.16 hex, sub-pixel fraction, and each target's absolute struct address. " +
+      "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For an unlisted entity field, pass its name or raw in-struct offset to nhl94_read; never compute the address yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block: per target a position/velocity/heading/frame line plus an indented anim line (anim/attr+xflip/spanum+record-index/spacnt); then a `phase:` headline, carrier, `carrier_ratings:` (shotpwr/shotacc/passacc/energy of the carrying slot, dashes when loose), clock+period+play+faceoff, camera scroll, a `shot:`/`last:`/`pass:` play-context line (last shooter/puck-toucher slots + pass vector), a `layout:` line (base/stride/domain + every field offset), and the frozen summary. Together these mirror the on-screen OSD's game-state fields (minus the vision caption). `phase:` is a HEURISTIC coarse label (from the session byte 0xFFC735 + gmode bit0) answering the question a positions read can't — is this LIVE gameplay, an on-ice faceoff/stoppage, a pre-game menu (title/team-select/setup, no game loaded), or an off-ice break (intermission/post-game) where NOTHING moves until you press START. NHL94 has no clean single screen-state byte, so the specific menu is named by the vision caption, not the phase label. `play` is running|stopped and `faceoff` is yes|no — BOTH decode the same gmode(0xFFC2EA) bit 0 (set = clock-stopped = whistle/faceoff/stoppage, when the game also disables body-checks); faceoff:yes always coincides with play:stopped. A trailing `*` on ANY value (per-target x/y/z/xv/yv/zv/attr/anim/spanum/spacnt AND the globals carrier/clock/period/play/vpos/hpos/yleader) means that specific word is currently frozen by the bridge. Pass verbose:true to add a per-entity extended line (impact/impactp/pos/nopuck/pf/pf2/pf3/wgt8); for any other field use nhl94_read.",
+      "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context. A trailing `*` marks a frozen word.",
     inputSchema: {
       type: "object",
       properties: {
         raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
         verbose: { type: "boolean", default: false, description: "Add a per-entity extended line: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf,pf2,pf3(+0x62-64)/wgt8(+0x67) — the accumulator/flag/weight fields (use nhl94_read for arbitrary fields)." },
-        describe: { type: "boolean", default: true, description: "Default TRUE: also capture a screenshot and send it to the configured vision model, appending a text description of the visible game state after the structured data. Pass false to skip the vision call and return the structured data only. Best-effort: if vision is unconfigured or fails, the structured data is still returned with a short note. Requires VISION_BASE_URL + VISION_MODEL on the server." },
+        describe: { type: "boolean", default: true, description: "Default TRUE and recommended for staging/post-action verification: append a vision caption to the structured RAM state so placement, contact, and animation can be checked. Set false only for a fast RAM-only read (for example an interaction_gate preflight) or when vision is unnecessary. The structured result still returns if vision fails." },
         describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot (unless describe:false). Falls back to the server's built-in NHL94 system prompt / VISION_DEFAULT_PROMPT." },
       },
       additionalProperties: false,
@@ -1446,7 +1446,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_possession",
     description:
       "PURPOSE: Give the puck to a skater (or make it loose) without fighting the game's carry logic. " +
-      "USAGE: `target:'sN'` teleports the puck onto skater sN's position so the game's own proximity-pickup makes sN the carrier — nothing needs to 'stick'. `target:'none'` writes 'nobody' to the carrier word for a loose puck. `hold:true` additionally freezes the carrier word so possession can't change (EMPIRICAL — may not hold against the game's per-frame rewrite; verify live). Every call first releases any prior carrier hold. Side benefit: the camera follows the puck/carrier, so `target:'sN'` also eases the camera onto sN. " +
+      "USAGE: `target:'sN'` assigns that slot as carrier and teleports the puck onto the skater in one batch. `target:'none'` writes 'nobody' for a loose puck. `hold:true` additionally freezes the carrier word so possession cannot change (EMPIRICAL — verify live). Every call first releases any prior carrier hold. Side benefit: the camera follows the puck/carrier, so `target:'sN'` also eases the camera onto sN. " +
       "BEHAVIOR: DESTRUCTIVE: moves the puck and/or writes the carrier word (one atomic memory_ops). For `target:'sN'` reads sN's x/y first (one extra round-trip). Errors if target is not 's0'..'s11' or 'none'. " +
       "RETURNS: What was done — puck recipient and destination, whether the carrier is held, and a note when the post-write render-settle frames ran (a few frames stepped best-effort so a following screenshot shows the puck's new position, not the pre-write frame).",
     inputSchema: {
@@ -2261,8 +2261,14 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "nhl94_unfreeze": {
-        const targets = p.targets as string[];
-        if (!targets.length) throw new Error("targets must be a non-empty array");
+        const targets = p.targets as string[] | undefined;
+        const all = p.all === true;
+        if (all && targets !== undefined) throw new Error("pass either targets or all:true, not both");
+        if (all) {
+          const r = await bh.call<{ frozen_count: number }>("unfreeze", { all: true });
+          return ok(`Released all freezes (targets, globals, stale, and unmapped).\n${r.frozen_count} address(es) still frozen.`);
+        }
+        if (!targets?.length) throw new Error("pass a non-empty targets array or all:true");
         const domain = await nhlDomain(bh);
         const ops = nhl94.unfreezeOps(targets); // validates targets
         const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
@@ -2399,6 +2405,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const phaseRaw = raw ? `  [session=0x${hex2(gv.session)} gmode=0x${hex2(gv.gmode)}]` : "";
         lines.push("");
         lines.push(`phase: ${phase}${phaseRaw}`);
+        lines.push((gv.gmode & 1)
+          ? `interaction_gate: CLOSED (gmode.bit0=1; collision/check dispatch is blocked during whistle/faceoff mode)`
+          : `interaction_gate: OPEN (gmode.bit0=0; stoppage gate is clear — necessary, not proof that contact/resolver dispatch occurred)`);
         lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}   faceoff: ${faceoff}`);
         // Carrier ratings (OSD parity): shotpwr/shotacc/passacc/energy of the
         // slot carrying the puck; dashes when the puck is loose.
@@ -2416,7 +2425,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const baseHex = nhlAddr(nhl94.SORTCORDS, domain).toString(16).toUpperCase();
         lines.push(
           `layout: slot structs @ base=0x${baseHex} stride=0x${nhl94.SCSIZE.toString(16).toUpperCase()} domain='${domain}' ` +
-          `(sN @ base+N*0x80, s0-s11; pk @ base+14*0x80). To read a field this tool doesn't decode, use base+offset — ` +
+          `(reference only; do not hand-compute reads). Use nhl94_read with a named field or raw +0xNN:width offset. ` +
           `offsets: x+00 y+14 z+18(all s32_be 16.16) xv+28 yv+2A zv+2C(s16_be) frame+06 fdir+54 attr+04 anim+58 spanum+5A(u16_be) spacnt+5C(s16_be).`,
         );
         lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);

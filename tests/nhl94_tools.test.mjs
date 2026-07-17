@@ -116,6 +116,35 @@ test("nhl94_unfreeze releases the 6 addresses per target", async () => {
   }
 });
 
+test("nhl94_unfreeze all=true clears the entire bridge freeze table", async () => {
+  const h = await startHarness({ unfreeze: () => ({ frozen_count: 0 }) });
+  try {
+    const res = await h.client.callTool({ name: "nhl94_unfreeze", arguments: { all: true } });
+    assert.match(textOf(res), /Released all freezes \(targets, globals, stale, and unmapped\)/);
+    const call = h.bridge.calls.find((c) => c.method === "unfreeze");
+    assert.deepEqual(call.params, { all: true });
+    assert.equal(h.bridge.calls.find((c) => c.method === "list_memory_domains"), undefined);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_unfreeze requires exactly one scope", async () => {
+  const h = await startHarness({ unfreeze: () => ({ frozen_count: 0 }) });
+  try {
+    await assert.rejects(
+      h.client.callTool({ name: "nhl94_unfreeze", arguments: {} }),
+      /non-empty targets array or all:true/,
+    );
+    await assert.rejects(
+      h.client.callTool({ name: "nhl94_unfreeze", arguments: { targets: ["s0"], all: true } }),
+      /either targets or all:true, not both/,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_state decodes the slot grid, globals, and frozen annotations", async () => {
   const rec = (i, over = {}) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0, ...over });
   const h = await startHarness({
@@ -153,8 +182,9 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /period: 1st/);
     assert.match(text, /play: running/);
     assert.match(text, /faceoff: no/); // gmode bit0 clear
-    // phase headline: session=0xFF + gmode bit0 clear ⇒ live gameplay.
-    assert.match(text, /phase: gameplay \(live play/);
+    assert.match(text, /interaction_gate: OPEN \(gmode\.bit0=0;/);
+    // phase headline: session=0xFF + gmode bit0 clear ⇒ on ice, gate open.
+    assert.match(text, /phase: gameplay \(on ice; stoppage gate open/);
     assert.match(text, /camera: vpos=10 hpos=-5 yleader=50/);
     assert.match(text, /frozen_summary: total=3 mapped=2 unmapped=1/);
     // Animation record sub-line: s3 has attr bit3 (x-flip), spanum 8 (record 2).
@@ -243,6 +273,7 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     assert.match(text, /faceoff: yes/);
     // phase headline: session=0xFF + gmode bit0 set ⇒ on-ice faceoff/stoppage.
     assert.match(text, /phase: faceoff\/stoppage \(on ice/);
+    assert.match(text, /interaction_gate: CLOSED \(gmode\.bit0=1;/);
     // gmode is requested as a byte read, not u16_be (the endianness fix).
     const call = h.bridge.calls.find((c) => c.method === "read_many");
     const gmodeRead = call.params.reads.find((r) => r.name === "gmode");

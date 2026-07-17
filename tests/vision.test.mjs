@@ -45,6 +45,7 @@ test("bizhawk_screenshot returns the PNG AND a vision caption by default", async
     const messages = stub.received[0].body.messages;
     assert.equal(messages[0].role, "system");
     assert.match(messages[0].content, /NHL '94/, "system message frames the NHL94 task");
+    assert.match(messages[0].content, /NEVER infer stoppage merely because the HUD clock is unchanged/);
     assert.equal(messages[1].role, "user");
     assert.equal(messages[1].content[0].text, "Where is the puck?");
     assert.match(messages[1].content[1].image_url.url, /^data:image\/png;base64,/);

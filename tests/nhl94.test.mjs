@@ -17,11 +17,25 @@ import {
   READ_DEFAULT_FIELDS,
   classifyPhase,
   SESSION_BYTE,
+  RECIPES_GUIDE,
 } from "../dist/nhl94.js";
+
+test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool semantics", () => {
+  assert.match(RECIPES_GUIDE, /read once .* do not repeat before every call/);
+  assert.match(RECIPES_GUIDE, /nhl94_unfreeze \{"all":true\}/);
+  assert.match(RECIPES_GUIDE, /Velocity xv\/yv\/zv uses RAW signed 16-bit/);
+  assert.match(RECIPES_GUIDE, /assign the carrier directly/);
+  assert.match(RECIPES_GUIDE, /Clock freeze .* does NOT close the collision stoppage gate/s);
+  assert.match(RECIPES_GUIDE, /OPEN only proves this ONE prerequisite is clear/);
+  assert.match(RECIPES_GUIDE, /ZERO HITS is inconclusive/);
+  assert.match(RECIPES_GUIDE, /loads the state PAUSED/);
+  assert.doesNotMatch(RECIPES_GUIDE, /proximity pickup/);
+  assert.doesNotMatch(RECIPES_GUIDE, /\["s0",…,"pk"\]/);
+});
 
 test("classifyPhase maps session byte + gmode bit0 to the coarse phase buckets", () => {
   // session 0xFF = on ice; gmode bit0 splits live vs faceoff/stoppage.
-  assert.match(classifyPhase(0xff, false), /^gameplay \(live play/);
+  assert.match(classifyPhase(0xff, false), /^gameplay \(on ice; stoppage gate open/);
   assert.match(classifyPhase(0xff, true), /^faceoff\/stoppage \(on ice/);
   // session 0x00 = no game loaded (title/menus); 0xFE = off-ice break.
   assert.match(classifyPhase(0x00, false), /^pre-game .*no game loaded/);

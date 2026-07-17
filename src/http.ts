@@ -61,13 +61,18 @@ export function createMcpHttpServer(bh: BizhawkServer): http.Server {
         instructions:
           "Drives a BizHawk emulator running NHL '94. For ANY NHL94 task — placing " +
           "players, freezing positions, setting up faceoffs/rushes/breakaways, " +
-          "controlling possession/clock/camera — CALL nhl94_recipes FIRST. It is the " +
+          "controlling possession/clock/camera — CALL nhl94_recipes ONCE FIRST. It is the " +
           "use-case playbook that maps what you want to do onto the right nhl94_* tool " +
-          "and the exact call sequence, so you don't have to reverse-engineer the " +
+          "and the exact call sequence; do not repeat it before every tool call. This avoids reverse-engineering the " +
           "workflow from the individual tool descriptions. Prefer the high-level " +
           "nhl94_* tools (they own all the 68K address/endianness/fixed-point details) " +
-          "over hand-built bizhawk_read/write/freeze calls, and verify every change " +
-          "with nhl94_state.",
+          "over hand-built bizhawk_read/write/freeze/eval_lua calls. Do not manually " +
+          "derive an NHL94 entity/global address when nhl94_state or nhl94_read exposes " +
+          "the value. Verify every change with nhl94_state. For experiments that depend " +
+          "on checks/collisions running, use its interaction_gate line for the RAM " +
+          "stoppage gate; a screenshot, a motionless board, or a frozen HUD clock cannot " +
+          "establish that gate. OPEN is necessary but not sufficient: after driving frames, " +
+          "verify movement/contact/animation with nhl94_state before interpreting zero trap hits.",
       },
     );
     registerTools(mcpServer, bh);

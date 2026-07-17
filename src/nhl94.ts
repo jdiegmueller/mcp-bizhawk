@@ -112,8 +112,8 @@ export function classifyPhase(sessionByte: number, faceoffBit: boolean): string 
   switch (sessionByte) {
     case 0xff:
       return faceoffBit
-        ? "faceoff/stoppage (on ice, clock stopped — whistle or faceoff)"
-        : "gameplay (live play, clock running)";
+        ? "faceoff/stoppage (on ice; stoppage gate closed — whistle or faceoff)"
+        : "gameplay (on ice; stoppage gate open)";
     case 0x00:
       return "pre-game (title / team-select / setup menu / intro — no game loaded; nothing moves until START — see caption)";
     case 0xfe:
@@ -393,84 +393,103 @@ export function parkOps(
 
 // ── nhl94_recipes: the self-documenting use-case guide ───────────────────────
 // Static prose returned verbatim by the nhl94_recipes tool. It is the intended
-// FIRST read before driving NHL94: it maps intent ("I want to …") onto the
-// right nhl94_* tool + call sequence, so the model never has to reverse-engineer
-// the workflow from nine individual tool descriptions. Keep it in sync with the
-// tools' actual behavior when any nhl94_* tool changes.
-export const RECIPES_GUIDE = `NHL94 USE-CASE GUIDE — read this FIRST, then drive with the nhl94_* tools.
+// one-time first read before driving NHL94: it maps intent onto the right
+// nhl94_* tool + experiment sequence. Keep it in sync with schemas, handlers,
+// and actual side effects whenever any nhl94_* tool changes.
+export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL94 task; do not repeat before every call.
 
-Targets are game nouns: skaters s0-s11, puck pk. All coordinates are WHOLE
-pixels (the same numbers nhl94_state and the OSD show) — the tools handle
-16.16 fixed-point / endianness for you. Nothing "sticks" on its own: to hold
-something in place you FREEZE it (re-asserted every emulated frame until
-released). Freezes live in the bridge and are cleared by reloading the Lua
-script or restarting BizHawk — use nhl94_rig to survive that.
+── CORE MODEL ────────────────────────────────────────────────────────────────
+• Targets are game entities: s0-s11 are skater slots; pk is the puck slot.
+• Position x/y/z uses WHOLE pixels. Velocity xv/yv/zv uses RAW signed 16-bit
+  game units. The nhl94_* tools own address, domain, width, endian, and 16.16
+  conversion details.
+• Placement is not a state reset. Teleporting preserves animation, flags, and
+  other latched state. A live entity may move again on later frames.
+• A freeze is a per-frame rewrite, not a pause and not an undo. Releasing it
+  leaves the last value in RAM until the game changes it. Clock freeze holds
+  only the game timer; it does NOT close the collision stoppage gate.
+• Start unfamiliar experiments with nhl94_state. If existing freezes are not
+  intentional, use nhl94_unfreeze {"all":true} before staging. Applying a rig
+  already clears all freezes first, so do not pre-clear merely to apply a rig.
 
-── WHEN TO USE EACH TOOL ─────────────────────────────────────────────────────
-• nhl94_state    — decoded snapshot of everyone + globals. Your default read and
-                   the verification step after every change. A trailing * on any
-                   value = that word is frozen. verbose:true adds the extended
-                   per-entity fields (impact/flags/weight/nopuck).
-• nhl94_read     — read ANY entity field by name (impact,pf,wgt8,nopuck,…) or raw
-                   +0xNN offset without hand-computing 68K addresses. Reach for
-                   THIS instead of bizhawk_eval_lua/read for one-off struct fields.
-• nhl94_teleport — place a target at whole-pixel (x,y[,z]). Does NOT hold it;
-                   the game moves it next frame unless you also freeze.
-• nhl94_freeze   — pin targets at their CURRENT position (x/y/z) + zero velocity.
-                   Teleport THEN freeze to place-and-hold.
-• nhl94_unfreeze — release nhl94_freeze/park pins for given targets.
-• nhl94_park     — clear the ice: teleport every skater NOT in keep off-ice and
-                   freeze them there (puck untouched). Off-ice vs freeze's
-                   at-current-position.
-• nhl94_possession — give pk to a skater (proximity pickup) or set it loose.
-                   hold:true freezes the carrier word (EMPIRICAL — verify live).
-                   Side effect: camera eases to the puck/carrier.
-• nhl94_clock    — set / freeze / release the game clock. freeze so nothing
-                   expires mid-experiment.
-• nhl94_camera   — pin (freeze) or release the scroll. EMPIRICAL — the game
-                   rewrites scroll every frame, so a pin may jitter; the reliable
-                   centering is focus-steering via nhl94_possession. Verify live.
-• nhl94_rig      — save/apply/list/delete a named scenario (savestate + exact
-                   freeze set). The durable way to survive restarts and to avoid
-                   stale-freeze contamination (apply clears all freezes first).
+── TOOL ROUTER ───────────────────────────────────────────────────────────────
+• nhl94_state — baseline and post-action verification. Default describe:true
+  combines structured RAM with visual placement/contact/animation evidence.
+  Use describe:false only for a fast RAM-only read. verbose:true adds impact,
+  flags, weight, and nopuck. A trailing * marks that exact frozen word.
+• nhl94_read — arbitrary entity fields by known name or raw in-struct offset,
+  e.g. fields:["impact","+0x40:s16_be"]. Use this instead of calculating a
+  slot address or using eval_lua for entity reads.
+• nhl94_teleport — set any subset of x/y/z and/or xv/yv/zv atomically. Moving
+  pk automatically detaches it so the result is a loose puck. It does not pin.
+• nhl94_freeze — pin targets at their CURRENT x/y/z and zero+pin velocity.
+• nhl94_unfreeze — targets:[...] releases selected entity pins; all:true clears
+  the ENTIRE bridge freeze table, including clock/carrier/camera and unmapped.
+• nhl94_park — move every skater not in keep off-ice and freeze them; pk is
+  untouched. Existing freezes are not cleared.
+• nhl94_possession — assign the carrier directly and place pk on that skater,
+  or target:"none" for loose. hold:true freezes the carrier word; verify it.
+  The camera normally eases toward the puck/carrier.
+• nhl94_clock — set, freeze, or release only the game clock.
+• nhl94_camera — pin/release scroll. Direct pinning may jitter; possession-led
+  focus is usually more reliable. Verify visually.
+• nhl94_rig — save/apply/list/delete a savestate plus its exact freeze table.
+  Save captures EVERY current freeze, including stale/unmapped ones. Apply
+  clears freezes, loads the state PAUSED, then restores the saved freezes.
 
-── SCENARIOS ─────────────────────────────────────────────────────────────────
-WANT TO isolate a 1-on-1 (two skaters + puck, everyone else gone)?
-  1. nhl94_park keep=["s0","s6"]            (parks the other 10 off-ice)
-  2. nhl94_teleport [{target:"s0",x:0,y:0},{target:"s6",x:40,y:0}]
-  3. nhl94_possession target:"s0"           (s0 carries; camera eases in)
-  4. nhl94_state                            (confirm positions + carrier)
+── EXPERIMENT LIFECYCLE ──────────────────────────────────────────────────────
+1. BASELINE: nhl94_state. Inspect carrier, positions/velocity/animation,
+   interaction_gate, and frozen_summary.
+2. CLEAN: if the old freeze set is unwanted, nhl94_unfreeze {"all":true}.
+3. STAGE: park, teleport, possession, and/or clock operations. When setting a
+   moving target, include velocity in the same teleport call.
+4. VERIFY STIMULUS: nhl94_state with describe:true. Confirm actual positions,
+   motion, carrier, visible contact/formation, and expected animation. Do this
+   before interpreting code traps.
+5. CHECK GATE: interaction_gate:CLOSED proves gmode.bit0 blocks collision/check
+   dispatch. OPEN only proves this ONE prerequisite is clear; it does not prove
+   contact, resolver entry, or a particular branch. Never infer this RAM gate
+   from a frozen HUD clock or a motionless screenshot.
+6. TRACE: arm bizhawk_trap_exec, drive frames/input, verify the stimulus again,
+   then read and stop the traps. ZERO HITS is inconclusive until frame advance,
+   movement/contact/animation, and gate state are all confirmed.
+7. CONCLUDE from measured preconditions plus trap/state results. Keep unverified
+   interpretations labeled as hypotheses.
 
-WANT TO set up a 2-on-1 rush (two attackers vs one defender + goalie side)?
-  1. nhl94_park keep=["s0","s1","s6"]        (2 attackers s0/s1, 1 defender s6)
-  2. nhl94_teleport [{target:"s0",x:-30,y:60},{target:"s1",x:30,y:60},
-                     {target:"s6",x:0,y:-40}]
-  3. nhl94_possession target:"s0"
-  4. nhl94_state
+── COPYABLE RECIPES ─────────────────────────────────────────────────────────
+Clean 1-on-1 baseline (s0 vs s6, s0 carrying):
+  1. nhl94_unfreeze {"all":true}
+  2. nhl94_park {"keep":["s0","s6"]}
+  3. nhl94_teleport {"targets":[
+       {"target":"s0","x":0,"y":0,"xv":0,"yv":0,"zv":0},
+       {"target":"s6","x":40,"y":0,"xv":0,"yv":0,"zv":0}]}
+  4. nhl94_possession {"target":"s0"}
+  5. nhl94_state {}
 
-WANT TO stage a breakaway / hand one skater the puck and center on them?
-  1. nhl94_teleport [{target:"s0",x:0,y:0}]
-  2. nhl94_possession target:"s0"            (carrier + camera follow)
-  3. nhl94_state                             (carrier should read s0)
+Loose moving puck (teleport auto-detaches):
+  1. nhl94_teleport {"targets":[
+       {"target":"pk","x":0,"y":100,"z":0,"xv":0,"yv":-300,"zv":0}]}
+  2. nhl94_state {}
 
-WANT TO freeze the whole scene to inspect it?
-  1. nhl94_freeze targets:["s0",...,"pk"]    (pin positions + zero velocity)
-  2. nhl94_clock freeze:true                 (stop the clock too)
-  3. nhl94_state                             (every held value shows a *)
+Freeze the full entity scene for inspection:
+  1. nhl94_freeze {"targets":["s0","s1","s2","s3","s4","s5",
+       "s6","s7","s8","s9","s10","s11","pk"]}
+  2. nhl94_clock {"freeze":true}
+  3. nhl94_state {}
+  Note: clock freeze does not change interaction_gate.
 
-WANT TO save a scenario and get it back after a restart?
-  1. arrange it (park/teleport/freeze/clock as above)
-  2. nhl94_rig save name:"my-drill"          (savestate + freeze set)
-  … later, even in a fresh session …
-  3. nhl94_rig apply name:"my-drill"         (clears all freezes, reloads, re-pins)
+Save and restore a reproducible rig:
+  1. Build the scene; call nhl94_state and require frozen_summary unmapped=0
+     unless every unmapped freeze is intentional.
+  2. nhl94_rig {"action":"save","name":"my-drill"}
+  3. Later: nhl94_rig {"action":"apply","name":"my-drill"}
+  4. The applied rig is paused; drive it with frame/input tools when ready.
 
-── VERIFY (always) ───────────────────────────────────────────────────────────
-After any change, call nhl94_state and check:
-  • the value moved to what you set,
-  • a * appears on each word you froze (per-target x/y/z/xv/yv/zv AND globals
-    carrier/clock/period/play/vpos/hpos/yleader),
-  • frozen_summary: total = what you expect; unmapped=0 (a nonzero unmapped or a
-    surprisingly large total means stale freezes from a previous rig — clear with
-    bizhawk_unfreeze all:true or nhl94_rig apply).
-EMPIRICAL holds (possession hold, camera pin) may not stick against the game's
-per-frame rewrite — always confirm with a read-back.`;
+── ADDRESS AND EVIDENCE SAFETY ───────────────────────────────────────────────
+• Do not hand-compute an entity address when nhl94_state or nhl94_read can
+  express the read. raw:true exposes absolute addresses only for genuine traps.
+• Structured RAM fields are authoritative for RAM facts. Vision is evidence
+  for visible geometry/action and must admit uncertainty from a single still.
+• frozen_summary unmapped>0 is a contamination warning, not automatic proof of
+  an error. Understand it, clear all freezes, or deliberately preserve it.
+• Empirical carrier holds and camera pins may fight game writes; always verify.`;
