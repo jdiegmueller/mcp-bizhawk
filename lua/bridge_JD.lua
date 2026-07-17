@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.36-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.37-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.37-jd changes: load_state now leaves emulation paused by default
+--   unless pause=false is explicit, preventing savestate drift between agent
+--   commands. Bridge bumped in lockstep for OSD consistency.
 --
 -- v2026.7.36-jd changes (server-side only; bridge unchanged): NHL94 semantic
 --   tool enhancements add faceoff-window/line-change state detection plus
@@ -633,7 +637,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.36-jd",
+    version    = "2026.7.37-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -1983,14 +1987,14 @@ local function cmd_save_state(p)
 end
 -- savestate.load implicitly unpauses the emulator. Re-pausing HERE — inside
 -- the same Lua callback, before control returns to the emulator — means zero
--- frames run between load and re-pause. Pass `pause = true` to force a
--- paused state after load regardless of the prior state.
+-- frames run between load and re-pause. Default to paused after load so agents
+-- do not lose game time between commands; pass `pause = false` for intentional
+-- real-time playback.
 local function cmd_load_state(p)
     if not CAPS.savestate_load then error("savestate.load not available") end
     local path = assert(p.path, "path required")
-    local was_paused = CAPS.ispaused and client.ispaused()
     savestate.load(path)
-    local want_paused = was_paused or p.pause or false
+    local want_paused = p.pause ~= false
     if want_paused and CAPS.pause then client.pause() end
     return { path = path, paused = want_paused, state = state_summary() }
 end

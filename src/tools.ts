@@ -698,14 +698,14 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Restore the emulator from a previously saved .State file at the given path. " +
       "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. To start fresh from console boot instead, use bizhawk_reset. " +
-      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge preserves the pause state across the load: if the emulator was paused before loading, it is re-paused in the same callback (ZERO frames run in between); pass pause=true to force a paused state after load regardless. Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
+      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge leaves the emulator PAUSED by default after load so game time cannot drift between agent commands; pass pause=false only when you intentionally want real-time playback to resume. The pause is applied in the same callback after the load (ZERO frames run between load and pause). Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
       "RETURNS: 'Loaded state from PATH (paused/running)' plus a `State:` line (frame/paused/lag/domain) — no bizhawk_get_info needed.",
     inputSchema: {
       type: "object",
       required: ["path"],
       properties: {
         path:  { type: "string", description: "Absolute filesystem path to an existing .State file produced by bizhawk_save_state on this same ROM and BizHawk core version. Loading mismatched files typically crashes the core." },
-        pause: { type: "boolean", default: false, description: "If true, the emulator is left PAUSED after the load even if it was running before. If false/omitted, the pre-load pause state is preserved. Either way, no frames run between the load and the pause taking effect." },
+        pause: { type: "boolean", default: true, description: "Default true: leave the emulator PAUSED after load so state cannot drift before the next command. Set false only when you intentionally want real-time playback to resume." },
       },
       additionalProperties: false,
     },
@@ -1153,7 +1153,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_load_slot",
     description:
       "PURPOSE: Restore the emulator from a named slot previously saved with bizhawk_save_slot for the currently loaded ROM. " +
-      "USAGE: Counterpart to bizhawk_save_slot — the snapshot/experiment/rollback loop without path bookkeeping. Pass pause=true to freeze immediately after restoring. " +
+      "USAGE: Counterpart to bizhawk_save_slot — the snapshot/experiment/rollback loop without path bookkeeping. Loads paused by default; pass pause=false only when you intentionally want real-time playback to resume. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces all current emulator state. Slots are looked up by the CURRENT ROM's hash — a slot saved under a different ROM won't be found (this is a safety feature: cross-ROM state loads crash cores). A missing name returns an error listing available slots. " +
       "RETURNS: 'Loaded slot 'NAME' (paused|running)' plus a `State:` line (frame/paused/lag/domain).",
     inputSchema: {
@@ -1161,7 +1161,7 @@ const TOOLS: Tool[] = [
       required: ["name"],
       properties: {
         name:  { type: "string", description: "Slot name as given to bizhawk_save_slot." },
-        pause: { type: "boolean", default: false, description: "Leave the emulator paused after the load (zero frames run in between)." },
+        pause: { type: "boolean", default: true, description: "Default true: leave the emulator paused after load (zero frames run between load and pause). Set false only for intentional real-time playback." },
       },
       additionalProperties: false,
     },
@@ -3234,7 +3234,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           );
         }
         const params: Record<string, unknown> = { path: file };
-        if (p.pause !== undefined) params.pause = p.pause;
+        params.pause = p.pause !== false;
         const r = await bh.call<{ paused?: boolean; state?: StateSummary }>("load_state", params);
         return ok(withState(`Loaded slot '${p.name}' (${r.paused ? "paused" : "running"})`, r.state));
       }
@@ -3378,7 +3378,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
       case "bizhawk_load_state": {
         const params: Record<string, unknown> = { path: p.path };
-        if (p.pause !== undefined) params.pause = p.pause;
+        params.pause = p.pause !== false;
         const r = await bh.call<{ path: string; paused?: boolean; state?: StateSummary }>("load_state", params);
         const base = `Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`;
         const st = fmtState(r.state);

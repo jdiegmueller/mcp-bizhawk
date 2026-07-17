@@ -10,20 +10,47 @@ import { startHarness, textOf } from "./helpers/harness.mjs";
 
 test("bizhawk_load_state appends a state summary when the bridge supplies one", async () => {
   const h = await startHarness({
-    load_state: (p) => ({
-      path: p.path,
-      paused: true,
-      state: { framecount: 999, paused: true, rom_hash: "DEADBEEF" },
-    }),
+    load_state: (p) => {
+      assert.equal(p.pause, true);
+      return {
+        path: p.path,
+        paused: true,
+        state: { framecount: 999, paused: true, rom_hash: "DEADBEEF" },
+      };
+    },
   });
   try {
     const res = await h.client.callTool({
       name: "bizhawk_load_state",
-      arguments: { path: "/x.State", pause: true },
+      arguments: { path: "/x.State" },
     });
     const t = textOf(res);
     assert.match(t, /Loaded state from \/x\.State \(paused\)/);
     assert.match(t, /State: frame 999, paused, rom DEADBEEF/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("bizhawk_load_state honors explicit pause:false", async () => {
+  const h = await startHarness({
+    load_state: (p) => {
+      assert.equal(p.pause, false);
+      return {
+        path: p.path,
+        paused: false,
+        state: { framecount: 1000, paused: false },
+      };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "bizhawk_load_state",
+      arguments: { path: "/x.State", pause: false },
+    });
+    const t = textOf(res);
+    assert.match(t, /Loaded state from \/x\.State \(running\)/);
+    assert.match(t, /State: frame 1000, running/);
   } finally {
     await h.close();
   }

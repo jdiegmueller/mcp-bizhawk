@@ -99,7 +99,7 @@ bizhawk_screenshot(path="C:/temp/after.png")
 bizhawk_load_state(path="C:/temp/before.State")
 ```
 
-BizHawk's savestates are path-based (not slot-based like mGBA's). The state file captures the entire emulator state — RAM, registers, mapper state, sound chip state — so reloading is a true rewind.
+BizHawk's savestates are path-based (not slot-based like mGBA's). The state file captures the entire emulator state — RAM, registers, mapper state, sound chip state — so reloading is a true rewind. Loads leave emulation paused by default so the restored state does not advance while the next agent command is being prepared; pass `pause:false` only when you intentionally want real-time playback to resume immediately.
 
 ---
 

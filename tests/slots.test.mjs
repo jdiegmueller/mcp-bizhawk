@@ -13,7 +13,7 @@ const HANDLERS = {
     fs.writeFileSync(p.path, "fake-state-bytes");
     return { path: p.path };
   },
-  load_state: (p) => ({ path: p.path, paused: false }),
+  load_state: (p) => ({ path: p.path, paused: p.pause === true }),
 };
 
 test("save → list → load slot round-trip", async () => {
@@ -28,9 +28,23 @@ test("save → list → load slot round-trip", async () => {
     assert.match(textOf(res), /before-boss/);
 
     res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "before-boss" } });
-    assert.match(textOf(res), /Loaded slot 'before-boss' \(running\)/);
+    assert.match(textOf(res), /Loaded slot 'before-boss' \(paused\)/);
     const call = h.bridge.calls.find((c) => c.method === "load_state");
     assert.equal(call.params.path, expected);
+    assert.equal(call.params.pause, true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("load slot honors explicit pause:false", async () => {
+  const h = await startHarness(HANDLERS);
+  try {
+    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { name: "before-boss" } });
+    const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "before-boss", pause: false } });
+    assert.match(textOf(res), /Loaded slot 'before-boss' \(running\)/);
+    const call = h.bridge.calls.find((c) => c.method === "load_state");
+    assert.equal(call.params.pause, false);
   } finally {
     await h.close();
   }

@@ -201,7 +201,7 @@ The server speaks standard MCP over **streamable-HTTP** at
 | `bizhawk_pause` / `bizhawk_unpause` | Pause / resume emulation |
 | `bizhawk_reset` | Reset the loaded core |
 | `bizhawk_screenshot` | Capture the current display — returns the PNG inline as an image block; optional path to also choose where it's saved |
-| `bizhawk_save_state` / `bizhawk_load_state` | Save / load emulator state to a file path |
+| `bizhawk_save_state` / `bizhawk_load_state` | Save / load emulator state to a file path; loads pause by default so state does not drift between tool calls |
 | `bizhawk_eval_lua` | Run an arbitrary Lua chunk in the bridge (JSON-encoded result); `unpause: true` runs it via the pause-safe path so `emu.frameadvance()` inside the chunk doesn't block forever |
 | `bizhawk_disassemble` | Decode one or more machine instructions at an address (or the current PC) |
 | `bizhawk_osd_message` | Draw a short message in BizHawk's on-screen OSD area |

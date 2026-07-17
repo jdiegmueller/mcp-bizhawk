@@ -96,14 +96,17 @@ test("load_slot appends the state summary from its underlying load_state", async
   const h = await startHarness({
     get_info: () => ({ rom_hash: "ABCD1234", rom_name: "Test ROM" }),
     save_state: (p) => { fs.writeFileSync(p.path, "fake"); return { path: p.path }; },
-    load_state: (p) => ({ path: p.path, paused: false, state: { framecount: 555, paused: false, lag_count: 2, is_lagged: false } }),
+    load_state: (p) => {
+      assert.equal(p.pause, true);
+      return { path: p.path, paused: true, state: { framecount: 555, paused: true, lag_count: 2, is_lagged: false } };
+    },
   });
   try {
     await h.client.callTool({ name: "bizhawk_save_slot", arguments: { name: "sp" } });
     const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "sp" } });
     const t = textOf(res);
-    assert.match(t, /Loaded slot 'sp' \(running\)/);
-    assert.match(t, /State: frame 555, running, lag 2/);
+    assert.match(t, /Loaded slot 'sp' \(paused\)/);
+    assert.match(t, /State: frame 555, paused, lag 2/);
   } finally {
     await h.close();
   }
