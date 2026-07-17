@@ -1,5 +1,11 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.37-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.39-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.39-jd multiplexer support (server-side; bridge unchanged)
+--
+-- v2026.7.38-jd changes: save_state/load_state and savestate-backed batch
+--   playback now validate that .State files are readable and non-empty, so
+--   callers do not continue after a silent missing-state/no-op load.
 --
 -- v2026.7.37-jd changes: load_state now leaves emulation paused by default
 --   unless pause=false is explicit, preventing savestate drift between agent
@@ -637,7 +643,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.37-jd",
+    version    = "2026.7.39-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -1508,6 +1514,23 @@ local function state_summary()
     return s
 end
 
+local function assert_readable_state_file(path)
+    if type(path) ~= "string" or path == "" then error("state path required") end
+    local f, err = io.open(path, "rb")
+    if not f then error("state file is not readable: " .. path .. (err and (" (" .. tostring(err) .. ")") or "")) end
+    local size = f:seek("end") or 0
+    f:close()
+    if size <= 0 then error("state file is empty: " .. path) end
+end
+
+local function assert_written_state_file(path)
+    local f, err = io.open(path, "rb")
+    if not f then error("savestate.save did not create readable file: " .. path .. (err and (" (" .. tostring(err) .. ")") or "")) end
+    local size = f:seek("end") or 0
+    f:close()
+    if size <= 0 then error("savestate.save created empty file: " .. path) end
+end
+
 local function cmd_get_info(p)
     local t = {
         bridge        = BRIDGE,
@@ -1844,6 +1867,7 @@ local function cmd_play_input_sequence(p)
     -- restored state. Playback unpauses regardless, so pause state is moot here.
     if p.load_state_path then
         if not CAPS.savestate_load then error("savestate.load not available") end
+        assert_readable_state_file(p.load_state_path)
         savestate.load(p.load_state_path)
     end
 
@@ -1983,6 +2007,7 @@ local function cmd_save_state(p)
     if not CAPS.savestate_save then error("savestate.save not available") end
     local path = assert(p.path, "path required (BizHawk savestates are file-based)")
     savestate.save(path)
+    assert_written_state_file(path)
     return { path = path }
 end
 -- savestate.load implicitly unpauses the emulator. Re-pausing HERE — inside
@@ -1993,6 +2018,7 @@ end
 local function cmd_load_state(p)
     if not CAPS.savestate_load then error("savestate.load not available") end
     local path = assert(p.path, "path required")
+    assert_readable_state_file(path)
     savestate.load(path)
     local want_paused = p.pause ~= false
     if want_paused and CAPS.pause then client.pause() end
@@ -2213,6 +2239,7 @@ local function cmd_run_trials(p)
     if not CAPS.joypad_set     then error("joypad.set not available") end
     if not CAPS.frameadvance   then error("emu.frameadvance not available") end
     local state_path = assert(p.state_path, "state_path required")
+    assert_readable_state_file(state_path)
     local trials     = assert(p.trials, "trials required (array of {name?, frames})")
     if type(trials) ~= "table" then error("trials must be an array") end
 
