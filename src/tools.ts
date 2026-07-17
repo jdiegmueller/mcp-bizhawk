@@ -1331,7 +1331,8 @@ const TOOLS: Tool[] = [
       "RETURNS: One line per target naming the decoded coordinates written (and whether the puck was detached), plus a note when the render-settle frames ran.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target", "targets"],
+      properties: { ...targetProp,
         targets: {
           type: "array",
           minItems: 1,
@@ -1352,7 +1353,6 @@ const TOOLS: Tool[] = [
           },
         },
       },
-      required: ["targets"],
       additionalProperties: false,
     },
   },
@@ -1452,7 +1452,8 @@ const TOOLS: Tool[] = [
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target", "ops"],
+      properties: { ...targetProp,
         ops: {
           type: "array",
           minItems: 1,
@@ -1475,7 +1476,6 @@ const TOOLS: Tool[] = [
         },
         readback: { type: "string", enum: ["post_write", "none"], default: "post_write", description: "Post-mutation RAM readback for write/freeze operations. Default post_write." },
       },
-      required: ["ops"],
       additionalProperties: false,
     },
   },
@@ -1488,7 +1488,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A concise ordered summary of what was staged.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp,
         rig: { type: "string", description: "Named nhl94_rig to apply." },
         clear_freezes: { type: "boolean", description: "Clear the bridge freeze table before other staging operations." },
         park: {
