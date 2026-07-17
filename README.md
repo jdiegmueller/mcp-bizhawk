@@ -181,6 +181,14 @@ The server speaks standard MCP over **streamable-HTTP** at
 | `MCP_HTTP_PORT` | `8765`        | Port the streamable-HTTP MCP endpoint binds |
 | `BIZHAWK_HOST`  | `127.0.0.1`   | TCP host to listen on for BizHawk          |
 | `BIZHAWK_PORT`  | `8766`        | TCP port to listen on for BizHawk          |
+| `MCP_BIZHAWK_SHOT_DIR` | OS temp dir | Screenshot directory as the server sees it |
+| `MCP_BIZHAWK_SHOT_DIR_BRIDGE` | unset | Same screenshot directory as remote BizHawk sees it, e.g. `X:\tmp` |
+| `MCP_BIZHAWK_STATE_DIR` | `~/.mcp-bizhawk/states` | Managed named savestate slot directory as the server sees it |
+| `MCP_BIZHAWK_STATE_DIR_BRIDGE` | unset | Same managed state directory as remote BizHawk sees it, e.g. `X:\.mcp-bizhawk\states` |
+| `MCP_BIZHAWK_RIG_DIR` | `~/.mcp-bizhawk/rigs` | NHL94 rig directory as the server sees it |
+| `MCP_BIZHAWK_RIG_DIR_BRIDGE` | unset | Same rig directory as remote BizHawk sees it, e.g. `X:\.mcp-bizhawk\rigs` |
+
+For remote/cross-OS BizHawk setups, the server must validate files using its local path while BizHawk saves/loads using its own path spelling. Set the `*_BRIDGE` variables when those path spellings differ.
 
 ## Tools
 
