@@ -22,7 +22,7 @@ test("bizhawk_load_state appends a state summary when the bridge supplies one", 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_load_state",
-      arguments: { path: "/x.State" },
+      arguments: { target: h.target, path: "/x.State" },
     });
     const t = textOf(res);
     assert.match(t, /Loaded state from \/x\.State \(paused\)/);
@@ -46,7 +46,7 @@ test("bizhawk_load_state honors explicit pause:false", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_load_state",
-      arguments: { path: "/x.State", pause: false },
+      arguments: { target: h.target, path: "/x.State", pause: false },
     });
     const t = textOf(res);
     assert.match(t, /Loaded state from \/x\.State \(running\)/);
@@ -63,7 +63,7 @@ test("bizhawk_frame_advance appends a state summary when the bridge supplies one
   try {
     const res = await h.client.callTool({
       name: "bizhawk_frame_advance",
-      arguments: { count: 3 },
+      arguments: { target: h.target, count: 3 },
     });
     const t = textOf(res);
     assert.match(t, /Advanced 3 frame\(s\)\. Framecount: 1234/);
@@ -78,7 +78,7 @@ test("bizhawk_frame_advance still works against a legacy bare-number bridge", as
   try {
     const res = await h.client.callTool({
       name: "bizhawk_frame_advance",
-      arguments: { count: 1 },
+      arguments: { target: h.target, count: 1 },
     });
     const t = textOf(res);
     assert.match(t, /Advanced 1 frame\(s\)\. Framecount: 42/);
@@ -100,7 +100,7 @@ test("bizhawk_play_input_sequence appends a state summary when the bridge suppli
   try {
     const res = await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: { frames: [{ buttons: { Right: true }, hold: 10 }] },
+      arguments: { target: h.target, frames: [{ buttons: { Right: true }, hold: 10 }] },
     });
     const t = textOf(res);
     assert.match(t, /State: frame 1500, running, rom AB/);

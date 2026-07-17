@@ -10,8 +10,7 @@ test("bizhawk_read_many returns labeled values in request order", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_read_many",
-      arguments: {
-        reads: [
+      arguments: { target: h.target, reads: [
           { name: "hp", address: 0x100, width: "u8" },
           { name: "score", address: 0x200, width: "u16_be" },
           { name: "vel_y", address: 0x300, width: "s16_be" },

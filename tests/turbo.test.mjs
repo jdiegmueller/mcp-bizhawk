@@ -7,7 +7,7 @@ test("bizhawk_frame_advance passes turbo through to the bridge", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_frame_advance",
-      arguments: { count: 5, turbo: true },
+      arguments: { target: h.target, count: 5, turbo: true },
     });
     assert.match(textOf(res), /Advanced 5 frame\(s\)\. Framecount: 1234/);
     const call = h.bridge.calls.find((c) => c.method === "frame_advance");
@@ -25,7 +25,7 @@ test("bizhawk_wait_for_memory passes turbo through to the bridge", async () => {
   try {
     await h.client.callTool({
       name: "bizhawk_wait_for_memory",
-      arguments: { address: 0x10, condition: "eq", value: 7, turbo: true },
+      arguments: { target: h.target, address: 0x10, condition: "eq", value: 7, turbo: true },
     });
     const call = h.bridge.calls.find((c) => c.method === "wait_for_memory");
     assert.equal(call.params.turbo, true);
@@ -41,7 +41,7 @@ test("bizhawk_play_input_sequence passes turbo through to the bridge", async () 
   try {
     await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: { frames: [{ buttons: { Right: true }, hold: 10 }], turbo: true },
+      arguments: { target: h.target, frames: [{ buttons: { Right: true }, hold: 10 }], turbo: true },
     });
     const call = h.bridge.calls.find((c) => c.method === "play_input_sequence");
     assert.equal(call.params.turbo, true);

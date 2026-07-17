@@ -17,7 +17,7 @@ test("bizhawk_record_input returns RLE frames as play_input_sequence-ready JSON"
   try {
     const res = await h.client.callTool({
       name: "bizhawk_record_input",
-      arguments: { max_frames: 90 },
+      arguments: { target: h.target, max_frames: 90 },
     });
     const text = textOf(res);
     assert.match(text, /Recorded 90 frame\(s\) in 3 entr(y|ies)/);
@@ -38,7 +38,7 @@ test("bizhawk_record_input handles the no-input empty-frames case", async () => 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_record_input",
-      arguments: { max_frames: 10, stop_on_memory_change: { address: 0x10, width: "u8" } },
+      arguments: { target: h.target, max_frames: 10, stop_on_memory_change: { address: 0x10, width: "u8" } },
     });
     assert.match(textOf(res), /Recorded 0 frame\(s\)/);
     assert.match(textOf(res), /stopped early/);

@@ -22,8 +22,7 @@ test("bizhawk_run_trials forwards the sweep spec and tabulates per-trial results
   try {
     const res = await h.client.callTool({
       name: "bizhawk_run_trials",
-      arguments: {
-        state_path: "/mnt/states/faceoff.State",
+      arguments: { target: h.target, state_path: "/mnt/states/faceoff.State",
         observe_memory: [
           { name: "px", address: 0x10, width: "s32_be" },
           { name: "py", address: 0x20, width: "s32_be" },
@@ -62,8 +61,7 @@ test("bizhawk_run_trials inlines per-trial screenshots when captured", async () 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_run_trials",
-      arguments: {
-        state_path: "/s.State",
+      arguments: { target: h.target, state_path: "/s.State",
         screenshot: true,
         trials: [{ name: "t0", frames: [{ buttons: {}, hold: 10 }] }],
       },

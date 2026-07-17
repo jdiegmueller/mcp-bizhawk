@@ -31,7 +31,7 @@ test("bizhawk_screenshot returns the PNG AND a vision caption by default", async
     // describe defaults to true — no need to pass it.
     const res = await h.client.callTool({
       name: "bizhawk_screenshot",
-      arguments: { path: png, describe_prompt: "Where is the puck?" },
+      arguments: { target: h.target, path: png, describe_prompt: "Where is the puck?" },
     });
     const t = textOf(res);
     // The PNG is STILL inlined (describe is additive now, not a replacement)...
@@ -67,7 +67,7 @@ test("bizhawk_screenshot describe:false returns the PNG only, no vision call", a
   try {
     const res = await h.client.callTool({
       name: "bizhawk_screenshot",
-      arguments: { path: png, describe: false },
+      arguments: { target: h.target, path: png, describe: false },
     });
     assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG inlined");
     assert.equal(stub.received.length, 0, "vision endpoint not called when describe:false");
@@ -89,7 +89,7 @@ test("bizhawk_screenshot degrades to image + note when vision is unconfigured", 
   try {
     // describe defaults true, but vision isn't configured: still succeed, still
     // return the image, and append a short note instead of erroring.
-    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { path: png } });
+    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { target: h.target, path: png } });
     assert.equal(res.isError ?? false, false);
     assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG still returned");
     assert.match(textOf(res), /vision caption unavailable/);
@@ -113,14 +113,14 @@ test("nhl94_state appends a vision caption by default, omits it with describe:fa
   });
   try {
     // Default: structured data + caption.
-    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: {} }));
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target } }));
     assert.match(t, /carrier:/, "structured data present");
     assert.match(t, /Faceoff at center ice/, "caption appended by default");
     assert.match(t, /described by test-vlm/i);
     assert.equal(stub.received.length, 1);
 
     // describe:false → structured only, no vision call.
-    const t2 = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
+    const t2 = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
     assert.match(t2, /carrier:/);
     assert.doesNotMatch(t2, /Faceoff at center ice/);
     assert.doesNotMatch(t2, /Screenshot described by/);
@@ -153,8 +153,7 @@ test("bizhawk_play_input_sequence with describe returns per-observation descript
   try {
     const res = await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: {
-        screenshot_every: 30,
+      arguments: { target: h.target, screenshot_every: 30,
         describe: true,
         describe_prompt: "What is happening?",
         frames: [{ buttons: { Right: true }, hold: 60 }],

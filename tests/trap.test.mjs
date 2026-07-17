@@ -13,7 +13,7 @@ test("bizhawk_trap_memory reports a hit with registers", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_trap_memory",
-      arguments: { kind: "write", address: 0xc468, timeout_frames: 100 },
+      arguments: { target: h.target, kind: "write", address: 0xc468, timeout_frames: 100 },
     });
     const text = textOf(res);
     assert.match(text, /TRAPPED write @ 0xC468 after 12 frame\(s\)/);
@@ -34,7 +34,7 @@ test("bizhawk_trap_memory reports a timeout without erroring", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_trap_memory",
-      arguments: { address: 0x10 },
+      arguments: { target: h.target, address: 0x10 },
     });
     assert.equal(res.isError ?? false, false);
     assert.match(textOf(res), /No write to 0x0010 within 100 frame\(s\)/);

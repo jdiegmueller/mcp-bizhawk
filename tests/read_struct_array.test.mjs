@@ -10,8 +10,7 @@ test("bizhawk_read_struct_array formats one line per record, fields in request o
   try {
     const res = await h.client.callTool({
       name: "bizhawk_read_struct_array",
-      arguments: {
-        base: 0xb04a,
+      arguments: { target: h.target, base: 0xb04a,
         stride: 0x80,
         count: 2,
         fields: [

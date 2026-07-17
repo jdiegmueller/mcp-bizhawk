@@ -16,7 +16,7 @@ test("nhl94_fields reads named entity and global fields", async () => {
   try {
     const res = await h.client.callTool({
       name: "nhl94_fields",
-      arguments: {
+      arguments: { target: h.target, 
         ops: [
           { op: "read", target: "s0", field: "fdir" },
           { op: "read", target: "global", field: "clock" },
@@ -49,7 +49,7 @@ test("nhl94_fields writes and freezes with post-write readback", async () => {
   try {
     const res = await h.client.callTool({
       name: "nhl94_fields",
-      arguments: {
+      arguments: { target: h.target, 
         ops: [
           { op: "write", target: "s6", field: "lockout", value: 0 },
           { op: "write", target: "s6", field: "fdir", value: 4, freeze: true },
@@ -83,7 +83,7 @@ test("nhl94_fields freeze without value pins the current RAM value", async () =>
   try {
     const res = await h.client.callTool({
       name: "nhl94_fields",
-      arguments: {
+      arguments: { target: h.target, 
         ops: [{ op: "freeze", target: "s6", field: "fdir" }],
       },
     });
@@ -100,14 +100,14 @@ test("nhl94_fields requires allow_raw for raw entity offsets and global addresse
     await assert.rejects(
       h.client.callTool({
         name: "nhl94_fields",
-        arguments: { ops: [{ op: "read", target: "s0", offset: "0x71", width: "u8" }] },
+        arguments: { target: h.target,  ops: [{ op: "read", target: "s0", offset: "0x71", width: "u8" }] },
       }),
       /allow_raw:true/,
     );
     await assert.rejects(
       h.client.callTool({
         name: "nhl94_fields",
-        arguments: { ops: [{ op: "read", target: "global", address: "0xFFC304", width: "u16_be" }] },
+        arguments: { target: h.target,  ops: [{ op: "read", target: "global", address: "0xFFC304", width: "u16_be" }] },
       }),
       /allow_raw:true/,
     );

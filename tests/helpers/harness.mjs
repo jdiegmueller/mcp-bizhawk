@@ -5,30 +5,24 @@ import { BizhawkServer } from "../../dist/bizhawk.js";
 import { registerTools } from "../../dist/tools.js";
 import { FakeBridge } from "./fake-bridge.mjs";
 
-/**
- * Boots the full stack for one test: BizhawkServer TCP listener on a random
- * port, a FakeBridge dialed into it, and an MCP client wired to the tool
- * layer over an in-memory transport.
- *
- * Use `await client.callTool({name, arguments})` to exercise a tool
- * end-to-end; inspect `bridge.calls` for what reached the (fake) Lua side.
- */
 export async function startHarness(handlers = {}) {
   let bh = null;
+  let port;
   for (let attempt = 0; attempt < 5 && !bh; attempt++) {
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const candidate = new BizhawkServer({ host: "127.0.0.1", port, timeoutMs: 3000 });
+    port = 20000 + Math.floor(Math.random() * 20000);
+    const candidate = new BizhawkServer();
     try {
-      await candidate.start();
+      await candidate.start({ test: { bizhawkPort: port } });
       bh = candidate;
       bh.testPort = port;
+      bh.testTarget = "test";
     } catch {
       /* port in use — retry */
     }
   }
   if (!bh) throw new Error("could not bind a test port after 5 attempts");
 
-  const bridge = new FakeBridge(bh.testPort, handlers);
+  const bridge = new FakeBridge(port, handlers);
   await bridge.connect();
 
   const server = new Server(
@@ -41,9 +35,9 @@ export async function startHarness(handlers = {}) {
   const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  // Wait until the server has seen at least one READY from the fake bridge.
+  // Wait until the backend is ready.
   const deadline = Date.now() + 2000;
-  while (!bh.isBridgeReady()) {
+  while (bh.listBackends().find((x) => x.name === "test")?.state !== "ready") {
     if (Date.now() > deadline) throw new Error("fake bridge never became ready");
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -52,15 +46,15 @@ export async function startHarness(handlers = {}) {
     client,
     bridge,
     bh,
+    target: "test",
     close: async () => {
       bridge.close();
       await client.close();
-      bh.stop();
+      await bh.stop();
     },
   };
 }
 
-/** Concatenate all text content blocks of a tool result. */
 export function textOf(result) {
   return result.content
     .filter((c) => c.type === "text")

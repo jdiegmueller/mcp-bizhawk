@@ -14,7 +14,7 @@ test("bizhawk_trap_exec start forwards traps and reports armed names", async () 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_trap_exec",
-      arguments: { action: "start", traps: [{ addr: 0x13d00, name: "entry", capture: ["A2", "A3", "@A3+0x28:s16"] }], limit: 50 },
+      arguments: { target: h.target, action: "start", traps: [{ addr: 0x13d00, name: "entry", capture: ["A2", "A3", "@A3+0x28:s16"] }], limit: 50 },
     });
     assert.match(textOf(res), /Armed 1 trap\(s\): entry/);
     assert.equal(seen.action, "start");
@@ -29,7 +29,7 @@ test("bizhawk_trap_exec start requires a non-empty traps array", async () => {
   const h = await startHarness({ trap_exec: () => ({}) });
   try {
     await assert.rejects(
-      h.client.callTool({ name: "bizhawk_trap_exec", arguments: { action: "start" } }),
+      h.client.callTool({ name: "bizhawk_trap_exec", arguments: { target: h.target, action: "start" } }),
       /requires a non-empty `traps`/,
     );
   } finally {
@@ -47,12 +47,12 @@ test("bizhawk_trap_exec read/status/stop format the bridge result", async () => 
     },
   });
   try {
-    const rd = textOf(await h.client.callTool({ name: "bizhawk_trap_exec", arguments: { action: "read" } }));
+    const rd = textOf(await h.client.callTool({ name: "bizhawk_trap_exec", arguments: { target: h.target, action: "read" } }));
     assert.match(rd, /counts=\{"entry":2\}/);
     assert.match(rd, /"f": 100/);
-    const st = textOf(await h.client.callTool({ name: "bizhawk_trap_exec", arguments: { action: "status" } }));
+    const st = textOf(await h.client.callTool({ name: "bizhawk_trap_exec", arguments: { target: h.target, action: "status" } }));
     assert.match(st, /active=true/);
-    const sp = textOf(await h.client.callTool({ name: "bizhawk_trap_exec", arguments: { action: "stop" } }));
+    const sp = textOf(await h.client.callTool({ name: "bizhawk_trap_exec", arguments: { target: h.target, action: "stop" } }));
     assert.match(sp, /Stopped trap_exec\. Final counts: \{"entry":2\}/);
   } finally {
     await h.close();

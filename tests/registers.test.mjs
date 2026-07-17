@@ -7,7 +7,7 @@ test("bizhawk_get_registers formats sorted name = dec (hex) lines", async () => 
     get_registers: () => ({ PC: 0x1234, D0: 255, A7: 0xfffe00 }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_get_registers", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_get_registers", arguments: { target: h.target } });
     const lines = textOf(res).split("\n");
     assert.equal(lines[0], "A7 = 16776704 (0xFFFE00)");
     assert.equal(lines[1], "D0 = 255 (0xFF)");
@@ -22,7 +22,7 @@ test("bizhawk_set_register passes name and value through", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_set_register",
-      arguments: { name: "D0", value: 42 },
+      arguments: { target: h.target, name: "D0", value: 42 },
     });
     assert.match(textOf(res), /Set register D0 = 42/);
     const call = h.bridge.calls.find((c) => c.method === "set_register");

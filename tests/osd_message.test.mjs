@@ -7,7 +7,7 @@ test("bizhawk_osd_message passes the message through and confirms", async () => 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_osd_message",
-      arguments: { message: "hunting puck addr" },
+      arguments: { target: h.target, message: "hunting puck addr" },
     });
     assert.match(textOf(res), /OSD message shown: hunting puck addr/);
     assert.equal(

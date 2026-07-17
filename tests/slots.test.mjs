@@ -19,15 +19,15 @@ const HANDLERS = {
 test("save → list → load slot round-trip", async () => {
   const h = await startHarness(HANDLERS);
   try {
-    let res = await h.client.callTool({ name: "bizhawk_save_slot", arguments: { name: "before-boss" } });
+    let res = await h.client.callTool({ name: "bizhawk_save_slot", arguments: { target: h.target, name: "before-boss" } });
     assert.match(textOf(res), /Saved slot 'before-boss'/);
     const expected = path.join(process.env.MCP_BIZHAWK_STATE_DIR, "ABCD1234", "before-boss.State");
     assert.ok(fs.existsSync(expected), `state file missing at ${expected}`);
 
-    res = await h.client.callTool({ name: "bizhawk_list_slots", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_list_slots", arguments: { target: h.target } });
     assert.match(textOf(res), /before-boss/);
 
-    res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "before-boss" } });
+    res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { target: h.target, name: "before-boss" } });
     assert.match(textOf(res), /Loaded slot 'before-boss' \(paused\)/);
     const call = h.bridge.calls.find((c) => c.method === "load_state");
     assert.equal(call.params.path, expected);
@@ -40,8 +40,8 @@ test("save → list → load slot round-trip", async () => {
 test("load slot honors explicit pause:false", async () => {
   const h = await startHarness(HANDLERS);
   try {
-    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { name: "before-boss" } });
-    const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "before-boss", pause: false } });
+    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { target: h.target, name: "before-boss" } });
+    const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { target: h.target, name: "before-boss", pause: false } });
     assert.match(textOf(res), /Loaded slot 'before-boss' \(running\)/);
     const call = h.bridge.calls.find((c) => c.method === "load_state");
     assert.equal(call.params.pause, false);
@@ -56,7 +56,7 @@ test("load_slot of a missing name rejects, listing what exists", async () => {
   const h = await startHarness(HANDLERS);
   try {
     await assert.rejects(
-      h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "nope" } }),
+      h.client.callTool({ name: "bizhawk_load_slot", arguments: { target: h.target, name: "nope" } }),
       /no slot 'nope'/,
     );
   } finally {
@@ -68,7 +68,7 @@ test("slot names are validated (path traversal rejected)", async () => {
   const h = await startHarness(HANDLERS);
   try {
     await assert.rejects(
-      h.client.callTool({ name: "bizhawk_save_slot", arguments: { name: "../evil" } }),
+      h.client.callTool({ name: "bizhawk_save_slot", arguments: { target: h.target, name: "../evil" } }),
       /slot name must be/,
     );
   } finally {

@@ -12,8 +12,7 @@ test("bizhawk_play_input_sequence forwards load_state_path to the bridge", async
   try {
     await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: {
-        load_state_path: "/mnt/states/home.State",
+      arguments: { target: h.target, load_state_path: "/mnt/states/home.State",
         frames: [{ buttons: { A: true }, hold: 1 }, { buttons: {}, hold: 4 }],
       },
     });
@@ -31,7 +30,7 @@ test("bizhawk_play_input_sequence omits load_state_path when not provided", asyn
   try {
     await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: { frames: [{ buttons: {}, hold: 5 }] },
+      arguments: { target: h.target, frames: [{ buttons: {}, hold: 5 }] },
     });
     const call = h.bridge.calls.find((c) => c.method === "play_input_sequence");
     assert.equal(call.params.load_state_path, undefined);

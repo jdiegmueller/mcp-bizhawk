@@ -7,8 +7,7 @@ test("bizhawk_memory_ops passes a mixed batch through and reports each op", asyn
   try {
     const res = await h.client.callTool({
       name: "bizhawk_memory_ops",
-      arguments: {
-        width: "u16_be",
+      arguments: { target: h.target, width: "u16_be",
         domain: "M68K BUS",
         ops: [
           { op: "write",    address: 0xffb44a, value: 0xff92 },

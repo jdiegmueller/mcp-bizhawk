@@ -14,7 +14,7 @@ test("nhl94_park parks every skater not in keep and freezes 5 ops each", async (
     frame_advance: (p) => ({ framecount: 1000 + (p.count ?? 1) }),
   });
   try {
-    const res = await h.client.callTool({ name: "nhl94_park", arguments: { keep: ["s2"] } });
+    const res = await h.client.callTool({ name: "nhl94_park", arguments: { target: h.target, keep: ["s2"] } });
     const text = textOf(res);
     assert.match(text, /Parked 11 skater\(s\) at y=32000/);
     assert.match(text, /kept s2/);
@@ -36,7 +36,7 @@ test("nhl94_park errors when every skater is kept", async () => {
   try {
     const all = Array.from({ length: 12 }, (_, i) => `s${i}`);
     await assert.rejects(
-      h.client.callTool({ name: "nhl94_park", arguments: { keep: all } }),
+      h.client.callTool({ name: "nhl94_park", arguments: { target: h.target, keep: all } }),
       /nothing to park/,
     );
   } finally {
@@ -58,14 +58,14 @@ test("nhl94_rig save → list → apply → delete round-trips through the store
     memory_ops: (p) => { applied.push(p); return { frozen_count: p.ops.length }; },
   });
   try {
-    const save = await h.client.callTool({ name: "nhl94_rig", arguments: { action: "save", name: "faceoff" } });
+    const save = await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "save", name: "faceoff" } });
     assert.match(textOf(save), /Saved rig "faceoff" \(1 freeze\(s\)\)/);
     assert.ok(fs.existsSync(path.join(rigDir, "ABC123", "faceoff.json")));
 
-    const list = await h.client.callTool({ name: "nhl94_rig", arguments: { action: "list" } });
+    const list = await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "list" } });
     assert.match(textOf(list), /faceoff — 1 freeze\(s\)/);
 
-    const apply = await h.client.callTool({ name: "nhl94_rig", arguments: { action: "apply", name: "faceoff" } });
+    const apply = await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "apply", name: "faceoff" } });
     assert.match(textOf(apply), /Applied rig "faceoff".*re-applied 1 freeze/s);
     // apply clears all freezes, loads paused, then re-freezes
     assert.ok(h.bridge.calls.some((c) => c.method === "unfreeze" && c.params.all === true));
@@ -73,7 +73,7 @@ test("nhl94_rig save → list → apply → delete round-trips through the store
     assert.equal(applied.at(-1).ops[0].op, "freeze");
     assert.equal(applied.at(-1).ops[0].address, 0xffb04a);
 
-    const del = await h.client.callTool({ name: "nhl94_rig", arguments: { action: "delete", name: "faceoff" } });
+    const del = await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "delete", name: "faceoff" } });
     assert.match(textOf(del), /Deleted rig "faceoff"/);
     assert.ok(!fs.existsSync(path.join(rigDir, "ABC123", "faceoff.json")));
   } finally {
@@ -92,7 +92,7 @@ test("nhl94_rig apply on a missing name errors with available rigs", async () =>
   });
   try {
     await assert.rejects(
-      h.client.callTool({ name: "nhl94_rig", arguments: { action: "apply", name: "nope" } }),
+      h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "apply", name: "nope" } }),
       /no rig "nope"/,
     );
   } finally {
@@ -108,8 +108,7 @@ test("nhl94_stage rejects puck placement with skater possession", async () => {
     await assert.rejects(
       h.client.callTool({
         name: "nhl94_stage",
-        arguments: {
-          place: [{ target: "pk", x: 0, y: 0, xv: 25000 }],
+        arguments: { target: h.target, place: [{ target: "pk", x: 0, y: 0, xv: 25000 }],
           possession: "s0",
         },
       }),
@@ -133,11 +132,11 @@ test("nhl94_stage clears freezes before applying a rig", async () => {
     memory_ops: (p) => ({ frozen_count: p.ops.length }),
   });
   try {
-    await h.client.callTool({ name: "nhl94_rig", arguments: { action: "save", name: "stagebase" } });
+    await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "save", name: "stagebase" } });
     h.bridge.calls.length = 0;
     const res = await h.client.callTool({
       name: "nhl94_stage",
-      arguments: { clear_freezes: true, rig: "stagebase", settle_frames: 0 },
+      arguments: { target: h.target, clear_freezes: true, rig: "stagebase", settle_frames: 0 },
     });
     assert.match(textOf(res), /Applied rig "stagebase"/);
     const methods = h.bridge.calls.map((c) => c.method);
@@ -167,7 +166,7 @@ test("nhl94_stage supports fdir-only placement without teleport fields", async (
   try {
     const res = await h.client.callTool({
       name: "nhl94_stage",
-      arguments: { place: [{ target: "s0", fdir: 4 }] },
+      arguments: { target: h.target, place: [{ target: "s0", fdir: 4 }] },
     });
     assert.match(textOf(res), /Placed 1 target\(s\) \(1 op\(s\)\)/);
   } finally {

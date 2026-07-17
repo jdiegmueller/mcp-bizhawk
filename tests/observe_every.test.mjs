@@ -12,8 +12,7 @@ test("bizhawk_play_input_sequence forwards observe_every to the bridge", async (
   try {
     await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: {
-        observe_every: 1,
+      arguments: { target: h.target, observe_every: 1,
         observe_memory: [{ name: "x", address: 0x10, width: "u8" }],
         frames: [{ buttons: {}, hold: 5 }],
       },
@@ -41,8 +40,7 @@ test("bizhawk_play_input_sequence returns memory observations with no image bloc
   try {
     const res = await h.client.callTool({
       name: "bizhawk_play_input_sequence",
-      arguments: {
-        observe_every: 1,
+      arguments: { target: h.target, observe_every: 1,
         observe_memory: [{ name: "x", address: 0x10, width: "u8" }],
         frames: [{ buttons: {}, hold: 3 }],
       },

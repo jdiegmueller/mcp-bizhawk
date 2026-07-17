@@ -14,7 +14,7 @@ test("nhl94_teleport writes provided axes as 16.16 and reports decoded coords", 
   try {
     const res = await h.client.callTool({
       name: "nhl94_teleport",
-      arguments: { targets: [{ target: "s3", x: 200, y: -40 }] },
+      arguments: { target: h.target, targets: [{ target: "s3", x: 200, y: -40 }] },
     });
     assert.match(textOf(res), /Teleported s3 → x=200 y=-40/);
     // After the write the tool settles a few frames so the move renders.
@@ -40,7 +40,7 @@ test("nhl94_teleport pk auto-detaches when a skater carries the puck", async () 
   try {
     const res = await h.client.callTool({
       name: "nhl94_teleport",
-      arguments: { targets: [{ target: "pk", x: 0, y: 0 }] },
+      arguments: { target: h.target, targets: [{ target: "pk", x: 0, y: 0 }] },
     });
     assert.match(textOf(res), /detached from s3/);
     // frame_advance isn't mocked here → nhlSettle degrades silently (no note),
@@ -63,7 +63,7 @@ test("nhl94_teleport pk stays loose when nobody carries the puck", async () => {
   try {
     const res = await h.client.callTool({
       name: "nhl94_teleport",
-      arguments: { targets: [{ target: "pk", x: 5 }] },
+      arguments: { target: h.target, targets: [{ target: "pk", x: 5 }] },
     });
     assert.match(textOf(res), /loose puck/);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
@@ -87,7 +87,7 @@ test("nhl94_freeze captures current positions and freezes 6 ops per target", asy
     memory_ops: () => ({ frozen_count: 6 }),
   });
   try {
-    const res = await h.client.callTool({ name: "nhl94_freeze", arguments: { targets: ["s5"] } });
+    const res = await h.client.callTool({ name: "nhl94_freeze", arguments: { target: h.target, targets: ["s5"] } });
     assert.match(textOf(res), /Froze s5 in place @ \(x=210,y=15,z=0\); zeroed xv\/yv\/zv/);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.ops.length, 6);
@@ -105,7 +105,7 @@ test("nhl94_unfreeze releases the 6 addresses per target", async () => {
     memory_ops: () => ({ frozen_count: 0 }),
   });
   try {
-    const res = await h.client.callTool({ name: "nhl94_unfreeze", arguments: { targets: ["s0", "pk"] } });
+    const res = await h.client.callTool({ name: "nhl94_unfreeze", arguments: { target: h.target, targets: ["s0", "pk"] } });
     assert.match(textOf(res), /Released freezes on s0/);
     assert.match(textOf(res), /Released freezes on pk/);
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
@@ -119,7 +119,7 @@ test("nhl94_unfreeze releases the 6 addresses per target", async () => {
 test("nhl94_unfreeze all=true clears the entire bridge freeze table", async () => {
   const h = await startHarness({ unfreeze: () => ({ frozen_count: 0 }) });
   try {
-    const res = await h.client.callTool({ name: "nhl94_unfreeze", arguments: { all: true } });
+    const res = await h.client.callTool({ name: "nhl94_unfreeze", arguments: { target: h.target, all: true } });
     assert.match(textOf(res), /Released all freezes \(targets, globals, stale, and unmapped\)/);
     const call = h.bridge.calls.find((c) => c.method === "unfreeze");
     assert.deepEqual(call.params, { all: true });
@@ -133,11 +133,11 @@ test("nhl94_unfreeze requires exactly one scope", async () => {
   const h = await startHarness({ unfreeze: () => ({ frozen_count: 0 }) });
   try {
     await assert.rejects(
-      h.client.callTool({ name: "nhl94_unfreeze", arguments: {} }),
+      h.client.callTool({ name: "nhl94_unfreeze", arguments: { target: h.target } }),
       /non-empty targets array or all:true/,
     );
     await assert.rejects(
-      h.client.callTool({ name: "nhl94_unfreeze", arguments: { targets: ["s0"], all: true } }),
+      h.client.callTool({ name: "nhl94_unfreeze", arguments: { target: h.target, targets: ["s0"], all: true } }),
       /either targets or all:true, not both/,
     );
   } finally {
@@ -168,7 +168,7 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
   try {
     // describe:false keeps this focused on the structured decode (the vision
     // caption is on by default now).
-    const res = await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } });
+    const res = await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } });
     const text = textOf(res);
     assert.match(text, /s3: x=200 y=-40/);
     assert.match(text, /pk: x=8 y=8/);
@@ -193,7 +193,7 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /layout: slot structs @ base=0xFFB04A stride=0x80 domain='M68K BUS'/);
     assert.match(text, /anim\+58 spanum\+5A/);
     // raw:true exposes each target's absolute struct address (s3 @ base+3*0x80).
-    const rawRes = await h.client.callTool({ name: "nhl94_state", arguments: { raw: true, describe: false } });
+    const rawRes = await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, raw: true, describe: false } });
     assert.match(textOf(rawRes), /s3 @0xFFB1CA:/);
   } finally {
     await h.close();
@@ -208,7 +208,7 @@ test("nhl94_read decodes named + raw fields per target via one read_many", async
     read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, r.name.endsWith(".x") ? (100 << 16) : (r.address & 0xff)])),
   });
   try {
-    const res = await h.client.callTool({ name: "nhl94_read", arguments: { targets: ["s0", "pk"], fields: ["x", "impact", "pf", "+0x40:s16_be"] } });
+    const res = await h.client.callTool({ name: "nhl94_read", arguments: { target: h.target, targets: ["s0", "pk"], fields: ["x", "impact", "pf", "+0x40:s16_be"] } });
     const t = textOf(res);
     // x is 16.16 → decoded to whole pixels (100); others are raw integers.
     assert.match(t, /s0: x=100 impact=\d+ pf=\d+ \+0x40:s16_be=\d+/);
@@ -226,7 +226,7 @@ test("nhl94_read rejects unknown fields", async () => {
   const h = await startHarness({ list_memory_domains: () => DOMAINS, read_many: () => ({}) });
   try {
     await assert.rejects(
-      h.client.callTool({ name: "nhl94_read", arguments: { targets: ["s0"], fields: ["bogus"] } }),
+      h.client.callTool({ name: "nhl94_read", arguments: { target: h.target, targets: ["s0"], fields: ["bogus"] } }),
       /unknown field/,
     );
   } finally {
@@ -250,7 +250,7 @@ test("nhl94_state verbose:true appends the extended per-entity line", async () =
     list_frozen: () => ({ frozen: [] }),
   });
   try {
-    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { verbose: true, describe: false } }));
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, verbose: true, describe: false } }));
     assert.match(t, /impact=42 impactp=7 pos=3 nopuck=1 pf=0x12 pf2=0x34 pf3=0x56 wgt8=200/);
   } finally {
     await h.close();
@@ -268,7 +268,7 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     list_frozen: () => ({ frozen: [] }),
   });
   try {
-    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
     assert.match(text, /play: stopped/);
     assert.match(text, /faceoff: yes/);
     // phase headline: session=0xFF + gmode bit0 set ⇒ on-ice faceoff/stoppage.
@@ -317,7 +317,7 @@ test("nhl94_state reports RAM-backed faceoff line-change window", async () => {
     list_frozen: () => ({ frozen: [] }),
   });
   try {
-    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { describe: false } }));
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
     assert.match(text, /phase: faceoff_line_change/);
     assert.match(text, /phase_label: faceoff \/ line-change \(pre-drop\)/);
     assert.match(text, /faceoff_window: active=true latch=0x2710\(10000\) home=Chk\(2\) away=Sc1\(0\)/);

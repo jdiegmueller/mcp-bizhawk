@@ -7,7 +7,7 @@ test("bizhawk_eval_lua returns the JSON-encoded result", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_eval_lua",
-      arguments: { code: "return {echoed='x', n=42}" },
+      arguments: { target: h.target, code: "return {echoed='x', n=42}" },
     });
     const parsed = JSON.parse(textOf(res));
     assert.equal(parsed.n, 42);
@@ -21,7 +21,7 @@ test("bizhawk_eval_lua renders a nil result as (nil)", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_eval_lua",
-      arguments: { code: "local x = 1" },
+      arguments: { target: h.target, code: "local x = 1" },
     });
     assert.equal(textOf(res), "(nil)");
   } finally {
@@ -39,7 +39,7 @@ test("bizhawk_eval_lua surfaces Lua errors as MCP errors (callTool rejects)", as
   });
   try {
     await assert.rejects(
-      h.client.callTool({ name: "bizhawk_eval_lua", arguments: { code: "return nil.x" } }),
+      h.client.callTool({ name: "bizhawk_eval_lua", arguments: { target: h.target, code: "return nil.x" } }),
       /Lua runtime error/,
     );
   } finally {

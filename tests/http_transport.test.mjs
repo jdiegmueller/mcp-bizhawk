@@ -14,20 +14,20 @@ import { FakeBridge } from "./helpers/fake-bridge.mjs";
  */
 async function startHttpDaemon(handlers = {}) {
   let bh = null;
+  let port;
   for (let attempt = 0; attempt < 5 && !bh; attempt++) {
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const candidate = new BizhawkServer({ host: "127.0.0.1", port, timeoutMs: 3000 });
+    port = 20000 + Math.floor(Math.random() * 20000);
+    const candidate = new BizhawkServer();
     try {
-      await candidate.start();
+      await candidate.start({ test: { bizhawkPort: port } });
       bh = candidate;
-      bh.testPort = port;
     } catch {
       /* port in use — retry */
     }
   }
   if (!bh) throw new Error("could not bind a BizHawk test port after 5 attempts");
 
-  const bridge = new FakeBridge(bh.testPort, handlers);
+  const bridge = new FakeBridge(port, handlers);
   await bridge.connect();
 
   const httpServer = createMcpHttpServer(bh);
@@ -35,9 +35,9 @@ async function startHttpDaemon(handlers = {}) {
   const httpPort = httpServer.address().port;
   const url = new URL(`http://127.0.0.1:${httpPort}${MCP_PATH}`);
 
-  // Wait until the server has seen at least one READY from the fake bridge.
+  // Wait until the backend is ready.
   const deadline = Date.now() + 2000;
-  while (!bh.isBridgeReady()) {
+  while (bh.listBackends().find((x) => x.name === "test")?.state !== "ready") {
     if (Date.now() > deadline) throw new Error("fake bridge never became ready");
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -47,7 +47,7 @@ async function startHttpDaemon(handlers = {}) {
     close: async () => {
       bridge.close();
       await new Promise((resolve) => httpServer.close(resolve));
-      bh.stop();
+      await bh.stop();
     },
   };
 }
@@ -65,7 +65,7 @@ test("HTTP daemon: a single client can list tools and call a tool", async () => 
     const tools = await client.listTools();
     assert.ok(tools.tools.some((t) => t.name === "bizhawk_ping"), "bizhawk_ping is advertised");
 
-    const res = await client.callTool({ name: "bizhawk_read8", arguments: { address: 0x10 } });
+    const res = await client.callTool({ name: "bizhawk_read8", arguments: { target: "test", address: 0x10 } });
     assert.equal(res.content[0].text, "0x0010: 42 (0x2A)");
     await client.close();
   } finally {
@@ -93,8 +93,8 @@ test("HTTP daemon: concurrent clients get correctly-correlated results (no cross
     // Interleave many calls from both clients concurrently.
     const calls = [];
     for (let i = 0; i < 8; i++) {
-      calls.push(a.callTool({ name: "bizhawk_read8", arguments: { address: 0xa0 } }));
-      calls.push(b.callTool({ name: "bizhawk_read8", arguments: { address: 0xb0 } }));
+      calls.push(a.callTool({ name: "bizhawk_read8", arguments: { target: "test", address: 0xa0 } }));
+      calls.push(b.callTool({ name: "bizhawk_read8", arguments: { target: "test", address: 0xb0 } }));
     }
     const results = await Promise.all(calls);
 

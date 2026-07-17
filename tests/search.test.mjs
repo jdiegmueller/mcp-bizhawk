@@ -20,13 +20,13 @@ test("search begin → filter → results round-trip", async () => {
   try {
     let res = await h.client.callTool({
       name: "bizhawk_search_begin",
-      arguments: { domain: "WRAM", width: "u16" },
+      arguments: { target: h.target, domain: "WRAM", width: "u16" },
     });
     assert.match(textOf(res), /Search started.*65536 bytes.*u16/s);
 
     res = await h.client.callTool({
       name: "bizhawk_search_filter",
-      arguments: { condition: "eq", value: 98 },
+      arguments: { target: h.target, condition: "eq", value: 98 },
     });
     const text = textOf(res);
     assert.match(text, /2 candidate\(s\) remain/);
@@ -35,10 +35,10 @@ test("search begin → filter → results round-trip", async () => {
     assert.equal(call.params.condition, "eq");
     assert.equal(call.params.value, 98);
 
-    res = await h.client.callTool({ name: "bizhawk_search_results", arguments: { limit: 10 } });
+    res = await h.client.callTool({ name: "bizhawk_search_results", arguments: { target: h.target, limit: 10 } });
     assert.match(textOf(res), /0x1200 = 98/);
 
-    res = await h.client.callTool({ name: "bizhawk_search_end", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_search_end", arguments: { target: h.target } });
     assert.match(textOf(res), /Search ended/);
   } finally {
     await h.close();
@@ -50,7 +50,7 @@ test("search_filter with zero candidates omits the sample cleanly", async () => 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_search_filter",
-      arguments: { condition: "decreased" },
+      arguments: { target: h.target, condition: "decreased" },
     });
     assert.match(textOf(res), /0 candidate\(s\) remain/);
   } finally {

@@ -13,8 +13,8 @@ test("usage log records one JSONL row per call with tool, ok, ms, and verbatim a
   process.env.MCP_BIZHAWK_USAGE_LOG = file;
   const h = await startHarness({ ping: () => "pong" });
   try {
-    await h.client.callTool({ name: "bizhawk_ping", arguments: {} });
-    await h.client.callTool({ name: "bizhawk_ping", arguments: {} });
+    await h.client.callTool({ name: "bizhawk_ping", arguments: { target: h.target } });
+    await h.client.callTool({ name: "bizhawk_ping", arguments: { target: h.target } });
     const rows = readLines(file);
     assert.equal(rows.length, 2);
     for (const r of rows) {
@@ -22,7 +22,7 @@ test("usage log records one JSONL row per call with tool, ok, ms, and verbatim a
       assert.equal(r.ok, true);
       assert.equal(typeof r.ms, "number");
       assert.ok(typeof r.ts === "string" && r.ts.endsWith("Z"));
-      assert.deepEqual(r.args, {});
+      assert.deepEqual(r.args, { target: "test" });
     }
   } finally {
     await h.close();
@@ -36,11 +36,11 @@ test("usage log captures args verbatim and marks failures with ok:false + error"
   // No handler for this tool on the fake bridge → the call fails.
   const h = await startHarness({});
   try {
-    await h.client.callTool({ name: "bizhawk_frame_advance", arguments: { count: 7 } }).catch(() => {});
+    await h.client.callTool({ name: "bizhawk_frame_advance", arguments: { target: h.target, count: 7 } }).catch(() => {});
     const rows = readLines(file);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].tool, "bizhawk_frame_advance");
-    assert.deepEqual(rows[0].args, { count: 7 }); // verbatim
+    assert.deepEqual(rows[0].args, { target: "test", count: 7 }); // verbatim
     assert.equal(rows[0].ok, false);
     assert.ok(typeof rows[0].error === "string" && rows[0].error.length > 0);
   } finally {
@@ -55,7 +55,7 @@ test("MCP_BIZHAWK_USAGE_LOG=off disables logging entirely", async () => {
   process.env.MCP_BIZHAWK_USAGE_LOG = "off";
   const h = await startHarness({ ping: () => "pong" });
   try {
-    await h.client.callTool({ name: "bizhawk_ping", arguments: {} });
+    await h.client.callTool({ name: "bizhawk_ping", arguments: { target: h.target } });
     assert.equal(fs.existsSync(file), false);
     assert.deepEqual(fs.readdirSync(dir), []);
   } finally {

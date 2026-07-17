@@ -19,7 +19,7 @@ test("bizhawk_ram_snapshot chunks read_range, writes the file, reports sha256", 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_ram_snapshot",
-      arguments: { base: 0, size: 0x2800, domain: "68K RAM", path: out }, // 0x2800 = 10240 → 3 chunks (4096,4096,2048)
+      arguments: { target: h.target, base: 0, size: 0x2800, domain: "68K RAM", path: out }, // 0x2800 = 10240 → 3 chunks (4096,4096,2048)
     });
     const t = textOf(res);
     assert.match(t, new RegExp(`${out.replace(/[.\\/]/g, "\\$&")} \\(10240 bytes, 68K RAM @0x0\\)`));
@@ -50,7 +50,7 @@ test("bizhawk_ram_snapshot defaults to the full 64 KiB 68K RAM", async () => {
     read_range: (p) => Array.from({ length: p.length }, () => 0),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_ram_snapshot", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_ram_snapshot", arguments: { target: h.target } });
     const t = textOf(res);
     assert.match(t, /\(65536 bytes, 68K RAM @0x0\)/);
     const m = /^(\S+) \(/.exec(t);

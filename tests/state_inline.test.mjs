@@ -23,7 +23,7 @@ test("press_buttons renders expanded state: lag with * when currently lagged, pl
   try {
     const res = await h.client.callTool({
       name: "bizhawk_press_buttons",
-      arguments: { buttons: { Right: true } },
+      arguments: { target: h.target, buttons: { Right: true } },
     });
     assert.match(textOf(res), /State: frame 100, running, lag 5\*, domain 68K RAM/);
   } finally {
@@ -40,7 +40,7 @@ test("is_lagged false renders lag without the * marker", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_press_buttons",
-      arguments: { buttons: { A: true } },
+      arguments: { target: h.target, buttons: { A: true } },
     });
     const t = textOf(res);
     assert.match(t, /State: frame 7, running, lag 5/);
@@ -55,7 +55,7 @@ test("press_buttons with no state block prints no State line (additive)", async 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_press_buttons",
-      arguments: { buttons: { B: true } },
+      arguments: { target: h.target, buttons: { B: true } },
     });
     assert.doesNotMatch(textOf(res), /State:/);
   } finally {
@@ -70,11 +70,11 @@ test("pause / unpause / reset each append a state summary when the bridge suppli
     reset:   () => ({ state: { framecount: 0, paused: false } }),
   });
   try {
-    let res = await h.client.callTool({ name: "bizhawk_pause", arguments: {} });
+    let res = await h.client.callTool({ name: "bizhawk_pause", arguments: { target: h.target } });
     assert.match(textOf(res), /State: frame 10, paused/);
-    res = await h.client.callTool({ name: "bizhawk_unpause", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_unpause", arguments: { target: h.target } });
     assert.match(textOf(res), /State: frame 10, running/);
-    res = await h.client.callTool({ name: "bizhawk_reset", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_reset", arguments: { target: h.target } });
     assert.match(textOf(res), /State: frame 0, running/);
   } finally {
     await h.close();
@@ -84,7 +84,7 @@ test("pause / unpause / reset each append a state summary when the bridge suppli
 test("pause with a legacy bridge (returns true) still works, no State line", async () => {
   const h = await startHarness({ pause: () => true });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_pause", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_pause", arguments: { target: h.target } });
     assert.match(textOf(res), /Emulation paused/);
     assert.doesNotMatch(textOf(res), /State:/);
   } finally {
@@ -102,8 +102,8 @@ test("load_slot appends the state summary from its underlying load_state", async
     },
   });
   try {
-    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { name: "sp" } });
-    const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { name: "sp" } });
+    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { target: h.target, name: "sp" } });
+    const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { target: h.target, name: "sp" } });
     const t = textOf(res);
     assert.match(t, /Loaded slot 'sp' \(paused\)/);
     assert.match(t, /State: frame 555, paused, lag 2/);

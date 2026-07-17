@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { startHarness } from "./helpers/harness.mjs";
 
 const EXPECTED_BIZHAWK = [
+  "bizhawk_list_backends",
   "bizhawk_ping", "bizhawk_get_info", "bizhawk_pause", "bizhawk_unpause",
   "bizhawk_frame_advance", "bizhawk_reset", "bizhawk_press_buttons",
   "bizhawk_play_input_sequence", "bizhawk_screenshot", "bizhawk_save_state",
@@ -58,7 +59,7 @@ test("BIZHAWK_ALL_TOOLS=1 re-exposes the full surface", async () => {
 test("a hidden tool still dispatches when invoked directly (override-safe)", async () => {
   const h = await startHarness({ list_frozen: () => ({ count: 0, frozen: [] }) });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_list_frozen", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_list_frozen", arguments: { target: h.target } });
     const text = res.content.filter((c) => c.type === "text").map((c) => c.text).join("");
     assert.match(text, /no frozen addresses/);
   } finally {

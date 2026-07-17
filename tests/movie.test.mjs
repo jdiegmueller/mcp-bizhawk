@@ -7,7 +7,7 @@ test("bizhawk_movie_status formats loaded state", async () => {
     movie_status: () => ({ loaded: true, mode: "PLAY", filename: "/tmp/run.bk2", length: 1242 }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_movie_status", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_movie_status", arguments: { target: h.target } });
     const text = textOf(res);
     assert.match(text, /Movie: \/tmp\/run\.bk2/);
     assert.match(text, /mode: PLAY/);
@@ -24,7 +24,7 @@ test("bizhawk_movie_play passes the path and reports status", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_movie_play",
-      arguments: { path: "/tmp/demo.bk2" },
+      arguments: { target: h.target, path: "/tmp/demo.bk2" },
     });
     assert.match(textOf(res), /Movie: \/tmp\/demo\.bk2 \(loaded, mode: PLAY, length: 500\)/);
   } finally {
@@ -35,7 +35,7 @@ test("bizhawk_movie_play passes the path and reports status", async () => {
 test("bizhawk_movie_stop", async () => {
   const h = await startHarness({ movie_stop: () => true });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_movie_stop", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_movie_stop", arguments: { target: h.target } });
     assert.equal(textOf(res), "Movie stopped.");
   } finally {
     await h.close();

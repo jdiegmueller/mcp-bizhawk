@@ -14,7 +14,7 @@ test("bizhawk_disassemble formats address, mnemonic, and length per instruction"
   try {
     const res = await h.client.callTool({
       name: "bizhawk_disassemble",
-      arguments: { address: 0x200, count: 2 },
+      arguments: { target: h.target, address: 0x200, count: 2 },
     });
     const lines = textOf(res).split("\n");
     assert.equal(lines[0], "0x200: move.w d0, d1  (2 bytes)");

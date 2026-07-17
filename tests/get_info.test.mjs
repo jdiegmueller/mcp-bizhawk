@@ -14,7 +14,7 @@ test("bizhawk_get_info surfaces system_id, paused, lag, and movie fields", async
     }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_get_info", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_get_info", arguments: { target: h.target } });
     const t = textOf(res);
     assert.match(t, /System:\s+GEN/);
     assert.match(t, /Paused:\s+yes/);
@@ -37,7 +37,7 @@ test("bizhawk_get_info preserves real `false` booleans instead of collapsing to 
     }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_get_info", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_get_info", arguments: { target: h.target } });
     const t = textOf(res);
     assert.match(t, /Paused:\s+no/);
     assert.doesNotMatch(t, /current frame IS a lag frame/);

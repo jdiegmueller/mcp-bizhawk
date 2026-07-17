@@ -18,14 +18,14 @@ test("phys trace start/stop/status round-trip", async () => {
   try {
     let res = await h.client.callTool({
       name: "bizhawk_phys_trace_start",
-      arguments: { path: "/tmp/nhl94_phys_1.csv" },
+      arguments: { target: h.target, path: "/tmp/nhl94_phys_1.csv" },
     });
     assert.match(textOf(res), /Physics-sync trace started → \/tmp\/nhl94_phys_1\.csv \(latch 0x7958, emit 0x7966\)/);
 
-    res = await h.client.callTool({ name: "bizhawk_phys_trace_status", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_phys_trace_status", arguments: { target: h.target } });
     assert.match(textOf(res), /active.*123 ticks, last D7: 2/s);
 
-    res = await h.client.callTool({ name: "bizhawk_phys_trace_stop", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_phys_trace_stop", arguments: { target: h.target } });
     assert.match(textOf(res), /Physics-sync trace stopped after 123 ticks/);
   } finally {
     await h.close();
@@ -42,7 +42,7 @@ test("bizhawk_phys_trace_tail returns header + last N rows", async () => {
     phys_trace_status: () => ({ active: true, path: file, ticks: 50, latched_d7: 1 }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_phys_trace_tail", arguments: { rows: 3 } });
+    const res = await h.client.callTool({ name: "bizhawk_phys_trace_tail", arguments: { target: h.target, rows: 3 } });
     const lines = textOf(res).split("\n");
     assert.match(lines[0], /50 ticks, active: yes/);
     assert.equal(lines[1], "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir");
@@ -61,7 +61,7 @@ test("bizhawk_phys_trace_tail errors when never started", async () => {
   try {
     // The handler throws, which travels back as a JSON-RPC error, so callTool rejects.
     await assert.rejects(
-      h.client.callTool({ name: "bizhawk_phys_trace_tail", arguments: {} }),
+      h.client.callTool({ name: "bizhawk_phys_trace_tail", arguments: { target: h.target } }),
       /never been started/,
     );
   } finally {

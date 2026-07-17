@@ -14,14 +14,14 @@ test("trace start/stop/status round-trip", async () => {
   try {
     let res = await h.client.callTool({
       name: "bizhawk_trace_start",
-      arguments: { path: "/tmp/nhl94_trace_test.csv" },
+      arguments: { target: h.target, path: "/tmp/nhl94_trace_test.csv" },
     });
     assert.match(textOf(res), /Trace started → \/tmp\/nhl94_trace_test\.csv/);
 
-    res = await h.client.callTool({ name: "bizhawk_trace_status", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_trace_status", arguments: { target: h.target } });
     assert.match(textOf(res), /active.*480 rows/s);
 
-    res = await h.client.callTool({ name: "bizhawk_trace_stop", arguments: {} });
+    res = await h.client.callTool({ name: "bizhawk_trace_stop", arguments: { target: h.target } });
     assert.match(textOf(res), /Trace stopped after 480 rows/);
   } finally {
     await h.close();
@@ -38,7 +38,7 @@ test("bizhawk_trace_tail returns header + last N rows", async () => {
     trace_status: () => ({ active: true, path: file, frames: 50, osd: false }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_trace_tail", arguments: { rows: 3 } });
+    const res = await h.client.callTool({ name: "bizhawk_trace_tail", arguments: { target: h.target, rows: 3 } });
     const lines = textOf(res).split("\n");
     assert.match(lines[0], /50 rows/);
     assert.equal(lines[1], "frame,x,y");

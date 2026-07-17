@@ -7,7 +7,7 @@ test("bizhawk_freeze passes spec through and reports the count", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_freeze",
-      arguments: { address: 0xc468, value: 0x1234, width: "u16_be", domain: "68K RAM" },
+      arguments: { target: h.target, address: 0xc468, value: 0x1234, width: "u16_be", domain: "68K RAM" },
     });
     assert.match(textOf(res), /Froze 0xC468 \(68K RAM\) = 4660 \(0x1234\)\. 1 address\(es\) frozen\./);
     const call = h.bridge.calls.find((c) => c.method === "freeze");
@@ -23,8 +23,7 @@ test("bizhawk_freeze batch entries pass through with shared defaults", async () 
   try {
     const res = await h.client.callTool({
       name: "bizhawk_freeze",
-      arguments: {
-        width: "u16_be",
+      arguments: { target: h.target, width: "u16_be",
         domain: "M68K BUS",
         entries: [
           { address: 0xffb44a, value: 0xff92 },
@@ -53,7 +52,7 @@ test("bizhawk_freeze rejects a call with neither address/value nor entries", asy
   try {
     // Handler errors travel back as JSON-RPC errors, so callTool rejects.
     await assert.rejects(
-      h.client.callTool({ name: "bizhawk_freeze", arguments: {} }),
+      h.client.callTool({ name: "bizhawk_freeze", arguments: { target: h.target } }),
       /address\+value required \(or pass entries/,
     );
     assert.equal(h.bridge.calls.find((c) => c.method === "freeze"), undefined);
@@ -67,7 +66,7 @@ test("bizhawk_unfreeze batch addresses pass through", async () => {
   try {
     const res = await h.client.callTool({
       name: "bizhawk_unfreeze",
-      arguments: { addresses: [0xffb44a, 0xffb45e], domain: "M68K BUS" },
+      arguments: { target: h.target, addresses: [0xffb44a, 0xffb45e], domain: "M68K BUS" },
     });
     assert.match(textOf(res), /4 address\(es\) frozen/);
     const call = h.bridge.calls.find((c) => c.method === "unfreeze");
@@ -81,7 +80,7 @@ test("bizhawk_unfreeze batch addresses pass through", async () => {
 test("bizhawk_unfreeze all=true", async () => {
   const h = await startHarness({ unfreeze: () => ({ frozen_count: 0 }) });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_unfreeze", arguments: { all: true } });
+    const res = await h.client.callTool({ name: "bizhawk_unfreeze", arguments: { target: h.target, all: true } });
     assert.match(textOf(res), /0 address\(es\) frozen/);
     const call = h.bridge.calls.find((c) => c.method === "unfreeze");
     assert.equal(call.params.all, true);
@@ -101,7 +100,7 @@ test("bizhawk_list_frozen formats entries and handles the empty case", async () 
     }),
   });
   try {
-    const res = await h.client.callTool({ name: "bizhawk_list_frozen", arguments: {} });
+    const res = await h.client.callTool({ name: "bizhawk_list_frozen", arguments: { target: h.target } });
     const text = textOf(res);
     assert.match(text, /0x0010 u8 = 99/);
     assert.match(text, /0x0020 u16_be = 500 \(68K RAM\)/);
@@ -112,7 +111,7 @@ test("bizhawk_list_frozen formats entries and handles the empty case", async () 
   // Lua sends {} (empty object) when nothing is frozen — must not crash.
   const h2 = await startHarness({ list_frozen: () => ({ count: 0, frozen: {} }) });
   try {
-    const res = await h2.client.callTool({ name: "bizhawk_list_frozen", arguments: {} });
+    const res = await h2.client.callTool({ name: "bizhawk_list_frozen", arguments: { target: h.target } });
     assert.match(textOf(res), /no frozen addresses/i);
   } finally {
     await h2.close();

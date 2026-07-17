@@ -17,7 +17,7 @@ test("server greets the bridge with HELLO carrying its version, once per connect
     assert.equal(h.bridge.helloCount, 1);
 
     // Normal RPC still works after the greeting.
-    await h.client.callTool({ name: "bizhawk_ping", arguments: {} });
+    await h.client.callTool({ name: "bizhawk_ping", arguments: { target: h.target } });
 
     // Every command frame carries the server version/protocol (sv/sp) so the
     // bridge OSD self-heals after a script reload that missed the HELLO.
