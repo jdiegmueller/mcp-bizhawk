@@ -311,6 +311,7 @@ export class BizhawkBackend {
     if (socket !== this.socket) return;
     if (generation !== this.socketGeneration) return;
 
+    socket.destroy();
     this.socket = null;
     this.peerAddress = undefined;
     this.state = "listening";

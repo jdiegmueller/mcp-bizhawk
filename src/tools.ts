@@ -244,7 +244,7 @@ const TOOLS: Tool[] = [
         name: { type: "string", description: "For action=read: return only this trap's buffer (default: all)." },
         limit: { type: "integer", minimum: 1, description: "Default per-trap entry cap for action=start (default 200)." },
       },
-      required: ["action"],
+      required: ["target", "action"],
       additionalProperties: false,
     },
   },
