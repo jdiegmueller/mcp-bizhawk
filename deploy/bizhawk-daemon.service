@@ -1,0 +1,20 @@
+[Unit]
+Description=mcp-bizhawk multiplexer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=MCP_BIZHAWK_CONFIG=/mnt/8tb/jason/mcp-bizhawk_jd/backends.json
+Environment=MCP_HTTP_HOST=127.0.0.1
+Environment=MCP_HTTP_PORT=8765
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /mnt/8tb/jason/mcp-bizhawk_jd/dist/index.js
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-bizhawk
+
+[Install]
+WantedBy=default.target
