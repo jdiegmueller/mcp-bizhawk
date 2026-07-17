@@ -85,7 +85,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_get_info",
     description:
       "PURPOSE: Get the loaded ROM's name and hash, current frame count, the list of available memory domains, the active default domain (the one used when 'domain' is omitted on read/write tool calls), and the bridge's capability map (which optional emu/client/savestate/joypad/memory methods this BizHawk build exposes). " +
-      "USAGE: Call after bizhawk_ping to learn what system is loaded and which optional features are available; before any memory tool call to confirm the active domain and avoid silent reads from the wrong address space; before pause / unpause / reset / screenshot / save_state to check the corresponding `capabilities.*` flag. Do NOT call this just to re-check framecount/pause/domain after an action — press_buttons, frame_advance, pause / unpause / reset, load_state, load_slot, and play_input_sequence each ride a compact `State:` line (frame/paused/lag/domain) back inline. " +
+      "USAGE: Call after bizhawk_ping to learn what system is loaded and which optional features are available; before any memory tool call to confirm the active domain and avoid silent reads from the wrong address space; before pause / unpause / reset / screenshot / save_state / load_state to check the corresponding `capabilities.*` flag. Do NOT call this just to re-check framecount/pause/domain after an action — press_buttons, frame_advance, pause / unpause / reset, load_state, load_slot, and play_input_sequence each ride a compact `State:` line (frame/paused/lag/domain) back inline. " +
       "BEHAVIOR: No side effects — pure read of emulator metadata. Returns 'unavailable' for fields the loaded core doesn't expose (rom_name when no ROM is loaded, framecount on cores without emu.framecount, etc.). " +
       "RETURNS: Multi-line text with ROM, ROM hash, framecount, memory_domains list, active domain, and a list of any missing capabilities for this build.",
     inputSchema: { type: "object", properties: {} },
@@ -197,8 +197,8 @@ const TOOLS: Tool[] = [
     name: "bizhawk_trap_exec",
     description:
       "PURPOSE: Persistent, multi-address execution-site capture — arm exec hooks at ROM addresses that ACCUMULATE register/memory snapshots into per-trap buffers across normally-driven frames, then read them back. The built-in replacement for hand-rolling event.on_bus_exec capture loops in bizhawk_eval_lua (the dominant reverse-engineering use). " +
-      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle: 'start', drive frames/input, verify the intended stimulus actually occurred, then 'read', and finally 'stop'. ZERO HITS alone does not prove a code path is unreachable: first verify frames advanced and, for NHL94 interaction experiments, use nhl94_state to confirm interaction_gate is OPEN plus actual movement/contact/animation. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
-      "BEHAVIOR: 'start' registers event.on_bus_exec hooks (errors if the core lacks it) that persist until 'stop' or a bridge reload — REMEMBER to stop when done, as live hooks cost emulation speed. Buffers are bounded by `limit` (default 200/trap). Memory reads use the active domain (M68K BUS on Genesis); addresses masked to 24 bits. " +
+      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle: 'start', drive frames/input, verify the intended stimulus actually occurred, then 'read', and finally 'stop'. `read` and `status` do NOT stop hooks; always call `stop` when finished. ZERO HITS alone does not prove a code path is unreachable: first verify frames advanced and, for NHL94 interaction experiments, use nhl94_state to confirm interaction_gate is OPEN plus actual movement/contact/animation. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
+      "BEHAVIOR: 'start' registers event.on_bus_exec hooks (errors if the core lacks it) that persist until 'stop' or a bridge reload — REMEMBER to stop when done, as live hooks cost emulation speed. Clearing freezes, loading states, or applying NHL94 rigs does not stop these hooks. Buffers are bounded by `limit` (default 200/trap). Memory reads use the active domain (M68K BUS on Genesis); addresses masked to 24 bits. " +
       "RETURNS: 'start' the armed trap names; 'read' per-trap counts + the captured entries (JSON); 'status'/'stop' the counts.",
     inputSchema: {
       type: "object",
@@ -365,7 +365,7 @@ const TOOLS: Tool[] = [
           type: "string",
           description:
             "Optional. Absolute path to a .State file to load IMMEDIATELY before playback begins, in the same round-trip. " +
-            "Collapses the common 'load_state then play_input_sequence' trial loop into a single call: reset to a known baseline and run the sequence with no intermediate round-trip. The load happens before any stop_on_memory_change baseline is captured and before frame 0. Same ROM/core constraints as bizhawk_load_state. Omit to play from the current live state.",
+            "Collapses the common 'load_state then play_input_sequence' trial loop into a single call: reset to a known baseline and run the sequence with no intermediate round-trip. This is intentionally NOT a paused inspection load: the bridge loads the state and immediately unpauses to play the sequence. The load happens before any stop_on_memory_change baseline is captured and before frame 0. Same ROM/core constraints as bizhawk_load_state. Omit to play from the current live state.",
         },
         frames: {
           type: "array",
@@ -500,7 +500,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Run a SWEEP of input experiments from one savestate — for each trial, reload the same baseline state, play that trial's input sequence, and read a shared set of memory values — all in ONE bridge round-trip, returning a per-trial table of outcomes. " +
       "USAGE: The tool for savestate-anchored parameter sweeps and input search: 'from this faceoff, try shot A, shot B, and a pass — where does the puck end up in each?'. Replaces the manual loop of (load_state → play_input_sequence → read) repeated once per candidate, which costs 3+ round-trips PER trial and floods the transcript with intermediate results. Here N trials cost one call and one compact table. Each trial reloads `state_path` first, so trials are independent — trial K never sees trial K-1's mutations. For a single sequence with mid-play observation cadence or stop-on-change, use bizhawk_play_input_sequence (optionally with its load_state_path). " +
-      "BEHAVIOR: For each trial in order: loads `state_path` (unpausing to play), plays the trial's `frames` (same hold/RLE semantics as play_input_sequence), then reads every `observe_memory` entry at the final frame and optionally captures one screenshot. The bridge's poll loop is BLOCKED for the whole sweep (no other RPCs) — the RPC timeout scales with the total frame count across all trials. Any pre-existing freezes are re-asserted each frame exactly as in play_input_sequence. Errors (unknown domain, invalid width, missing state file, missing joypad/frameadvance/screenshot capability) fail the whole call. " +
+      "BEHAVIOR: For each trial in order: loads `state_path`, intentionally unpauses to play the trial, plays the trial's `frames` (same hold/RLE semantics as play_input_sequence), then reads every `observe_memory` entry at the final frame and optionally captures one screenshot. This is a play/sweep tool, not a paused restore; use bizhawk_load_state for a paused inspection restore. The bridge's poll loop is BLOCKED for the whole sweep (no other RPCs) — the RPC timeout scales with the total frame count across all trials. Any pre-existing freezes are re-asserted each frame exactly as in play_input_sequence. Errors (unknown domain, invalid width, missing state file, missing joypad/frameadvance/screenshot capability) fail the whole call. " +
       "RETURNS: A text table — 'Ran N trials from PATH.' then one line per trial: '[name] played F, frame FC — label=value, ...' — followed by one inline PNG content block per trial that captured a screenshot, in trial order.",
     inputSchema: {
       type: "object",
@@ -697,7 +697,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_load_state",
     description:
       "PURPOSE: Restore the emulator from a previously saved .State file at the given path. " +
-      "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. To start fresh from console boot instead, use bizhawk_reset. " +
+      "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. Default is PAUSED after load; drive the restored state deliberately with bizhawk_frame_advance, bizhawk_play_input_sequence, or bizhawk_unpause. To start fresh from console boot instead, use bizhawk_reset. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge leaves the emulator PAUSED by default after load so game time cannot drift between agent commands; pass pause=false only when you intentionally want real-time playback to resume. The pause is applied in the same callback after the load (ZERO frames run between load and pause). Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
       "RETURNS: 'Loaded state from PATH (paused/running)' plus a `State:` line (frame/paused/lag/domain) — no bizhawk_get_info needed.",
     inputSchema: {
@@ -705,7 +705,7 @@ const TOOLS: Tool[] = [
       required: ["path"],
       properties: {
         path:  { type: "string", description: "Absolute filesystem path to an existing .State file produced by bizhawk_save_state on this same ROM and BizHawk core version. Loading mismatched files typically crashes the core." },
-        pause: { type: "boolean", default: true, description: "Default true: leave the emulator PAUSED after load so state cannot drift before the next command. Set false only when you intentionally want real-time playback to resume." },
+        pause: { type: "boolean", default: true, description: "Default true: leave the emulator PAUSED after load so state cannot drift before the next command. Set false only when you intentionally want real-time playback to resume immediately." },
       },
       additionalProperties: false,
     },
@@ -1153,7 +1153,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_load_slot",
     description:
       "PURPOSE: Restore the emulator from a named slot previously saved with bizhawk_save_slot for the currently loaded ROM. " +
-      "USAGE: Counterpart to bizhawk_save_slot — the snapshot/experiment/rollback loop without path bookkeeping. Loads paused by default; pass pause=false only when you intentionally want real-time playback to resume. " +
+      "USAGE: Counterpart to bizhawk_save_slot — the snapshot/experiment/rollback loop without path bookkeeping. Loads paused by default; drive the restored state deliberately with frame_advance/play_input_sequence/unpause. Pass pause=false only when you intentionally want real-time playback to resume immediately. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces all current emulator state. Slots are looked up by the CURRENT ROM's hash — a slot saved under a different ROM won't be found (this is a safety feature: cross-ROM state loads crash cores). A missing name returns an error listing available slots. " +
       "RETURNS: 'Loaded slot 'NAME' (paused|running)' plus a `State:` line (frame/paused/lag/domain).",
     inputSchema: {
@@ -1367,7 +1367,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_state",
     description:
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
-      "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For an unlisted entity field, pass its name or raw in-struct offset to nhl94_read; never compute the address yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
+      "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For additional entity reads use nhl94_read; for selected field reads/writes/freezes use nhl94_fields. Never compute slot addresses yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
       "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. When the faceoff-window latch at $FFC304 is nonzero, phase is the stable token `faceoff_line_change` and a `faceoff_window` line reports latch + selected lines (Sc1/Sc2/Chk). CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context except for the RAM-backed faceoff_line_change token. A trailing `*` marks a frozen word.",
     inputSchema: {
@@ -1385,7 +1385,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_read",
     description:
       "PURPOSE: Read arbitrary decoded fields of NHL94 entities (skaters s0-s11, puck pk) by NAME or raw in-struct offset — the game-aware alternative to hand-computing 68K base+offset in bizhawk_read/eval_lua (the #1 source of base/stride/endian mistakes). " +
-      "USAGE: Use for per-entity fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or ANY raw offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For the common position/velocity/anim/carrier/clock snapshot use nhl94_state instead. " +
+      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
       "BEHAVIOR: No side effects — one read_many round-trip. x/y/z decode to whole pixels; every other field is the raw integer at its width. Errors if targets×fields exceeds 128 reads, or on an unknown target/field. " +
       "RETURNS: One line per target: 'sN: field=val field=val …'.",
     inputSchema: {
@@ -1410,7 +1410,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
       "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, read global.clock plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
-      "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words. Write/freeze ops default to post-write readback so contested game rewrites are visible. " +
+      "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. " +
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
       type: "object",
@@ -1427,7 +1427,7 @@ const TOOLS: Tool[] = [
               offset: { type: "string", description: "Raw entity-relative offset such as '0x71'. Requires allow_raw:true." },
               address: { type: "string", description: "Raw absolute M68K bus address such as '0xFFC304'. Requires target:'global' and allow_raw:true." },
               width: { type: "string", enum: WIDTH_ENUM, description: "Width for raw offsets/addresses. Defaults to u8 for raw entity offsets." },
-              value: { description: "Value for write/freeze. Named fields accept decoded values; raw fields use raw integer values." },
+              value: { description: "Value for write/freeze. Named fields accept decoded values; raw fields use raw integer values. For op:'freeze', omit value to freeze the current RAM value." },
               freeze: { type: "boolean", description: "For op:'write', freeze this field at the written value instead of a one-time write." },
               allow_raw: { type: "boolean", description: "Required for raw offset/address operations." },
             },
@@ -1444,9 +1444,9 @@ const TOOLS: Tool[] = [
   {
     name: "nhl94_stage",
     description:
-      "PURPOSE: Stage a compact NHL94 experiment setup in one high-level call: clear freezes, apply a rig, park skaters, place targets, set possession, write/freeze selected fields, optionally settle frames, and optionally read back. " +
-      "USAGE: Use when setting up RE experiments where ordering matters. `clear_freezes` runs before `rig` so a rig's saved freeze table is not destroyed. Do not combine puck placement with skater possession; possession snaps the puck to the carrier. " +
-      "BEHAVIOR: DESTRUCTIVE: mutates live emulator RAM/state. Operations run in deterministic order: clear freezes, rig, park, place, possession, fields, settle, readback. Default settle_frames is 0 for RE precision. " +
+      "PURPOSE: Stage a compact NHL94 experiment setup in one high-level call: clear freezes, apply a rig, park skaters, place targets, set possession, write/freeze selected fields, and optionally settle frames. " +
+      "USAGE: Use when setting up RE experiments where ordering matters. Prefer this over a chatty sequence of unfreeze/rig/park/teleport/possession/field calls. `clear_freezes` runs before `rig` so a rig's saved freeze table is not destroyed. Do not combine puck placement with skater possession; possession snaps the puck to the carrier. After staging, call nhl94_state to verify RAM/vision stimulus before interpreting traps. " +
+      "BEHAVIOR: DESTRUCTIVE: mutates live emulator RAM/state. Operations run in deterministic order: clear freezes, rig, park, place, possession, fields, settle. Default settle_frames is 0 for RE precision. clear_freezes clears only bridge freezes; it does not stop bizhawk_trap_exec hooks. " +
       "RETURNS: A concise ordered summary of what was staged.",
     inputSchema: {
       type: "object",
@@ -1477,7 +1477,6 @@ const TOOLS: Tool[] = [
         possession: { type: "string", description: "'s0'..'s11' or 'none'." },
         fields: { type: "array", items: { type: "object" }, description: "nhl94_fields-style write/freeze ops without the op property; op defaults to write." },
         settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0 },
-        readback: { type: "boolean", default: false },
       },
       additionalProperties: false,
     },

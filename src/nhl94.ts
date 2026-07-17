@@ -429,6 +429,9 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
 • A freeze is a per-frame rewrite, not a pause and not an undo. Releasing it
   leaves the last value in RAM until the game changes it. Clock freeze holds
   only the game timer; it does NOT close the collision stoppage gate.
+• Freeze cleanup is separate from exec-trap cleanup. nhl94_unfreeze all:true,
+  nhl94_stage clear_freezes:true, and rig apply clear bridge freezes only; they
+  do NOT stop bizhawk_trap_exec hooks. Stop traps explicitly when done.
 • Start unfamiliar experiments with nhl94_state. If existing freezes are not
   intentional, use nhl94_unfreeze {"all":true} before staging. Applying a rig
   already clears all freezes first, so do not pre-clear merely to apply a rig.
@@ -445,7 +448,7 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   temporary verification scaffolding, not the default path.
 • nhl94_stage — batch clean/rig/park/place/possession/field setup for one
   experiment scene. Use it when a multi-step setup would otherwise drift across
-  frames or leave stale freezes.
+  frames or leave stale freezes. clear_freezes does not stop exec traps.
 • nhl94_teleport — set any subset of x/y/z and/or xv/yv/zv atomically. Moving
   pk automatically detaches it so the result is a loose puck. It does not pin.
 • nhl94_freeze — pin targets at their CURRENT x/y/z and zero+pin velocity.
@@ -478,8 +481,9 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
    contact, resolver entry, or a particular branch. Never infer this RAM gate
    from a frozen HUD clock or a motionless screenshot.
 6. TRACE: arm bizhawk_trap_exec, drive frames/input, verify the stimulus again,
-   then read and stop the traps. ZERO HITS is inconclusive until frame advance,
-   movement/contact/animation, and gate state are all confirmed.
+   then read and stop the traps. read/status do NOT stop hooks. ZERO HITS is
+   inconclusive until frame advance, movement/contact/animation, and gate state
+   are all confirmed.
 7. CONCLUDE from measured preconditions plus trap/state results. Keep unverified
    interpretations labeled as hypotheses.
 

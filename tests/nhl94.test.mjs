@@ -31,7 +31,9 @@ test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool seman
   assert.match(RECIPES_GUIDE, /assign the carrier directly/);
   assert.match(RECIPES_GUIDE, /Clock freeze .* does NOT close the collision stoppage gate/s);
   assert.match(RECIPES_GUIDE, /OPEN only proves this ONE prerequisite is clear/);
-  assert.match(RECIPES_GUIDE, /ZERO HITS is inconclusive/);
+  assert.match(RECIPES_GUIDE, /ZERO HITS is\s+inconclusive/);
+  assert.match(RECIPES_GUIDE, /clear bridge freezes only; they\s+do NOT stop bizhawk_trap_exec hooks/);
+  assert.match(RECIPES_GUIDE, /read\/status do NOT stop hooks/);
   assert.match(RECIPES_GUIDE, /loads the state PAUSED/);
   assert.doesNotMatch(RECIPES_GUIDE, /proximity pickup/);
   assert.doesNotMatch(RECIPES_GUIDE, /\["s0",…,"pk"\]/);
