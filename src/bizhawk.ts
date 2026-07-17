@@ -62,10 +62,11 @@ export class BizhawkServer {
     target: string,
     method: string,
     params: Record<string, unknown> = {},
+    opts: { timeoutMs?: number } = {},
   ): Promise<T> {
     const backend = this.backends.get(target);
     if (!backend) throw new UnknownBackendError(target, this.validTargets());
-    return backend.call<T>(method, params);
+    return backend.call<T>(method, params, opts);
   }
 
   /** Get a backend instance (for NHL domain access, path resolution, etc.). */

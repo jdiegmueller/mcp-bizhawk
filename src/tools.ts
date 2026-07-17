@@ -4,7 +4,9 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { BizhawkServer } from "./bizhawk.js";
+import type { BizhawkServer } from "./bizhawk.js";
+import type { BizhawkBackend } from "./backend.js";
+import { errorCode } from "./errors.js";
 import { VERSION } from "./version.js";
 import { describeImage, requireVisionConfig, visionConfig, type VisionConfig } from "./vision.js";
 import * as nhl94 from "./nhl94.js";
@@ -63,6 +65,15 @@ const WIDTH_PARAM_DESC =
 // margin) so long batches don't die at the flat default timeout.
 const frameTimeout = (frames: number) => frames * 20 + 5000;
 
+const targetProp = {
+  target: {
+    type: "string" as const,
+    minLength: 1,
+    description: "BizHawk backend label. Use bizhawk_list_backends to see available targets.",
+  },
+};
+
+
 const ADDRESS_PARAM_DESC = (widthBytes: number) =>
   `Byte offset within the chosen memory domain. Per-domain offsets are 0-based and INDEPENDENT ` +
   `of system bus addresses (e.g. SNES WRAM uses 0x09C6, NOT 0x7E09C6). Reads ${widthBytes} ` +
@@ -79,6 +90,16 @@ const TOOLS: Tool[] = [
       "USAGE: Call this once at start-of-session before issuing other tool calls. ALWAYS answers immediately, even when BizHawk isn't running — so it doubles as a check of which server build is installed. Only a 'pong ... bridge polling' response means other tools will work. " +
       "BEHAVIOR: No side effects — pure probe. Never errors: if BizHawk isn't connected or bridge_JD.lua isn't polling, it says so in the response instead of timing out. " +
       "RETURNS: 'pong (mcp-bizhawk vX.Y.Z, bridge polling)' when fully up; otherwise 'mcp-bizhawk vX.Y.Z — <what's missing>'. A '-jd' version suffix identifies the modified server build (frame-scaled timeouts, byteorder, hold, wait_for_memory).",
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp } },
+  },
+  {
+    name: "bizhawk_list_backends",
+    description:
+      "PURPOSE: List all configured BizHawk backends and their connection status. " +
+      "USAGE: Call this to discover which backends are available and their current " +
+      "state (stopped / listening / connected / ready) before using other tools. " +
+      "BEHAVIOR: No side effects — pure read of server state. Always works. " +
+      "RETURNS: Each backend entry with name, host, port, state, socketGeneration, queuedCommands, inflightCommand, and optional remoteAddress.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -88,7 +109,7 @@ const TOOLS: Tool[] = [
       "USAGE: Call after bizhawk_ping to learn what system is loaded and which optional features are available; before any memory tool call to confirm the active domain and avoid silent reads from the wrong address space; before pause / unpause / reset / screenshot / save_state / load_state to check the corresponding `capabilities.*` flag. Do NOT call this just to re-check framecount/pause/domain after an action — press_buttons, frame_advance, pause / unpause / reset, load_state, load_slot, and play_input_sequence each ride a compact `State:` line (frame/paused/lag/domain) back inline. " +
       "BEHAVIOR: No side effects — pure read of emulator metadata. Returns 'unavailable' for fields the loaded core doesn't expose (rom_name when no ROM is loaded, framecount on cores without emu.framecount, etc.). " +
       "RETURNS: Multi-line text with ROM, ROM hash, framecount, memory_domains list, active domain, and a list of any missing capabilities for this build.",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp } },
   },
   {
     name: "bizhawk_list_memory_domains",
@@ -97,7 +118,7 @@ const TOOLS: Tool[] = [
       "USAGE: Call before any memory r/w tool when you don't know the domain layout for the loaded system. The returned names are exactly what to pass as the `domain` parameter on bizhawk_read*/write* tools (case-sensitive). " +
       "BEHAVIOR: No side effects — pure read. Returns an error if the loaded BizHawk core doesn't implement memory.getmemorydomainlist (extremely rare). " +
       "RETURNS: Newline-formatted list of domain names, one per line.",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp } },
   },
 
   // ── Memory reads ────────────────────────────────────────────────────────
@@ -111,8 +132,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'ADDR_HEX: VAL_DEC (0xVAL_HEX)', e.g. '0x09C6: 99 (0x63)'.",
     inputSchema: {
       type: "object",
-      required: ["address"],
-      properties: {
+      required: ["target", "address"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(1) },
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
       },
@@ -128,8 +149,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'ADDR_HEX: VAL_DEC (0xVAL_HEX)'.",
     inputSchema: {
       type: "object",
-      required: ["address"],
-      properties: {
+      required: ["target", "address"],
+      properties: { ...targetProp, 
         address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(2) },
         domain:    { type: "string", description: DOMAIN_PARAM_DESC },
         byteorder: { type: "string", enum: ["le", "be"], default: "le", description: BYTEORDER_PARAM_DESC },
@@ -146,8 +167,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'ADDR_HEX: VAL_DEC (0xVAL_HEX)'.",
     inputSchema: {
       type: "object",
-      required: ["address"],
-      properties: {
+      required: ["target", "address"],
+      properties: { ...targetProp, 
         address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(4) },
         domain:    { type: "string", description: DOMAIN_PARAM_DESC },
         byteorder: { type: "string", enum: ["le", "be"], default: "le", description: BYTEORDER_PARAM_DESC },
@@ -164,8 +185,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'ADDR_HEX [N bytes, DOMAIN]:' header + space-separated 2-digit uppercase hex bytes.",
     inputSchema: {
       type: "object",
-      required: ["address", "length"],
-      properties: {
+      required: ["target", "address", "length"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: "Starting byte offset within the chosen memory domain (0-based per-domain, NOT a system-bus address). Reads [address, address+length)." },
         length:  { type: "integer", minimum: 1, maximum: 4096, description: "Number of bytes to read (1-4096; hard cap is BizHawk's per-call serialization limit)." },
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
@@ -183,7 +204,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'PATH (N bytes, DOMAIN @0xBASE) sha256=…' — the file path, byte count, domain, base, and the digest.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         base: { type: "integer", minimum: 0, default: 0, description: "Starting byte offset within the domain (0-based per-domain). Default 0." },
         size: { type: "integer", minimum: 1, maximum: 1048576, default: 65536, description: "Number of bytes to snapshot (default 65536 = full 64 KiB 68K RAM; max 1 MiB)." },
         domain: { type: "string", description: "Memory domain (default '68K RAM' — the Genesis work RAM)." },
@@ -202,7 +224,7 @@ const TOOLS: Tool[] = [
       "RETURNS: 'start' the armed trap names; 'read' per-trap counts + the captured entries (JSON); 'status'/'stop' the counts.",
     inputSchema: {
       type: "object",
-      properties: {
+      properties: { ...targetProp, 
         action: { type: "string", enum: ["start", "read", "status", "stop"], description: "Lifecycle step." },
         traps: {
           type: "array",
@@ -238,8 +260,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Wrote VAL_DEC (0xVAL_HEX) → ADDR_HEX (DOMAIN)'.",
     inputSchema: {
       type: "object",
-      required: ["address", "value"],
-      properties: {
+      required: ["target", "address", "value"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(1) },
         value:   { type: "integer", minimum: 0, maximum: 255, description: "Byte value to write. Must be 0-255 (0x00-0xFF). Values outside this range return an error." },
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
@@ -256,8 +278,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Wrote VAL_DEC (0xVAL_HEX) → ADDR_HEX (DOMAIN)'.",
     inputSchema: {
       type: "object",
-      required: ["address", "value"],
-      properties: {
+      required: ["target", "address", "value"],
+      properties: { ...targetProp, 
         address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(2) },
         value:     { type: "integer", minimum: 0, maximum: 65535, description: "16-bit value to write. Must be 0-65535 (0x0000-0xFFFF). Byte placement follows `byteorder`. Values outside this range return an error." },
         domain:    { type: "string", description: DOMAIN_PARAM_DESC },
@@ -275,8 +297,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Wrote VAL_DEC (0xVAL_HEX) → ADDR_HEX (DOMAIN)'.",
     inputSchema: {
       type: "object",
-      required: ["address", "value"],
-      properties: {
+      required: ["target", "address", "value"],
+      properties: { ...targetProp, 
         address:   { type: "integer", minimum: 0, description: ADDRESS_PARAM_DESC(4) },
         value:     { type: "integer", minimum: 0, maximum: 4294967295, description: "32-bit value to write. Must be 0-4294967295 (0x00000000-0xFFFFFFFF). Byte placement follows `byteorder`. Values outside this range return an error." },
         domain:    { type: "string", description: DOMAIN_PARAM_DESC },
@@ -294,8 +316,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Wrote N bytes → ADDR_HEX (DOMAIN)'.",
     inputSchema: {
       type: "object",
-      required: ["address", "bytes"],
-      properties: {
+      required: ["target", "address", "bytes"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: "Starting byte offset within the chosen memory domain. The N bytes [address, address+len) are written." },
         bytes: {
           type: "array",
@@ -332,8 +354,8 @@ const TOOLS: Tool[] = [
       `\n\nButton names vary per system. Common names across cores: ${VALID_BUTTONS.join(", ")}. Use whatever names the active core understands — if unsure, try a name and check BizHawk's input display, or use bizhawk_get_info to confirm joypad_set is available.`,
     inputSchema: {
       type: "object",
-      required: ["buttons"],
-      properties: {
+      required: ["target", "buttons"],
+      properties: { ...targetProp, 
         buttons: {
           type: "object",
           description: "Map of button name (string, case-sensitive per the active core) → pressed (boolean: true=pressed, false=released). Example: {\"A\": true, \"Up\": true} presses A and Up while leaving everything else released. Names not recognized by the active core are silently ignored.",
@@ -359,8 +381,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A text summary ('Played N frames. Final framecount: M. Stopped early: yes/no [reason]. Captured K observations with their memory values') followed by K inline image content blocks (one per observation, in frame order). Each observation in the text summary includes its frame_offset and labeled memory values so the agent can correlate the visible screenshot with the game state at that exact frame.",
     inputSchema: {
       type: "object",
-      required: ["frames"],
-      properties: {
+      required: ["target", "frames"],
+      properties: { ...targetProp, 
         load_state_path: {
           type: "string",
           description:
@@ -504,8 +526,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A text table — 'Ran N trials from PATH.' then one line per trial: '[name] played F, frame FC — label=value, ...' — followed by one inline PNG content block per trial that captured a screenshot, in trial order.",
     inputSchema: {
       type: "object",
-      required: ["state_path", "trials"],
-      properties: {
+      required: ["target", "state_path", "trials"],
+      properties: { ...targetProp, 
         state_path: {
           type: "string",
           description: "Absolute path to the .State file reloaded before EVERY trial (the shared baseline). Same ROM/core constraints as bizhawk_load_state.",
@@ -594,7 +616,7 @@ const TOOLS: Tool[] = [
       "USAGE: Use before a sequence of memory-inspect / write / screenshot calls when you need a stable game state across calls (so the game doesn't advance between your reads). Use bizhawk_unpause to resume; use bizhawk_frame_advance to step single frames without leaving pause. " +
       "BEHAVIOR: Modifies emulator run state. The Lua bridge keeps polling the socket while paused, so all other tool calls (memory r/w, screenshot, save_state, etc.) still work. Returns an error if the loaded core doesn't expose emu.pause — check `capabilities.pause` in bizhawk_get_info first to handle that case gracefully. Calling pause when already paused is a no-op. " +
       "RETURNS: 'Emulation paused' plus a `State:` line (frame/paused/lag/domain).",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp } },
   },
   {
     name: "bizhawk_unpause",
@@ -603,7 +625,7 @@ const TOOLS: Tool[] = [
       "USAGE: Counterpart to bizhawk_pause. Use after a paused inspection sequence is complete. To advance only a few frames without resuming full speed, use bizhawk_frame_advance instead. " +
       "BEHAVIOR: Modifies emulator run state. Returns an error if the loaded core doesn't expose emu.unpause — check `capabilities.unpause` in bizhawk_get_info first. Calling unpause when not paused is a no-op. " +
       "RETURNS: 'Emulation resumed' plus a `State:` line (frame/paused/lag/domain).",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp } },
   },
   {
     name: "bizhawk_frame_advance",
@@ -614,7 +636,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Advanced N frame(s). Framecount: NEW_COUNT', plus a `State:` line (lag/pause/domain) — no bizhawk_get_info needed.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         count: { type: "integer", minimum: 1, default: 1, description: "Number of frames to advance (≥1, default 1). Latency scales linearly: ~16ms per frame at 60Hz. New framecount = previous framecount + count." },
         turbo: {
           type: "boolean",
@@ -632,7 +655,7 @@ const TOOLS: Tool[] = [
       "USAGE: Use to start fresh from boot. To return to a specific known-good point instead of boot, use bizhawk_load_state with a previously saved state file. " +
       "BEHAVIOR: DESTRUCTIVE: RAM contents become indeterminate (typically zeroed), CPU returns to the reset vector, framecount resets to 0, joypad state clears, and any in-progress audio/video state is discarded. The loaded ROM stays loaded — only volatile state is cleared. Unsaved game progress is lost. Returns an error if the loaded core doesn't expose client.reboot_core — check `capabilities.reboot_core` in bizhawk_get_info first. " +
       "RETURNS: 'Core reset' plus a `State:` line (frame resets toward 0).",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp } },
   },
   {
     name: "bizhawk_screenshot",
@@ -643,7 +666,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A text block 'Screenshot saved: PATH', an inline PNG image content block, and (unless describe:false) a vision-model caption of the screen.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         path: { type: "string", description: "Optional absolute filesystem path for the PNG (e.g. /tmp/snap.png). Omit to use an auto-generated temp file. Parent directory must exist. Overwritten without prompt if present." },
         describe: {
           type: "boolean",
@@ -667,10 +691,10 @@ const TOOLS: Tool[] = [
       "RETURNS: Confirmation echoing the message.",
     inputSchema: {
       type: "object",
-      properties: {
+      properties: { ...targetProp, 
         message: { type: "string", minLength: 1, description: "Text to display in the OSD message area." },
       },
-      required: ["message"],
+      required: ["target", "message"],
       additionalProperties: false,
     },
   },
@@ -686,8 +710,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Saved state to PATH'.",
     inputSchema: {
       type: "object",
-      required: ["path"],
-      properties: {
+      required: ["target", "path"],
+      properties: { ...targetProp, 
         path: { type: "string", description: "Absolute filesystem path to write the .State file to (extension is convention, not required). Parent directory must exist. File is overwritten without prompt if present." },
       },
       additionalProperties: false,
@@ -702,8 +726,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Loaded state from PATH (paused/running)' plus a `State:` line (frame/paused/lag/domain) — no bizhawk_get_info needed.",
     inputSchema: {
       type: "object",
-      required: ["path"],
-      properties: {
+      required: ["target", "path"],
+      properties: { ...targetProp, 
         path:  { type: "string", description: "Absolute filesystem path to an existing .State file produced by bizhawk_save_state on this same ROM and BizHawk core version. Loading mismatched files typically crashes the core." },
         pause: { type: "boolean", default: true, description: "Default true: leave the emulator PAUSED after load so state cannot drift before the next command. Set false only when you intentionally want real-time playback to resume immediately." },
       },
@@ -719,8 +743,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Single line 'Condition met/NOT met after N frames. Value: VAL. Framecount: M'.",
     inputSchema: {
       type: "object",
-      required: ["address"],
-      properties: {
+      required: ["target", "address"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain to watch (0-based per-domain)." },
         domain:  { type: "string", description: DOMAIN_PARAM_DESC },
         width: {
@@ -763,8 +787,8 @@ const TOOLS: Tool[] = [
       "RETURNS: One line per read, in request order: 'NAME = VAL_DEC (0xVAL_HEX)' (hex omitted for negative signed values).",
     inputSchema: {
       type: "object",
-      required: ["reads"],
-      properties: {
+      required: ["target", "reads"],
+      properties: { ...targetProp, 
         reads: {
           type: "array",
           minItems: 1,
@@ -795,8 +819,8 @@ const TOOLS: Tool[] = [
       "RETURNS: Header 'N records @ base ADDR_HEX stride S:' then one line per record: '[i] name=value name=value ...' with fields in request order.",
     inputSchema: {
       type: "object",
-      required: ["base", "stride", "count", "fields"],
-      properties: {
+      required: ["target", "base", "stride", "count", "fields"],
+      properties: { ...targetProp, 
         base:   { type: "integer", minimum: 0, description: "Byte offset of record 0 within the chosen memory domain." },
         stride: { type: "integer", minimum: 1, description: "Bytes between consecutive records (record i starts at base + i*stride)." },
         count:  { type: "integer", minimum: 1, description: "Number of records to decode. count × fields must be ≤ 4096." },
@@ -829,7 +853,7 @@ const TOOLS: Tool[] = [
       "RETURNS: One 'Froze ADDR_HEX (DOMAIN) = VAL' line per address, then 'N address(es) frozen.'",
     inputSchema: {
       type: "object",
-      properties: {
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain (0-based per-domain). Required unless entries is given." },
         value:   { type: "integer", minimum: 0, description: "Unsigned value to pin. For negative values pass the two's-complement unsigned form. Required unless entries is given." },
         width:   { type: "string", enum: WRITE_WIDTH_ENUM, default: "u8", description: "Write width. '_be' variants are big-endian (use on Genesis/Mega Drive). Default 'u8'. In batch mode this is the default width for entries that don't set their own." },
@@ -863,7 +887,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'N address(es) frozen.' (the count remaining).",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         address:   { type: "integer", minimum: 0, description: "Address to release (required unless addresses or all=true). Must match the frozen entry's address." },
         addresses: { type: "array", minItems: 1, items: { type: "integer", minimum: 0 }, description: "Batch mode: release all of these (each matched against the top-level domain). Mutually exclusive with address/all." },
         domain:    { type: "string", description: "Domain of the frozen entry/entries (must match what was passed to bizhawk_freeze, including omission)." },
@@ -879,7 +904,7 @@ const TOOLS: Tool[] = [
       "USAGE: Inspect freeze state before/after experiments, or to find the exact address+domain pair needed to unfreeze. " +
       "BEHAVIOR: No side effects — pure read of bridge state. " +
       "RETURNS: One line per entry: 'ADDR_HEX WIDTH = VALUE (DOMAIN)', or '(no frozen addresses)'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_memory_ops",
@@ -890,8 +915,8 @@ const TOOLS: Tool[] = [
       "RETURNS: One 'Wrote/Froze ADDR_HEX (DOMAIN) = VAL' or 'Unfroze ADDR_HEX (DOMAIN)' line per op, then 'N op(s) applied in one frame. M address(es) frozen.'",
     inputSchema: {
       type: "object",
-      required: ["ops"],
-      properties: {
+      required: ["target", "ops"],
+      properties: { ...targetProp, 
         ops: {
           type: "array",
           minItems: 1,
@@ -924,8 +949,8 @@ const TOOLS: Tool[] = [
       "RETURNS: The chunk's return value as pretty-printed JSON, '(nil)' if it returned nothing, or a JSON array when the chunk returns multiple values. Multiple return values with an embedded nil (e.g. return 1, nil, 3) produce a hole in the JSON array and may be truncated — return a table instead if you need to preserve nils.",
     inputSchema: {
       type: "object",
-      required: ["code"],
-      properties: {
+      required: ["target", "code"],
+      properties: { ...targetProp, 
         code: { type: "string", description: "Lua 5.4 chunk to execute, e.g. \"return emu.framecount()\" or \"memory.write_u16_be(0xC468, 0x0300, '68K RAM') return true\"." },
         timeout_ms: { type: "integer", minimum: 10000, description: "RPC timeout override in milliseconds. Only EXTENDS the timeout — values at or below the server's 10s default have no effect. Set this when the chunk advances many frames (~20ms per frame)." },
         unpause: { type: "boolean", description: "If true, run the chunk with the emulator temporarily unpaused (restoring the prior pause state afterward). Set this when the chunk calls emu.frameadvance — otherwise frame-stepping inside the chunk BLOCKS until something unpauses the emulator. Default false." },
@@ -942,7 +967,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Search started: N bytes @ START_HEX (WIDTH, DOMAIN) — M potential candidates.'",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         domain: { type: "string", description: DOMAIN_PARAM_DESC },
         start:  { type: "integer", minimum: 0, default: 0, description: "Byte offset where the search window begins. Default 0." },
         length: { type: "integer", minimum: 1, description: "Window size in bytes (max 2097152). Omit to search the whole domain from `start`." },
@@ -960,8 +986,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'N candidate(s) remain.' plus up to 20 sample lines 'ADDR_HEX = VALUE'.",
     inputSchema: {
       type: "object",
-      required: ["condition"],
-      properties: {
+      required: ["target", "condition"],
+      properties: { ...targetProp, 
         condition: {
           type: "string",
           enum: ["eq", "ne", "gt", "lt", "changed", "unchanged", "increased", "decreased"],
@@ -981,7 +1007,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'N candidate(s):' plus up to `limit` lines 'ADDR_HEX = VALUE'.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         limit: { type: "integer", minimum: 1, maximum: 500, default: 100, description: "Maximum candidates to list. Default 100." },
       },
       additionalProperties: false,
@@ -994,7 +1021,7 @@ const TOOLS: Tool[] = [
       "USAGE: After the target address is found, or to abandon a search. Optional but polite — search_begin also discards any previous session. " +
       "BEHAVIOR: No game-state side effects. Never errors, even with no active search. " +
       "RETURNS: 'Search ended.'",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_get_registers",
@@ -1003,7 +1030,7 @@ const TOOLS: Tool[] = [
       "USAGE: Reverse-engineering entry point — read PC to see where execution is, correlate with a disassembly, inspect state at a trap hit (bizhawk_trap_memory embeds registers automatically). Pair with bizhawk_pause for a stable readout. " +
       "BEHAVIOR: No side effects — pure read. Register support varies by core; returns an error if emu.getregisters is unavailable on the loaded core. " +
       "RETURNS: One line per register, sorted by name: 'NAME = VAL_DEC (0xVAL_HEX)'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_set_register",
@@ -1014,8 +1041,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Set register NAME = VALUE'.",
     inputSchema: {
       type: "object",
-      required: ["name", "value"],
-      properties: {
+      required: ["target", "name", "value"],
+      properties: { ...targetProp, 
         name:  { type: "string", description: "Register name exactly as reported by bizhawk_get_registers (core-specific, case-sensitive), e.g. 'PC', 'D0', 'A7'." },
         value: { type: "integer", description: "Value to write (unsigned; width per register)." },
       },
@@ -1031,7 +1058,8 @@ const TOOLS: Tool[] = [
       "RETURNS: One line per instruction — `0xADDR: <mnemonic>  (<len> bytes)`.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: "Start address. Omit to disassemble from the current PC." },
         count: { type: "integer", minimum: 1, maximum: 128, description: "Number of instructions to decode (default 1, max 128)." },
         domain: { type: "string", description: "Memory domain to read code from (default: System Bus)." },
@@ -1048,8 +1076,8 @@ const TOOLS: Tool[] = [
       "RETURNS: On hit: 'TRAPPED KIND @ ADDR_HEX after N frame(s). value: V' plus one 'NAME = DEC (HEX)' line per CPU register at the moment of access. On timeout: 'No KIND to ADDR_HEX within N frame(s).'",
     inputSchema: {
       type: "object",
-      required: ["address"],
-      properties: {
+      required: ["target", "address"],
+      properties: { ...targetProp, 
         address: { type: "integer", minimum: 0, description: "SYSTEM BUS address to monitor (event hooks address the bus, not per-domain offsets — on Genesis use the 0xFFxxxx form of a RAM address)." },
         kind: { type: "string", enum: ["write", "read", "exec"], default: "write", description: "Access type to trap. Default 'write'." },
         timeout_frames: { type: "integer", minimum: 1, default: 600, description: "Maximum frames to run (default 600 ≈ 10s game time). Timeout returns a result, not an error. RPC timeout scales automatically." },
@@ -1067,7 +1095,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Recorded N frame(s) in K entr(y/ies)[, stopped early (memory changed)].' followed by the frames as a JSON array of {buttons, hold} — paste directly into bizhawk_play_input_sequence.frames. Entries capture buttons only; on playback player defaults to 1, so for a non-player-1 recording add `player` to each entry before replay.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         max_frames: { type: "integer", minimum: 1, default: 600, description: "Maximum frames to record (default 600 ≈ 10 seconds at 60Hz). RPC timeout scales automatically." },
         player: { type: "integer", minimum: 1, default: 1, description: "Player/controller number to sample. Default 1." },
         stop_on_memory_change: {
@@ -1094,7 +1123,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A text summary of held buttons (or '(none)') and any axes.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         player: { type: "integer", minimum: 1, description: "Controller port to read (default 1)." },
       },
       additionalProperties: false,
@@ -1109,7 +1139,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Movie: PATH (loaded, mode: MODE, length: N)'.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         path: { type: "string", description: "Absolute path to a .bk2 movie file. Omit to restart the currently loaded movie from frame 0." },
       },
       additionalProperties: false,
@@ -1122,7 +1153,7 @@ const TOOLS: Tool[] = [
       "USAGE: Detach from a movie started with bizhawk_movie_play, e.g. to take manual/bridge control at an interesting frame. " +
       "BEHAVIOR: Emulation continues from the current frame; the movie file is not modified by stopping playback. Returns an error if movie.stop is unavailable. " +
       "RETURNS: 'Movie stopped.'",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_movie_status",
@@ -1131,7 +1162,7 @@ const TOOLS: Tool[] = [
       "USAGE: Poll during bizhawk_movie_play to see progress (compare bizhawk_get_info framecount to length); confirm mode before issuing inputs (inputs are ignored during PLAY). " +
       "BEHAVIOR: No side effects — pure read. " +
       "RETURNS: 'Movie: FILE (loaded, mode: MODE, length: N)' or 'No movie loaded.'",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_save_slot",
@@ -1142,8 +1173,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Saved slot 'NAME' → PATH'.",
     inputSchema: {
       type: "object",
-      required: ["name"],
-      properties: {
+      required: ["target", "name"],
+      properties: { ...targetProp, 
         name: { type: "string", description: "Slot name: 1-64 chars of letters, digits, dot, underscore, hyphen. Namespaced per ROM hash automatically." },
       },
       additionalProperties: false,
@@ -1158,8 +1189,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Loaded slot 'NAME' (paused|running)' plus a `State:` line (frame/paused/lag/domain).",
     inputSchema: {
       type: "object",
-      required: ["name"],
-      properties: {
+      required: ["target", "name"],
+      properties: { ...targetProp, 
         name:  { type: "string", description: "Slot name as given to bizhawk_save_slot." },
         pause: { type: "boolean", default: true, description: "Default true: leave the emulator paused after load (zero frames run between load and pause). Set false only for intentional real-time playback." },
       },
@@ -1173,7 +1204,7 @@ const TOOLS: Tool[] = [
       "USAGE: Browse rollback points before choosing what to load; check what a previous session left behind. " +
       "BEHAVIOR: No side effects. Slots are per-ROM (matched by hash); slots of other ROMs are not shown. " +
       "RETURNS: One line per slot: 'NAME  (SIZE bytes, MTIME_ISO)', or '(no slots saved for this ROM)'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_trace_start",
@@ -1184,7 +1215,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Trace started → PATH (osd: on|off)'.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         path: { type: "string", description: "File path for the CSV. Omit to reuse the bridge's default (per-port /tmp/nhl94_trace_<port>.csv)." },
         osd:  { type: "boolean", description: "Also enable/disable the on-screen animation overlay. Omit to leave unchanged." },
       },
@@ -1198,7 +1230,7 @@ const TOOLS: Tool[] = [
       "USAGE: End-of-experiment bookend for bizhawk_trace_start; also use to eliminate tracing overhead or stop garbage traces on non-supported ROMs. " +
       "BEHAVIOR: Flushes buffered rows and closes the file; the CSV remains on disk for analysis. Calling with no active trace is a no-op. " +
       "RETURNS: 'Trace stopped after N rows (PATH)'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_trace_status",
@@ -1207,7 +1239,7 @@ const TOOLS: Tool[] = [
       "USAGE: Find the CSV path before reading it (bizhawk_trace_tail or direct file access); sanity-check that a trace is running before an experiment. " +
       "BEHAVIOR: No side effects. " +
       "RETURNS: 'Trace active|inactive: PATH, N rows, osd: on|off'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_trace_tail",
@@ -1218,7 +1250,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'PATH (N rows, active: yes|no)' + the CSV header + the last N data rows.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         rows: { type: "integer", minimum: 1, maximum: 200, default: 10, description: "How many trailing data rows to return. Default 10 (rows are ~800 chars wide on NHL94)." },
       },
       additionalProperties: false,
@@ -1233,7 +1266,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'Physics-sync trace started → PATH (latch ADDR, emit ADDR)'.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         path: { type: "string", description: "File path for the CSV. Omit to reuse the bridge default /tmp/nhl94_phys_<port>.csv." },
       },
       additionalProperties: false,
@@ -1246,7 +1280,7 @@ const TOOLS: Tool[] = [
       "USAGE: End-of-experiment bookend for bizhawk_phys_trace_start; also re-enables the per-video-frame bizhawk_trace_* writer. " +
       "BEHAVIOR: Removes the bus-exec hooks, flushes buffered rows, closes the file (the CSV remains on disk). Calling with no active phys trace is a no-op. " +
       "RETURNS: 'Physics-sync trace stopped after N ticks (PATH)'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_phys_trace_status",
@@ -1255,7 +1289,7 @@ const TOOLS: Tool[] = [
       "USAGE: Find the CSV path before reading it (bizhawk_phys_trace_tail or direct file access); sanity-check that the trace is running and that D7 is being latched before an experiment. " +
       "BEHAVIOR: No side effects. " +
       "RETURNS: 'Physics-sync trace active|inactive: PATH, N ticks, last D7: N'.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_phys_trace_tail",
@@ -1266,7 +1300,8 @@ const TOOLS: Tool[] = [
       "RETURNS: 'PATH (N ticks, active: yes|no)' + the CSV header + the last N data rows.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         rows: { type: "integer", minimum: 1, maximum: 200, default: 10, description: "How many trailing data rows to return. Default 10." },
       },
       additionalProperties: false,
@@ -1330,7 +1365,7 @@ const TOOLS: Tool[] = [
       "RETURNS: One line per target with the pinned x/y/z and a note that velocity was zeroed.",
     inputSchema: {
       type: "object",
-      properties: {
+      properties: { ...targetProp, 
         targets: {
           type: "array",
           minItems: 1,
@@ -1338,7 +1373,7 @@ const TOOLS: Tool[] = [
           description: "Targets to freeze in place.",
         },
       },
-      required: ["targets"],
+      required: ["target", "targets"],
       additionalProperties: false,
     },
   },
@@ -1351,7 +1386,8 @@ const TOOLS: Tool[] = [
       "RETURNS: What scope was released and the number of addresses still frozen.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         targets: {
           type: "array",
           minItems: 1,
@@ -1372,7 +1408,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. When the faceoff-window latch at $FFC304 is nonzero, phase is the stable token `faceoff_line_change` and a `faceoff_window` line reports latch + selected lines (Sc1/Sc2/Chk). CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context except for the RAM-backed faceoff_line_change token. A trailing `*` marks a frozen word.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
         verbose: { type: "boolean", default: false, description: "Add a per-entity extended line: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf,pf2,pf3(+0x62-64)/wgt8(+0x67) — the accumulator/flag/weight fields (use nhl94_read for arbitrary fields)." },
         describe: { type: "boolean", default: true, description: "Default TRUE and recommended for staging/post-action verification: append a vision caption to the structured RAM state so placement, contact, and animation can be checked. Set false only for a fast RAM-only read (for example an interaction_gate preflight) or when vision is unnecessary. The structured result still returns if vision fails." },
@@ -1390,7 +1427,8 @@ const TOOLS: Tool[] = [
       "RETURNS: One line per target: 'sN: field=val field=val …'.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         targets: {
           type: "array",
           items: { type: "string", description: "'s0'..'s11' or 'pk'." },
@@ -1490,7 +1528,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A summary (count, y latitude, X range, kept list) plus the per-skater X assignments, and a note when the render-settle frames ran.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         keep: {
           type: "array",
           items: { type: "string", description: "Skater id 's0'..'s11' to leave alone." },
@@ -1509,12 +1548,12 @@ const TOOLS: Tool[] = [
       "RETURNS: `save`/`apply` a confirmation with freeze count; `list` the rigs with freeze counts, timestamps, and ROM-match flags; `delete` a confirmation.",
     inputSchema: {
       type: "object",
-      properties: {
+      properties: { ...targetProp, 
         action: { type: "string", enum: ["save", "apply", "list", "delete"], description: "Which rig operation to perform." },
         name: { type: "string", description: "Rig name (required for save/apply/delete; ignored for list). 1-64 chars: letters, digits, dot, underscore, hyphen." },
         note: { type: "string", description: "Optional free-text note stored with the rig (save only)." },
       },
-      required: ["action"],
+      required: ["target", "action"],
       additionalProperties: false,
     },
   },
@@ -1527,11 +1566,11 @@ const TOOLS: Tool[] = [
       "RETURNS: What was done — puck recipient and destination, whether the carrier is held, and a note when the post-write render-settle frames ran (a few frames stepped best-effort so a following screenshot shows the puck's new position, not the pre-write frame).",
     inputSchema: {
       type: "object",
-      properties: {
-        target: { type: "string", description: "'s0'..'s11' to give the puck to that skater, or 'none' for a loose puck." },
+      properties: { ...targetProp,
+        entity: { type: "string", description: "'s0'..'s11' to give the puck to that skater, or 'none' for a loose puck." },
         hold: { type: "boolean", default: false, description: "Also freeze the carrier word so possession can't change (empirical — verify it holds)." },
       },
-      required: ["target"],
+      required: ["target", "entity"],
       additionalProperties: false,
     },
   },
@@ -1544,7 +1583,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A confirmation of the clock value and freeze state.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         set: { type: ["string", "integer"], description: "New clock as 'MM:SS' (e.g. '19:59') or seconds (0-3599)." },
         freeze: { type: "boolean", description: "Freeze the clock at the set/current value." },
         release: { type: "boolean", description: "Release a frozen clock." },
@@ -1561,7 +1601,8 @@ const TOOLS: Tool[] = [
       "RETURNS: A confirmation of the pinned axes or the release.",
     inputSchema: {
       type: "object",
-      properties: {
+      required: ["target"],
+      properties: { ...targetProp, 
         pin: {
           type: "object",
           properties: {
@@ -1639,8 +1680,8 @@ function fmtMovieStatus(r: { loaded: boolean; mode?: string; filename?: string; 
 // Named savestate slots, managed server-side under
 // $MCP_BIZHAWK_STATE_DIR or ~/.mcp-bizhawk/states, namespaced per ROM hash.
 // Read at call time so the env var can change (and tests can override it).
-function stateDir(): string {
-  return process.env.MCP_BIZHAWK_STATE_DIR ?? path.join(os.homedir(), ".mcp-bizhawk", "states");
+function stateDir(backend?: BizhawkBackend): string {
+  return backend?.stateDirHost() || process.env.MCP_BIZHAWK_STATE_DIR || path.join(os.homedir(), ".mcp-bizhawk", "states");
 }
 // ── Usage logging ────────────────────────────────────────────────────────────
 // Append one JSONL row per tool call so we can see, after the fact, which tools
@@ -1659,6 +1700,7 @@ function usageLogPath(): string | null {
 }
 function recordUsage(
   tool: string,
+  target: string | undefined,
   args: Record<string, unknown>,
   ok: boolean,
   ms: number,
@@ -1667,7 +1709,7 @@ function recordUsage(
   const file = usageLogPath();
   if (!file) return;
   try {
-    const base = { ts: new Date().toISOString(), tool, ok, ms, ...(error ? { error } : {}) };
+    const base = { ts: new Date().toISOString(), tool, ...(target ? { target } : {}), ok, ms, ...(error ? { error } : {}) };
     let line = JSON.stringify({ ...base, args });
     // Keep the line valid JSONL even if a single call carries a huge payload.
     if (line.length > USAGE_LINE_CAP) {
@@ -1690,8 +1732,8 @@ function slotPath(hash: string, name: string): string {
   }
   return path.join(stateDir(), hash, `${name}.State`);
 }
-async function currentRomHash(bh: BizhawkServer): Promise<string> {
-  const info = await bh.call<{ rom_hash?: string }>("get_info");
+async function currentRomHash(target: string, bh: BizhawkServer): Promise<string> {
+  const info = await bh.call<{ rom_hash?: string }>(target, "get_info");
   return info.rom_hash && info.rom_hash !== "unavailable" ? info.rom_hash : "unknown-rom";
 }
 
@@ -1708,8 +1750,8 @@ interface Rig {
   freeze_count: number;
   note?: string;
 }
-function rigRoot(): string {
-  return process.env.MCP_BIZHAWK_RIG_DIR ?? path.join(os.homedir(), ".mcp-bizhawk", "rigs");
+function rigRoot(backend?: BizhawkBackend): string {
+  return backend?.rigDirHost() || process.env.MCP_BIZHAWK_RIG_DIR || path.join(os.homedir(), ".mcp-bizhawk", "rigs");
 }
 function rigName(name: unknown): string {
   if (typeof name !== "string") throw new Error("rig name must be a string");
@@ -1726,31 +1768,6 @@ function availableRigs(hash: string): string {
   if (!fs.existsSync(dir)) return "No rigs saved for this ROM.";
   const names = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
   return names.length ? `Available: ${names.join(", ")}.` : "No rigs saved for this ROM.";
-}
-
-// NHL94 tools address absolute M68K bus locations (0xFFxxxx). Resolve the
-// right domain once per BizhawkServer: prefer "M68K BUS" (base 0, addresses
-// used as-is); fall back to "68K RAM" (base 0xFF0000, addresses rebased). The
-// choice is cached per-bh so tests (fresh bh each harness) don't leak.
-const nhlDomainCache = new WeakMap<BizhawkServer, string>();
-async function nhlDomain(bh: BizhawkServer): Promise<string> {
-  const hit = nhlDomainCache.get(bh);
-  if (hit) return hit;
-  const domains = await bh.call<string[]>("list_memory_domains");
-  const d = domains.includes("M68K BUS") ? "M68K BUS"
-    : domains.includes("68K RAM") ? "68K RAM"
-    : null;
-  if (!d) throw new Error("no Genesis 68K memory domain (M68K BUS / 68K RAM) on the loaded core");
-  nhlDomainCache.set(bh, d);
-  return d;
-}
-// Rebase an absolute M68K bus address into the resolved domain's offset space.
-function nhlAddr(abs: number, domain: string): number {
-  return domain === "68K RAM" ? abs - 0xff0000 : abs;
-}
-// Rebase every op's address for the resolved domain (builders emit absolute).
-function nhlRebase(ops: nhl94.MemOp[], domain: string): nhl94.MemOp[] {
-  return ops.map((o) => ({ ...o, address: nhlAddr(o.address, domain) }));
 }
 
 const RAW_ADDR_RE = /^(0x[0-9a-fA-F]+|\d+)$/;
@@ -1870,9 +1887,9 @@ const NHL_SETTLE_FRAMES = 5;
 // Best-effort: step NHL_SETTLE_FRAMES so the move is visible. Never throws — a
 // core that can't frame-advance just skips it (the write already landed).
 // Returns whether the step actually ran, for an honest note in the output.
-async function nhlSettle(bh: BizhawkServer): Promise<boolean> {
+async function nhlSettle(target: string, bh: BizhawkServer): Promise<boolean> {
   try {
-    await bh.call("frame_advance", { count: NHL_SETTLE_FRAMES }, { timeoutMs: frameTimeout(NHL_SETTLE_FRAMES) });
+    await bh.call(target, "frame_advance", { count: NHL_SETTLE_FRAMES }, { timeoutMs: frameTimeout(NHL_SETTLE_FRAMES) });
     return true;
   } catch {
     return false;
@@ -1891,13 +1908,13 @@ async function nhlSettle(bh: BizhawkServer): Promise<boolean> {
 // the OS temp dir — co-located BizHawk, no translation (the historical behavior).
 // Returns `local` (fs read/describe) and `remote` (sent to the bridge screenshot
 // command); they are the same file via the shared mount, spelled per side.
-export function shotPaths(name: string): { local: string; remote: string } {
-  const localDir = process.env.MCP_BIZHAWK_SHOT_DIR || os.tmpdir();
+export function shotPaths(name: string, backend?: BizhawkBackend): { local: string; remote: string } {
+  const localDir = backend?.shotDirHost() || process.env.MCP_BIZHAWK_SHOT_DIR || os.tmpdir();
   const local = path.join(localDir, name);
   if (process.env.MCP_BIZHAWK_SHOT_DIR) {
     try { fs.mkdirSync(localDir, { recursive: true }); } catch { /* best-effort */ }
   }
-  const bridgeDir = process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE;
+  const bridgeDir = backend?.shotDirBridge() || process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE;
   if (!bridgeDir) return { local, remote: local };
   // Join with the separator the bridge's path implies (Windows drive/backslash
   // → "\", otherwise "/"), trimming any trailing separator on the configured dir.
@@ -1913,6 +1930,7 @@ export function shotPaths(name: string): { local: string; remote: string } {
 // tools still DISPATCH — this only filters what tools/list advertises — so
 // nhl94_* internals and the BIZHAWK_ALL_TOOLS=1 override keep working.
 const EXPOSED_BIZHAWK = new Set([
+  "bizhawk_list_backends",
   "bizhawk_ping",
   "bizhawk_get_info",
   "bizhawk_pause",
@@ -1943,7 +1961,7 @@ function exposedTools(): Tool[] {
   return TOOLS.filter((t) => t.name.startsWith("nhl94_") || EXPOSED_BIZHAWK.has(t.name));
 }
 
-export function registerTools(server: Server, bh: BizhawkServer): void {
+export function registerTools(server: Server, bh: import("./bizhawk.js").BizhawkServer): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: exposedTools() }));
 
   const dispatchTool = async (req: { params: { name: string; arguments?: unknown } }) => {
@@ -1954,25 +1972,36 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
     const bo  = () => p.byteorder ? { byteorder: p.byteorder } : {};
 
     switch (name) {
+      case "bizhawk_list_backends": {
+        const statuses = bh.listBackends();
+        if (statuses.length === 0) return ok("No backends configured.");
+        const lines = statuses.map((s) => {
+          const addr = s.remoteAddress ? ` (${s.remoteAddress})` : "";
+          const inflight = s.inflightCommand ? ` inflight=${s.inflightCommand.method}` : "";
+          return `${s.name} @ ${s.host}:${s.port} — ${s.state} gen=${s.socketGeneration} queued=${s.queuedCommands}${inflight}${addr}`;
+        });
+        return ok(lines.join("\n"));
+      }
+
       case "bizhawk_ping": {
-        // Always answer with the server identity, even with no BizHawk
-        // attached — so ping doubles as a "which build am I running?" check
-        // without needing the emulator up.
-        if (!bh.isConnected()) {
-          return ok(`mcp-bizhawk v${VERSION} — server up, BizHawk NOT connected (${bh.describeTarget()})`);
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
+        if (!backend.isConnected()) {
+          return ok(`Backend "${target}" is not connected.`);
         }
-        if (!bh.isBridgeReady()) {
-          return ok(`mcp-bizhawk v${VERSION} — BizHawk connected, but bridge_JD.lua is not polling yet (load it via Tools > Lua Console)`);
+        if (!backend.isBridgeReady()) {
+          return ok(`Backend "${target}" is connected but bridge is not polling yet.`);
         }
         try {
-          const r = await bh.call<string>("ping");
-          return ok(`${r} (mcp-bizhawk v${VERSION}, bridge polling)`);
+          const r = await bh.call<string>(target, "ping");
+          return ok(`${r} (mcp-bizhawk v${VERSION}, backend "${target}" polling)`);
         } catch (err) {
-          return ok(`mcp-bizhawk v${VERSION} — server up, but the bridge did not answer: ${(err as Error).message}`);
+          return ok(`Backend "${target}" — bridge did not answer: ${(err as Error).message}`);
         }
       }
 
       case "bizhawk_get_info": {
+        const target = p.target as string;
         const r = await bh.call<{
           bridge?: { name?: string; version?: string; pause_safe?: boolean };
           rom_name?: string;
@@ -1987,7 +2016,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           memory_domains?: string[];
           current_memory_domain?: string;
           capabilities?: Record<string, boolean>;
-        }>("get_info");
+        }>(target, "get_info");
         const lines = [
           `Server:     mcp-bizhawk v${VERSION}`,
           `Bridge:     ${r.bridge
@@ -2023,21 +2052,24 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_list_memory_domains": {
-        const r = await bh.call<string[]>("list_memory_domains");
+        const target = p.target as string;
+        const r = await bh.call<string[]>(target, "list_memory_domains");
         return ok("Memory domains:\n  " + r.join("\n  "));
       }
 
-      case "bizhawk_read8":  return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read8", { address: a(), ...dom() }))}`);
-      case "bizhawk_read16": return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read16", { address: a(), ...dom(), ...bo() }))}`);
-      case "bizhawk_read32": return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>("read32", { address: a(), ...dom(), ...bo() }))}`);
+      case "bizhawk_read8":  { const target = p.target as string; return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>(target, "read8", { address: a(), ...dom() }))}`); }
+      case "bizhawk_read16": { const target = p.target as string; return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>(target, "read16", { address: a(), ...dom(), ...bo() }))}`); }
+      case "bizhawk_read32": { const target = p.target as string; return ok(`${addrHex(a())}: ${fmtHex(await bh.call<number>(target, "read32", { address: a(), ...dom(), ...bo() }))}`); }
 
       case "bizhawk_read_range": {
-        const bytes = await bh.call<number[]>("read_range", { address: a(), length: p.length, ...dom() });
+        const target = p.target as string;
+        const bytes = await bh.call<number[]>(target, "read_range", { address: a(), length: p.length, ...dom() });
         const hex = bytes.map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
         return ok(`${addrHex(a())} [${bytes.length} bytes${p.domain ? `, ${p.domain}` : ""}]:\n${hex}`);
       }
 
       case "bizhawk_ram_snapshot": {
+        const target = p.target as string;
         const base = (p.base as number | undefined) ?? 0;
         const size = (p.size as number | undefined) ?? 0x10000;
         const domain = (p.domain as string | undefined) ?? "68K RAM";
@@ -2049,7 +2081,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const buf = Buffer.allocUnsafe(size);
         for (let off = 0; off < size; off += 4096) {
           const len = Math.min(4096, size - off);
-          const chunk = await bh.call<number[]>("read_range", { address: base + off, length: len, domain });
+          const chunk = await bh.call<number[]>(target, "read_range", { address: base + off, length: len, domain });
           for (let i = 0; i < len; i++) buf[off + i] = chunk[i] & 0xff;
         }
         fs.writeFileSync(outPath, buf);
@@ -2058,6 +2090,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_trap_exec": {
+        const target = p.target as string;
         const action = p.action as string;
         const args: Record<string, unknown> = { action };
         if (action === "start") {
@@ -2066,7 +2099,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           if (p.limit !== undefined) args.limit = p.limit;
         }
         if (action === "read" && p.name !== undefined) args.name = p.name;
-        const r = await bh.call<{ started?: number; traps?: unknown; counts?: Record<string, number>; active?: boolean }>("trap_exec", args);
+        const r = await bh.call<{ started?: number; traps?: unknown; counts?: Record<string, number>; active?: boolean }>(target, "trap_exec", args);
         if (action === "start") {
           const names = Array.isArray(r.traps) ? r.traps.join(", ") : "";
           return ok(`Armed ${r.started} trap(s): ${names}. Now drive frames (bizhawk_frame_advance / play_input_sequence), then action:"read". Call action:"stop" when done — live hooks cost emulation speed.`);
@@ -2077,24 +2110,29 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_write8": {
-        await bh.call("write8", { address: a(), value: p.value, ...dom() });
+        const target = p.target as string;
+        await bh.call(target, "write8", { address: a(), value: p.value, ...dom() });
         return ok(`Wrote ${fmtHex(p.value)} → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
       case "bizhawk_write16": {
-        await bh.call("write16", { address: a(), value: p.value, ...dom(), ...bo() });
+        const target = p.target as string;
+        await bh.call(target, "write16", { address: a(), value: p.value, ...dom(), ...bo() });
         return ok(`Wrote ${fmtHex(p.value)} → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
       case "bizhawk_write32": {
-        await bh.call("write32", { address: a(), value: p.value, ...dom(), ...bo() });
+        const target = p.target as string;
+        await bh.call(target, "write32", { address: a(), value: p.value, ...dom(), ...bo() });
         return ok(`Wrote ${fmtHex(p.value)} → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
       case "bizhawk_write_range": {
-        const r = await bh.call<{ written: number }>("write_range", { address: a(), bytes: p.bytes, ...dom() });
+        const target = p.target as string;
+        const r = await bh.call<{ written: number }>(target, "write_range", { address: a(), bytes: p.bytes, ...dom() });
         return ok(`Wrote ${r.written} bytes → ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""}`);
       }
 
       case "bizhawk_press_buttons": {
-        const r = await bh.call<true | { state?: StateSummary }>(
+        const target = p.target as string;
+        const r = await bh.call<true | { state?: StateSummary }>(target, 
           "press_buttons", { buttons: p.buttons, player: p.player ?? 1 },
         );
         const pressed = Object.entries(p.buttons as Record<string, boolean>)
@@ -2106,6 +2144,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       case "bizhawk_play_input_sequence": {
         // `describe` is server-side only (vision runs after the bridge replies);
         // validate config up front so we don't play frames then fail.
+        const target = p.target as string;
         const visCfg = p.describe ? requireVisionConfig() : null;
         const params: Record<string, unknown> = { frames: p.frames };
         if (p.load_state_path        !== undefined) params.load_state_path        = p.load_state_path;
@@ -2131,7 +2170,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             path?: string;
             memory?: Record<string, number>;
           }[];
-        }>("play_input_sequence", params, { timeoutMs: frameTimeout(totalFrames) });
+        }>(target, "play_input_sequence", params, { timeoutMs: frameTimeout(totalFrames) });
 
         // Array.isArray guard: a bridge that captured zero observations may
         // send JSON {} (Lua's empty-table ambiguity) instead of [] / omitted.
@@ -2194,6 +2233,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_run_trials": {
+        const target = p.target as string;
         const trialsVisCfg = p.describe ? requireVisionConfig() : null;
         const trials = p.trials as { frames?: { hold?: number }[] }[];
         const params: Record<string, unknown> = { state_path: p.state_path, trials: p.trials };
@@ -2215,7 +2255,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             memory?: Record<string, number>;
             screenshot_path?: string;
           }[];
-        }>("run_trials", params, { timeoutMs: frameTimeout(totalFrames + trials.length * 10) });
+        }>(target, "run_trials", params, { timeoutMs: frameTimeout(totalFrames + trials.length * 10) });
 
         const rows = Array.isArray(r.trials) ? r.trials : [];
 
@@ -2260,22 +2300,26 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_pause": {
-        const r = await bh.call<true | { state?: StateSummary }>("pause");
+        const target = p.target as string;
+        const r = await bh.call<true | { state?: StateSummary }>(target, "pause");
         return ok(withState("Emulation paused", typeof r === "object" ? r.state : undefined));
       }
       case "bizhawk_unpause": {
-        const r = await bh.call<true | { state?: StateSummary }>("unpause");
+        const target = p.target as string;
+        const r = await bh.call<true | { state?: StateSummary }>(target, "unpause");
         return ok(withState("Emulation resumed", typeof r === "object" ? r.state : undefined));
       }
       case "bizhawk_reset": {
-        const r = await bh.call<true | { state?: StateSummary }>("reset");
+        const target = p.target as string;
+        const r = await bh.call<true | { state?: StateSummary }>(target, "reset");
         return ok(withState("Core reset", typeof r === "object" ? r.state : undefined));
       }
       case "bizhawk_frame_advance": {
+        const target = p.target as string;
         const count = (p.count as number) ?? 1;
         const faParams: Record<string, unknown> = { count };
         if (p.turbo !== undefined) faParams.turbo = p.turbo;
-        const f = await bh.call<number | { framecount?: number; state?: StateSummary }>(
+        const f = await bh.call<number | { framecount?: number; state?: StateSummary }>(target, 
           "frame_advance", faParams, { timeoutMs: frameTimeout(count) });
         // Bridge may return a bare framecount (legacy) or {framecount, state}.
         const fc = typeof f === "number" ? f : (f.framecount ?? f.state?.framecount);
@@ -2285,6 +2329,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_wait_for_memory": {
+        const target = p.target as string;
         const timeoutFrames = (p.timeout_frames as number) ?? 600;
         const params: Record<string, unknown> = { address: a(), ...dom() };
         if (p.width          !== undefined) params.width          = p.width;
@@ -2297,7 +2342,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           frames_waited: number;
           value: number;
           final_framecount?: number;
-        }>("wait_for_memory", params, { timeoutMs: frameTimeout(timeoutFrames) });
+        }>(target, "wait_for_memory", params, { timeoutMs: frameTimeout(timeoutFrames) });
         return ok(
           `Condition ${r.matched ? "met" : "NOT met (timeout)"} after ${r.frames_waited} frame(s). ` +
           `Value: ${fmtHex(r.value)}. Framecount: ${r.final_framecount ?? "(unavailable)"}`,
@@ -2305,8 +2350,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_read_many": {
+        const target = p.target as string;
         const reads = p.reads as { name: string }[];
-        const r = await bh.call<Record<string, number>>("read_many", { reads });
+        const r = await bh.call<Record<string, number>>(target, "read_many", { reads });
         const lines = reads.map((s) => {
           const v = r[s.name];
           return `${s.name} = ${typeof v === "number" && v < 0 ? v : fmtHex(v)}`;
@@ -2315,8 +2361,9 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_read_struct_array": {
+        const target = p.target as string;
         const fields = p.fields as { name: string }[];
-        const r = await bh.call<Record<string, number>[]>("read_struct_array", {
+        const r = await bh.call<Record<string, number>[]>(target, "read_struct_array", {
           base: p.base, stride: p.stride, count: p.count, fields, ...dom(),
         });
         const lines = r.map(
@@ -2328,6 +2375,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_freeze": {
+        const target = p.target as string;
         if (p.entries !== undefined) {
           if (p.address !== undefined || p.value !== undefined) {
             throw new Error("pass either address+value or entries, not both");
@@ -2335,7 +2383,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           const entries = p.entries as { address: number; value: number; width?: string; domain?: string }[];
           const params: Record<string, unknown> = { entries, ...dom() };
           if (p.width !== undefined) params.width = p.width;
-          const r = await bh.call<{ frozen_count: number }>("freeze", params);
+          const r = await bh.call<{ frozen_count: number }>(target, "freeze", params);
           const lines = entries.map((e) => {
             const d = e.domain ?? p.domain;
             return `Froze ${addrHex(e.address)}${d ? ` (${d})` : ""} = ${fmtHex(e.value)}`;
@@ -2347,26 +2395,28 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         }
         const params: Record<string, unknown> = { address: a(), value: p.value, ...dom() };
         if (p.width !== undefined) params.width = p.width;
-        const r = await bh.call<{ frozen_count: number }>("freeze", params);
+        const r = await bh.call<{ frozen_count: number }>(target, "freeze", params);
         return ok(
           `Froze ${addrHex(a())}${p.domain ? ` (${p.domain})` : ""} = ${fmtHex(p.value)}. ` +
           `${r.frozen_count} address(es) frozen.`,
         );
       }
       case "bizhawk_unfreeze": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.address   !== undefined) params.address   = p.address;
         if (p.addresses !== undefined) params.addresses = p.addresses;
         if (p.domain    !== undefined) params.domain    = p.domain;
         if (p.all       !== undefined) params.all       = p.all;
-        const r = await bh.call<{ frozen_count: number }>("unfreeze", params);
+        const r = await bh.call<{ frozen_count: number }>(target, "unfreeze", params);
         return ok(`${r.frozen_count} address(es) frozen.`);
       }
       case "bizhawk_list_frozen": {
+        const target = p.target as string;
         const r = await bh.call<{
           count: number;
           frozen?: { address: number; width: string; value: number; domain?: string }[];
-        }>("list_frozen");
+        }>(target, "list_frozen");
         const list = Array.isArray(r.frozen) ? r.frozen : [];
         if (list.length === 0) return ok("(no frozen addresses)");
         return ok(list
@@ -2374,10 +2424,11 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           .join("\n"));
       }
       case "bizhawk_memory_ops": {
+        const target = p.target as string;
         const ops = p.ops as { op: string; address: number; value?: number; width?: string; domain?: string }[];
         const params: Record<string, unknown> = { ops, ...dom() };
         if (p.width !== undefined) params.width = p.width;
-        const r = await bh.call<{ applied: number; frozen_count: number }>("memory_ops", params);
+        const r = await bh.call<{ applied: number; frozen_count: number }>(target, "memory_ops", params);
         const lines = ops.map((o) => {
           const d = o.domain ?? p.domain;
           const loc = `${addrHex(o.address)}${d ? ` (${d})` : ""}`;
@@ -2392,19 +2443,22 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(nhl94.RECIPES_GUIDE);
 
       case "nhl94_teleport": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const entries = p.targets as nhl94.TeleportEntry[];
-        const domain = await nhlDomain(bh);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         // Auto-detach: if pk is being teleported and a skater carries it, write
         // "nobody" to the carrier word first (else carry logic snaps it back).
         const hasPk = entries.some((e) => e.target === "pk");
         let carrier = -1;
         let detach = false;
         if (hasPk) {
-          carrier = await bh.call<number>("read16", { address: nhlAddr(nhl94.G.carrier, domain), byteorder: "be", domain });
+          carrier = await bh.call<number>(target, "read16", { address: d.addr(nhl94.G.carrier), byteorder: "be", domain });
           detach = carrier >= 0 && carrier <= 11;
         }
         const ops = nhl94.teleportOps(entries, detach); // validates; throws before any write
-        await bh.call("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        await bh.call(target, "memory_ops", { ops: d.rebase(ops), domain });
         const lines = entries.map((e) => {
           const parts = (["x", "y", "z", "xv", "yv", "zv"] as const)
             .filter((ax) => e[ax] !== undefined)
@@ -2413,27 +2467,30 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           if (e.target === "pk") line += detach ? ` (detached from s${carrier})` : " (loose puck)";
           return line;
         });
-        const settled = await nhlSettle(bh);
+        const settled = await nhlSettle(target, bh);
         return ok(`${lines.join("\n")}${settled ? `\n(+${NHL_SETTLE_FRAMES} frames so the move renders)` : ""}`);
       }
 
       case "nhl94_freeze": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const targets = p.targets as string[];
         if (!targets.length) throw new Error("targets must be a non-empty array");
-        const domain = await nhlDomain(bh);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         const reads = targets.flatMap((t) => {
           const { base } = nhl94.resolveTarget(t); // validates target
           return (["x", "y", "z"] as const).map((ax) => ({
-            name: `${t}.${ax}`, address: nhlAddr(base + nhl94.OFF[ax], domain), width: "s32_be", domain,
+            name: `${t}.${ax}`, address: d.addr(base + nhl94.OFF[ax]), width: "s32_be", domain,
           }));
         });
-        const vals = await bh.call<Record<string, number>>("read_many", { reads });
+        const vals = await bh.call<Record<string, number>>(target, "read_many", { reads });
         const positions: Record<string, { x: number; y: number; z: number }> = {};
         for (const t of targets) {
           positions[t] = { x: vals[`${t}.x`], y: vals[`${t}.y`], z: vals[`${t}.z`] };
         }
         const ops = nhl94.freezeOps(targets, positions);
-        const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops: d.rebase(ops), domain });
         const whole = (raw: number) => nhl94.fromFixed(raw >>> 0).whole;
         const lines = targets.map((t) => {
           const pos = positions[t];
@@ -2443,25 +2500,31 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "nhl94_unfreeze": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const targets = p.targets as string[] | undefined;
         const all = p.all === true;
         if (all && targets !== undefined) throw new Error("pass either targets or all:true, not both");
         if (all) {
-          const r = await bh.call<{ frozen_count: number }>("unfreeze", { all: true });
+          const r = await bh.call<{ frozen_count: number }>(target, "unfreeze", { all: true });
           return ok(`Released all freezes (targets, globals, stale, and unmapped).\n${r.frozen_count} address(es) still frozen.`);
         }
         if (!targets?.length) throw new Error("pass a non-empty targets array or all:true");
-        const domain = await nhlDomain(bh);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         const ops = nhl94.unfreezeOps(targets); // validates targets
-        const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops: d.rebase(ops), domain });
         const lines = targets.map((t) => `Released freezes on ${t}`);
         return ok(`${lines.join("\n")}\n${r.frozen_count} address(es) still frozen.`);
       }
 
       case "nhl94_state": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const raw = p.raw === true;
         const verbose = p.verbose === true;
-        const domain = await nhlDomain(bh);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         const fields = [
           { name: "x", offset: nhl94.OFF.x, width: "s32_be" },
           { name: "y", offset: nhl94.OFF.y, width: "s32_be" },
@@ -2490,8 +2553,8 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           for (const name of EXTRA_FIELDS) fields.push({ name, offset: nhl94.OFF[name], width: nhl94.FIELD_WIDTH[name] });
         }
         // Slots 0..14 in one contiguous read (12 skaters + 2 unused + puck@14).
-        const recs = await bh.call<Record<string, number>[]>("read_struct_array", {
-          base: nhlAddr(nhl94.SORTCORDS, domain), stride: nhl94.SCSIZE, count: 15, fields,
+        const recs = await bh.call<Record<string, number>[]>(target, "read_struct_array", {
+          base: d.addr(nhl94.SORTCORDS), stride: nhl94.SCSIZE, count: 15, fields,
           domain,
         });
         const byIndex = new Map<number, Record<string, number>>(recs.map((r) => [r._index, r]));
@@ -2502,18 +2565,18 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const gReads: { name: string; address: number; width: string; domain: string }[] =
           (["carrier", "gameclock", "gsp", "gmode", "vpos", "hpos", "yleader",
             "shotplayer", "lastplayer", "passdir", "passspeed"] as const).map((k) => ({
-            name: k, address: nhlAddr(nhl94.G[k], domain), width: k === "gmode" ? "u8" : (S16G.has(k) ? "s16_be" : "u16_be"), domain,
+            name: k, address: d.addr(nhl94.G[k]), width: k === "gmode" ? "u8" : (S16G.has(k) ? "s16_be" : "u16_be"), domain,
           }));
         gReads.push(
-          { name: "faceoff_window_latch", address: nhlAddr(nhl94.G.faceoff_window_latch, domain), width: "u16_be", domain },
-          { name: "home_line", address: nhlAddr(nhl94.G.home_line, domain), width: "u8", domain },
-          { name: "away_line", address: nhlAddr(nhl94.G.away_line, domain), width: "u8", domain },
+          { name: "faceoff_window_latch", address: d.addr(nhl94.G.faceoff_window_latch), width: "u16_be", domain },
+          { name: "home_line", address: d.addr(nhl94.G.home_line), width: "u8", domain },
+          { name: "away_line", address: d.addr(nhl94.G.away_line), width: "u8", domain },
         );
         // Session/phase byte (0xFFC735) — read in the same round-trip; drives the
         // `phase:` label below (see nhl94.classifyPhase / SESSION_BYTE comment).
-        gReads.push({ name: "session", address: nhlAddr(nhl94.SESSION_BYTE, domain), width: "u8", domain });
-        const gv = await bh.call<Record<string, number>>("read_many", { reads: gReads });
-        const frozen = await bh.call<{ frozen?: { address: number; width: string; value: number; domain?: string }[] }>("list_frozen");
+        gReads.push({ name: "session", address: d.addr(nhl94.SESSION_BYTE), width: "u8", domain });
+        const gv = await bh.call<Record<string, number>>(target, "read_many", { reads: gReads });
+        const frozen = await bh.call<{ frozen?: { address: number; width: string; value: number; domain?: string }[] }>(target, "list_frozen");
         const frozenList = Array.isArray(frozen.frozen) ? frozen.frozen : [];
 
         // Map frozen addresses onto {target, field}; tally mapped/unmapped.
@@ -2536,7 +2599,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const hex2 = (v: number) => (v >>> 0).toString(16).toUpperCase().padStart(2, "0");
         // Absolute (domain-relative) struct base for a slot — the same number an
         // agent needs to read any field this tool doesn't decode (base + OFF.*).
-        const slotAddr = (idx: number) => nhlAddr(nhl94.SORTCORDS + idx * nhl94.SCSIZE, domain);
+        const slotAddr = (idx: number) => d.addr(nhl94.SORTCORDS + idx * nhl94.SCSIZE);
         const targetLines = (label: string, idx: number): string[] => {
           const rec = byIndex.get(idx);
           const at = raw ? ` @0x${slotAddr(idx).toString(16).toUpperCase()}` : "";
@@ -2626,7 +2689,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const slotName = (v: number) => (v >= 0 && v <= 11 ? `s${v}` : `none (${v})`);
         lines.push(`shot: ${slotName(gv.shotplayer)}${markG("shotplayer")}   last: ${slotName(gv.lastplayer)}${markG("lastplayer")}   pass: dir=${gv.passdir}${markG("passdir")} speed=${gv.passspeed}${markG("passspeed")}`);
         lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
-        const baseHex = nhlAddr(nhl94.SORTCORDS, domain).toString(16).toUpperCase();
+        const baseHex = d.addr(nhl94.SORTCORDS).toString(16).toUpperCase();
         lines.push(
           `layout: slot structs @ base=0x${baseHex} stride=0x${nhl94.SCSIZE.toString(16).toUpperCase()} domain='${domain}' ` +
           `(reference only; do not hand-compute reads). Use nhl94_read with a named field or raw +0xNN:width offset. ` +
@@ -2646,7 +2709,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           }
           const { local: readPath, remote: sendPath } = shotPaths(`mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`);
           try {
-            await bh.call<string>("screenshot", { path: sendPath });
+            await bh.call<string>(target, "screenshot", { path: sendPath });
             const desc = await describeImage(readPath, p.describe_prompt as string | undefined, cfg);
             return ok(`${stateText}\n\n=== Screenshot described by ${cfg.model} ===\n${desc}`);
           } catch (err) {
@@ -2658,19 +2721,22 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "nhl94_read": {
-        const domain = await nhlDomain(bh);
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         const targets = (p.targets as string[] | undefined)
           ?? Array.from({ length: 12 }, (_, i) => `s${i}`).concat("pk");
         const fieldToks = (p.fields as string[] | undefined) ?? nhl94.READ_DEFAULT_FIELDS;
         const fields = fieldToks.map((t) => nhl94.resolveField(t)); // validates fields
         const bases = targets.map((t) => ({ t, base: nhl94.resolveTarget(t).base })); // validates targets
         const reads = bases.flatMap(({ t, base }) =>
-          fields.map((f) => ({ name: `${t}.${f.field}`, address: nhlAddr(base + f.offset, domain), width: f.width, domain })),
+          fields.map((f) => ({ name: `${t}.${f.field}`, address: d.addr(base + f.offset), width: f.width, domain })),
         );
         if (reads.length > 128) {
           throw new Error(`nhl94_read would issue ${reads.length} reads (>128); reduce targets or fields`);
         }
-        const vals = await bh.call<Record<string, number>>("read_many", { reads });
+        const vals = await bh.call<Record<string, number>>(target, "read_many", { reads });
         const lines = bases.map(({ t }) => {
           const parts = fields.map((f) => {
             const v = vals[`${t}.${f.field}`] ?? 0;
@@ -2683,7 +2749,10 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "nhl94_fields": {
-        const domain = await nhlDomain(bh);
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         const opsIn = p.ops as Record<string, unknown>[] | undefined;
         if (!Array.isArray(opsIn) || opsIn.length === 0) throw new Error("nhl94_fields requires a non-empty ops array");
         const refs = opsIn.map((op) => ({ input: op, ref: resolveNhlFieldOp(op) }));
@@ -2692,15 +2761,15 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const readbackRefs: NhlFieldRef[] = [];
         const currentFreezeReads = refs
           .filter(({ input }) => input.op === "freeze" && input.value === undefined)
-          .map(({ ref }) => ({ name: ref.label, address: nhlAddr(ref.address, domain), width: ref.width, domain }));
+          .map(({ ref }) => ({ name: ref.label, address: d.addr(ref.address), width: ref.width, domain }));
         const currentFreezeVals = currentFreezeReads.length
-          ? await bh.call<Record<string, number>>("read_many", { reads: currentFreezeReads })
+          ? await bh.call<Record<string, number>>(target, "read_many", { reads: currentFreezeReads })
           : {};
 
         for (const { input, ref } of refs) {
           const op = input.op;
           if (op === "read") {
-            readReqs.push({ name: ref.label, address: nhlAddr(ref.address, domain), width: ref.width, domain });
+            readReqs.push({ name: ref.label, address: d.addr(ref.address), width: ref.width, domain });
           } else if (op === "write") {
             const value = encodeNhlValue(ref, input.value);
             memOps.push({ op: input.freeze === true ? "freeze" : "write", address: ref.address, value, width: ref.width });
@@ -2721,7 +2790,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const lines: string[] = [];
         let readVals: Record<string, number> = {};
         if (readReqs.length) {
-          readVals = await bh.call<Record<string, number>>("read_many", { reads: readReqs });
+          readVals = await bh.call<Record<string, number>>(target, "read_many", { reads: readReqs });
           for (const { input, ref } of refs) {
             if (input.op !== "read") continue;
             lines.push(`${ref.label}=${decodeNhlValue(ref, readVals[ref.label] ?? 0)}`);
@@ -2729,12 +2798,12 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         }
 
         if (memOps.length) {
-          await bh.call("memory_ops", { ops: nhlRebase(memOps, domain), domain });
+          await bh.call(target, "memory_ops", { ops: d.rebase(memOps), domain });
         }
 
         if (readbackRefs.length) {
-          const rbReads = readbackRefs.map((ref) => ({ name: ref.label, address: nhlAddr(ref.address, domain), width: ref.width, domain }));
-          const rbVals = await bh.call<Record<string, number>>("read_many", { reads: rbReads });
+          const rbReads = readbackRefs.map((ref) => ({ name: ref.label, address: d.addr(ref.address), width: ref.width, domain }));
+          const rbVals = await bh.call<Record<string, number>>(target, "read_many", { reads: rbReads });
           let rbIndex = 0;
           for (const { input, ref } of refs) {
             if (input.op !== "write" && input.op !== "freeze") continue;
@@ -2755,6 +2824,8 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "nhl94_stage": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const place = (p.place as Record<string, unknown>[] | undefined) ?? [];
         const possession = typeof p.possession === "string" ? p.possession : undefined;
         if (possession && possession !== "none" && place.some((e) => e.target === "pk")) {
@@ -2762,16 +2833,22 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         }
 
         const lines: string[] = [];
-        let domain: string | undefined;
-        const getDomain = async () => domain ??= await nhlDomain(bh);
+        let domainStr: string | undefined;
+        let domainObj: Awaited<ReturnType<typeof backend.nhlDomain>> | undefined;
+        const getDomain = async () => {
+          if (domainStr !== undefined) return domainStr;
+          domainObj = await backend.nhlDomain();
+          domainStr = await domainObj.detect({});
+          return domainStr;
+        };
 
         if (p.clear_freezes === true) {
-          const r = await bh.call<{ frozen_count: number }>("unfreeze", { all: true });
+          const r = await bh.call<{ frozen_count: number }>(target, "unfreeze", { all: true });
           lines.push(`Cleared freezes before staging (${r.frozen_count} remaining).`);
         }
 
         if (typeof p.rig === "string") {
-          const hash = await currentRomHash(bh);
+          const hash = await currentRomHash(target, bh);
           const name = rigName(p.rig);
           const jsonPath = rigJsonPath(hash, name);
           if (!fs.existsSync(jsonPath)) {
@@ -2781,15 +2858,15 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           if (rig.rom_md5 !== hash) {
             throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
           }
-          await bh.call("unfreeze", { all: true });
-          const ld = await bh.call<{ path: string }>("load_state", { path: rig.savestate_path, pause: true });
+          await bh.call(target, "unfreeze", { all: true });
+          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rig.savestate_path, pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
             const ops = rig.freezes.map((f) => ({
               op: "freeze" as const, address: f.address, value: f.value, width: f.width,
               ...(f.domain ? { domain: f.domain } : {}),
             }));
-            const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops });
+            const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops });
             frozenCount = r.frozen_count;
           }
           lines.push(`Applied rig "${name}": loaded ${ld.path} (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
@@ -2803,7 +2880,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           }
           const d = await getDomain();
           const { ops, assignments } = nhl94.parkOps(keep);
-          const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, d), domain: d });
+          const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops: domainObj!.rebase(ops), domain: d });
           lines.push(`Parked ${assignments.length} skater(s); ${r.frozen_count} address(es) frozen.`);
         }
 
@@ -2827,28 +2904,28 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             const { base } = nhl94.resolveTarget(String(e.target));
             fdirOps.push({ op: "write", address: base + nhl94.OFF.fdir, value: e.fdir & 0xffff, width: "u16_be" });
           }
-          const r = await bh.call<{ applied: number; frozen_count: number }>("memory_ops", { ops: nhlRebase([...ops, ...fdirOps], d), domain: d });
+          const r = await bh.call<{ applied: number; frozen_count: number }>(target, "memory_ops", { ops: domainObj!.rebase([...ops, ...fdirOps]), domain: d });
           lines.push(`Placed ${place.length} target(s) (${r.applied ?? [...ops, ...fdirOps].length} op(s)).`);
         }
 
         if (possession) {
           const d = await getDomain();
-          const carrierAddr = nhlAddr(nhl94.G.carrier, d);
+          const carrierAddr = domainObj!.addr(nhl94.G.carrier);
           if (possession === "none") {
-            await bh.call("memory_ops", { ops: [{ op: "write", address: carrierAddr, value: 0xffff, width: "u16_be" }], domain: d });
+            await bh.call(target, "memory_ops", { ops: [{ op: "write", address: carrierAddr, value: 0xffff, width: "u16_be" }], domain: d });
             lines.push("Set possession: none.");
           } else {
             const { slot, base } = nhl94.resolveTarget(possession);
             if (slot < 0 || slot > 11) throw new Error("possession must be s0-s11 or none");
-            const pos = await bh.call<Record<string, number>>("read_many", { reads: [
-              { name: "x", address: nhlAddr(base + nhl94.OFF.x, d), width: "s32_be", domain: d },
-              { name: "y", address: nhlAddr(base + nhl94.OFF.y, d), width: "s32_be", domain: d },
+            const pos = await bh.call<Record<string, number>>(target, "read_many", { reads: [
+              { name: "x", address: domainObj!.addr(base + nhl94.OFF.x), width: "s32_be", domain: d },
+              { name: "y", address: domainObj!.addr(base + nhl94.OFF.y), width: "s32_be", domain: d },
             ] });
             const pkBase = nhl94.PUCK_BASE;
-            await bh.call("memory_ops", { ops: [
+            await bh.call(target, "memory_ops", { ops: [
               { op: "write", address: carrierAddr, value: slot, width: "u16_be" },
-              { op: "write", address: nhlAddr(pkBase + nhl94.OFF.x, d), value: pos.x >>> 0, width: "u32_be" },
-              { op: "write", address: nhlAddr(pkBase + nhl94.OFF.y, d), value: pos.y >>> 0, width: "u32_be" },
+              { op: "write", address: domainObj!.addr(pkBase + nhl94.OFF.x), value: pos.x >>> 0, width: "u32_be" },
+              { op: "write", address: domainObj!.addr(pkBase + nhl94.OFF.y), value: pos.y >>> 0, width: "u32_be" },
             ], domain: d });
             lines.push(`Set possession: ${possession}.`);
           }
@@ -2862,13 +2939,13 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
             const ref = resolveNhlFieldOp(input);
             return { op: input.freeze === true ? "freeze" : "write", address: ref.address, value: encodeNhlValue(ref, input.value), width: ref.width };
           });
-          await bh.call("memory_ops", { ops: nhlRebase(memOps, d), domain: d });
+          await bh.call(target, "memory_ops", { ops: domainObj!.rebase(memOps), domain: d });
           lines.push(`Wrote ${stageFields.length} field(s).`);
         }
 
         const settleFrames = typeof p.settle_frames === "number" ? p.settle_frames : 0;
         if (settleFrames > 0) {
-          await bh.call("frame_advance", { count: settleFrames }, { timeoutMs: frameTimeout(settleFrames) });
+          await bh.call(target, "frame_advance", { count: settleFrames }, { timeoutMs: frameTimeout(settleFrames) });
           lines.push(`Settled ${settleFrames} frame(s).`);
         }
 
@@ -2876,22 +2953,27 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "nhl94_park": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const keep = (p.keep as string[] | undefined) ?? [];
         for (const k of keep) nhl94.resolveTarget(k); // validate keep entries
-        const domain = await nhlDomain(bh);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
         const { ops, assignments } = nhl94.parkOps(keep); // validates
-        const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops: nhlRebase(ops, domain), domain });
+        const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops: d.rebase(ops), domain });
         const xs = assignments.map((a) => a.x);
         const head = `Parked ${assignments.length} skater(s) at y=${nhl94.PARK_Y} (x ${Math.min(...xs)}..${Math.max(...xs)})` +
           (keep.length ? `; kept ${keep.join(", ")}` : "");
         const detail = assignments.map((a) => `${a.target} x=${a.x}`).join(", ");
-        const settled = await nhlSettle(bh);
+        const settled = await nhlSettle(target, bh);
         return ok(`${head}\n${detail}\n${r.frozen_count} address(es) frozen.${settled ? ` (+${NHL_SETTLE_FRAMES} frames so the move renders)` : ""}`);
       }
 
       case "nhl94_rig": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const action = p.action as string;
-        const hash = await currentRomHash(bh);
+        const hash = await currentRomHash(target, bh);
 
         if (action === "list") {
           const root = rigRoot();
@@ -2919,8 +3001,8 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         if (action === "save") {
           fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
           const savestatePath = path.join(path.dirname(jsonPath), `${name}.State`);
-          await bh.call("save_state", { path: savestatePath });
-          const fl = await bh.call<{ frozen?: RigFreeze[] }>("list_frozen");
+          await bh.call(target, "save_state", { path: savestatePath });
+          const fl = await bh.call<{ frozen?: RigFreeze[] }>(target, "list_frozen");
           const freezes = Array.isArray(fl.frozen) ? fl.frozen : [];
           const rig: Rig = {
             name, rom_md5: hash, created_at: new Date().toISOString(),
@@ -2939,15 +3021,15 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           if (rig.rom_md5 !== hash) {
             throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
           }
-          await bh.call("unfreeze", { all: true });
-          const ld = await bh.call<{ path: string }>("load_state", { path: rig.savestate_path, pause: true });
+          await bh.call(target, "unfreeze", { all: true });
+          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rig.savestate_path, pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
             const ops = rig.freezes.map((f) => ({
               op: "freeze" as const, address: f.address, value: f.value, width: f.width,
               ...(f.domain ? { domain: f.domain } : {}),
             }));
-            const r = await bh.call<{ frozen_count: number }>("memory_ops", { ops });
+            const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops });
             frozenCount = r.frozen_count;
           }
           return ok(`Applied rig "${name}": loaded ${ld.path} (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
@@ -2965,23 +3047,26 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
 
       case "nhl94_possession": {
         const target = p.target as string;
+        const backend = bh.getBackend(target);
+        const entity = p.entity as string;
         const hold = p.hold === true;
-        const domain = await nhlDomain(bh);
-        const carrierAddr = nhlAddr(nhl94.G.carrier, domain);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
+        const carrierAddr = d.addr(nhl94.G.carrier);
         // Every call releases any prior hold first, then applies the new state.
         const ops: nhl94.MemOp[] = [{ op: "unfreeze", address: carrierAddr, width: "u16_be" }];
         let summary: string;
-        if (target === "none") {
+        if (entity === "none") {
           if (hold) ops.push({ op: "freeze", address: carrierAddr, value: 0xffff, width: "u16_be" });
           else ops.push({ op: "write", address: carrierAddr, value: 0xffff, width: "u16_be" });
           summary = `Puck set loose (nobody carrying); carrier hold: ${hold ? "on" : "off"}`;
         } else {
-          const { slot, base } = nhl94.resolveTarget(target); // validates sN
-          if (target === "pk" || slot > 11) throw new Error("possession target must be 's0'..'s11' or 'none'");
-          const pos = await bh.call<Record<string, number>>("read_many", {
+          const { slot, base } = nhl94.resolveTarget(entity); // validates sN
+          if (entity === "pk" || slot > 11) throw new Error("possession target must be 's0'..'s11' or 'none'");
+          const pos = await bh.call<Record<string, number>>(target, "read_many", {
             reads: [
-              { name: "x", address: nhlAddr(base + nhl94.OFF.x, domain), width: "s32_be", domain },
-              { name: "y", address: nhlAddr(base + nhl94.OFF.y, domain), width: "s32_be", domain },
+              { name: "x", address: d.addr(base + nhl94.OFF.x), width: "s32_be", domain },
+              { name: "y", address: d.addr(base + nhl94.OFF.y), width: "s32_be", domain },
             ],
           });
           const pkBase = nhl94.PUCK_BASE;
@@ -2992,24 +3077,27 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           // same batch, so the game re-derives the same carrier next frame.
           if (hold) ops.push({ op: "freeze", address: carrierAddr, value: slot, width: "u16_be" });
           else ops.push({ op: "write", address: carrierAddr, value: slot, width: "u16_be" });
-          ops.push({ op: "write", address: nhlAddr(pkBase + nhl94.OFF.x, domain), value: pos.x >>> 0, width: "u32_be" });
-          ops.push({ op: "write", address: nhlAddr(pkBase + nhl94.OFF.y, domain), value: pos.y >>> 0, width: "u32_be" });
+          ops.push({ op: "write", address: d.addr(pkBase + nhl94.OFF.x), value: pos.x >>> 0, width: "u32_be" });
+          ops.push({ op: "write", address: d.addr(pkBase + nhl94.OFF.y), value: pos.y >>> 0, width: "u32_be" });
           const w = (raw: number) => nhl94.fromFixed(raw >>> 0).whole;
-          summary = `Puck given to ${target} (teleported to x=${w(pos.x)},y=${w(pos.y)}); carrier hold: ${hold ? "on" : "off"}`;
+          summary = `Puck given to ${entity} (teleported to x=${w(pos.x)},y=${w(pos.y)}); carrier hold: ${hold ? "on" : "off"}`;
         }
-        await bh.call("memory_ops", { ops, domain });
-        const settled = await nhlSettle(bh);
+        await bh.call(target, "memory_ops", { ops, domain });
+        const settled = await nhlSettle(target, bh);
         return ok(`${summary}${settled ? ` (+${NHL_SETTLE_FRAMES} frames so the move renders)` : ""}`);
       }
 
       case "nhl94_clock": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const hasSet = p.set !== undefined;
         const freeze = p.freeze === true;
         const release = p.release === true;
         if (freeze && release) throw new Error("freeze and release are mutually exclusive");
         if (!hasSet && !freeze && !release) throw new Error("pass at least one of set, freeze, release");
-        const domain = await nhlDomain(bh);
-        const clockAddr = nhlAddr(nhl94.G.gameclock, domain);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
+        const clockAddr = d.addr(nhl94.G.gameclock);
         const ops: nhl94.MemOp[] = [];
         let seconds: number | undefined;
         if (hasSet) seconds = nhl94.parseClock(p.set as string | number);
@@ -3018,32 +3106,35 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           ops.push({ op: "unfreeze", address: clockAddr, width: "u16_be" });
         } else if (freeze) {
           if (seconds === undefined) {
-            seconds = await bh.call<number>("read16", { address: clockAddr, byteorder: "be", domain });
+            seconds = await bh.call<number>(target, "read16", { address: clockAddr, byteorder: "be", domain });
           }
           ops.push({ op: "freeze", address: clockAddr, value: seconds, width: "u16_be" });
         } else {
           ops.push({ op: "write", address: clockAddr, value: seconds as number, width: "u16_be" });
         }
-        await bh.call("memory_ops", { ops, domain });
+        await bh.call(target, "memory_ops", { ops, domain });
         const state = release ? "released" : freeze ? "frozen" : "set";
         const shown = seconds !== undefined ? ` to ${nhl94.formatClock(seconds)}` : "";
         return ok(`Clock ${state}${shown}.`);
       }
 
       case "nhl94_camera": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
         const pin = p.pin as { v?: number; h?: number } | undefined;
         const release = p.release === true;
         if ((pin && release) || (!pin && !release)) {
           throw new Error("pass exactly one of pin or release");
         }
-        const domain = await nhlDomain(bh);
-        const vAddr = nhlAddr(nhl94.G.vpos, domain);
-        const hAddr = nhlAddr(nhl94.G.hpos, domain);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
+        const vAddr = d.addr(nhl94.G.vpos);
+        const hAddr = d.addr(nhl94.G.hpos);
         const ops: nhl94.MemOp[] = [];
         if (release) {
           ops.push({ op: "unfreeze", address: vAddr, width: "u16_be" });
           ops.push({ op: "unfreeze", address: hAddr, width: "u16_be" });
-          await bh.call("memory_ops", { ops, domain });
+          await bh.call(target, "memory_ops", { ops, domain });
           return ok("Camera released.");
         }
         if (pin!.v === undefined && pin!.h === undefined) {
@@ -3052,37 +3143,40 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const parts: string[] = [];
         if (pin!.v !== undefined) { ops.push({ op: "freeze", address: vAddr, value: nhl94.toWord(pin!.v), width: "u16_be" }); parts.push(`v=${pin!.v}`); }
         if (pin!.h !== undefined) { ops.push({ op: "freeze", address: hAddr, value: nhl94.toWord(pin!.h), width: "u16_be" }); parts.push(`h=${pin!.h}`); }
-        await bh.call("memory_ops", { ops, domain });
+        await bh.call(target, "memory_ops", { ops, domain });
         return ok(`Camera pinned @ ${parts.join(" ")}`);
       }
 
       case "bizhawk_eval_lua": {
+        const target = p.target as string;
         const opts = p.timeout_ms !== undefined ? { timeoutMs: p.timeout_ms as number } : {};
         const params: Record<string, unknown> = { code: p.code };
         if (p.unpause !== undefined) params.unpause = p.unpause;
-        const r = await bh.call<unknown>("eval_lua", params, opts);
+        const r = await bh.call<unknown>(target, "eval_lua", params, opts);
         return ok(r === undefined || r === null ? "(nil)" : JSON.stringify(r, null, 2));
       }
 
       case "bizhawk_search_begin": {
+        const target = p.target as string;
         const params: Record<string, unknown> = { ...dom() };
         if (p.start  !== undefined) params.start  = p.start;
         if (p.length !== undefined) params.length = p.length;
         if (p.width  !== undefined) params.width  = p.width;
         const r = await bh.call<{
           start: number; length: number; width: string; potential_candidates: number;
-        }>("search_begin", params);
+        }>(target, "search_begin", params);
         return ok(
           `Search started: ${r.length} bytes @ ${addrHex(r.start)} (${r.width}${p.domain ? `, ${p.domain}` : ""}) — ` +
           `${r.potential_candidates} potential candidates.`,
         );
       }
       case "bizhawk_search_filter": {
+        const target = p.target as string;
         const params: Record<string, unknown> = { condition: p.condition };
         if (p.value !== undefined) params.value = p.value;
         const r = await bh.call<{
           count: number; sample?: { address: number; value: number }[];
-        }>("search_filter", params);
+        }>(target, "search_filter", params);
         const sample = Array.isArray(r.sample) ? r.sample : [];
         const lines = [`${r.count} candidate(s) remain.`];
         for (const s of sample) lines.push(`  ${addrHex(s.address)} = ${s.value}`);
@@ -3092,36 +3186,41 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         return ok(lines.join("\n"));
       }
       case "bizhawk_search_results": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.limit !== undefined) params.limit = p.limit;
         const r = await bh.call<{
           count: number; results?: { address: number; value: number }[];
-        }>("search_results", params);
+        }>(target, "search_results", params);
         const results = Array.isArray(r.results) ? r.results : [];
         const lines = [`${r.count} candidate(s):`];
         for (const s of results) lines.push(`  ${addrHex(s.address)} = ${s.value}`);
         return ok(lines.join("\n"));
       }
       case "bizhawk_search_end": {
-        await bh.call("search_end");
+        const target = p.target as string;
+        await bh.call(target, "search_end");
         return ok("Search ended.");
       }
       case "bizhawk_get_registers": {
-        const r = await bh.call<Record<string, number>>("get_registers");
+        const target = p.target as string;
+        const r = await bh.call<Record<string, number>>(target, "get_registers");
         const lines = Object.keys(r).sort().map((k) => `${k} = ${fmtHex(r[k])}`);
         return ok(lines.join("\n"));
       }
       case "bizhawk_set_register": {
-        await bh.call("set_register", { name: p.name, value: p.value });
+        const target = p.target as string;
+        await bh.call(target, "set_register", { name: p.name, value: p.value });
         return ok(`Set register ${p.name} = ${p.value}`);
       }
 
       case "bizhawk_disassemble": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.address !== undefined) params.address = p.address;
         if (p.count !== undefined) params.count = p.count;
         if (p.domain !== undefined) params.domain = p.domain;
-        const r = await bh.call<{ instructions: { address: number; disasm: string; length: number }[] }>(
+        const r = await bh.call<{ instructions: { address: number; disasm: string; length: number }[] }>(target, 
           "disassemble",
           params,
         );
@@ -3132,6 +3231,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_trap_memory": {
+        const target = p.target as string;
         const timeoutFrames = (p.timeout_frames as number) ?? 600;
         const kind = (p.kind as string) ?? "write";
         const params: Record<string, unknown> = { address: a(), kind };
@@ -3141,7 +3241,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           hit?: { address: number; value?: number; registers?: Record<string, number>; framecount?: number };
           frames_waited: number;
           final_framecount?: number;
-        }>("trap_memory", params, { timeoutMs: frameTimeout(timeoutFrames) });
+        }>(target, "trap_memory", params, { timeoutMs: frameTimeout(timeoutFrames) });
         if (!r.hit) {
           return ok(`No ${kind} to ${addrHex(a())} within ${r.frames_waited} frame(s). Framecount: ${r.final_framecount ?? "(unavailable)"}`);
         }
@@ -3158,6 +3258,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_record_input": {
+        const target = p.target as string;
         const maxFrames = (p.max_frames as number) ?? 600;
         const params: Record<string, unknown> = {};
         if (p.max_frames            !== undefined) params.max_frames            = p.max_frames;
@@ -3167,7 +3268,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
           recorded: number;
           stopped_early?: boolean;
           frames?: { buttons: Record<string, boolean>; hold: number }[];
-        }>("record_input", params, { timeoutMs: frameTimeout(maxFrames) });
+        }>(target, "record_input", params, { timeoutMs: frameTimeout(maxFrames) });
         const frames = Array.isArray(r.frames) ? r.frames : [];
         const header =
           `Recorded ${r.recorded} frame(s) in ${frames.length} ${frames.length === 1 ? "entry" : "entries"}` +
@@ -3176,13 +3277,14 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_get_input": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.player !== undefined) params.player = p.player;
         const r = await bh.call<{
           player: number;
           buttons?: Record<string, boolean>;
           axes?: Record<string, number>;
-        }>("get_input", params);
+        }>(target, "get_input", params);
         const held = r.buttons ? Object.keys(r.buttons).sort() : [];
         const lines = [`Player ${r.player} held buttons: ${held.length ? held.join(", ") : "(none)"}`];
         if (r.axes && Object.keys(r.axes).length) {
@@ -3198,30 +3300,35 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_movie_play": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.path !== undefined) params.path = p.path;
-        const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>(
+        const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>(target, 
           "movie_play", params, { timeoutMs: 30000 });
         return ok(fmtMovieStatus(r));
       }
       case "bizhawk_movie_stop": {
-        await bh.call("movie_stop");
+        const target = p.target as string;
+        await bh.call(target, "movie_stop");
         return ok("Movie stopped.");
       }
       case "bizhawk_movie_status": {
-        const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>("movie_status");
+        const target = p.target as string;
+        const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>(target, "movie_status");
         return ok(fmtMovieStatus(r));
       }
 
       case "bizhawk_save_slot": {
-        const hash = await currentRomHash(bh);
+        const target = p.target as string;
+        const hash = await currentRomHash(target, bh);
         const file = slotPath(hash, p.name as string);
         fs.mkdirSync(path.dirname(file), { recursive: true });
-        await bh.call("save_state", { path: file });
+        await bh.call(target, "save_state", { path: file });
         return ok(`Saved slot '${p.name}' → ${file}`);
       }
       case "bizhawk_load_slot": {
-        const hash = await currentRomHash(bh);
+        const target = p.target as string;
+        const hash = await currentRomHash(target, bh);
         const file = slotPath(hash, p.name as string);
         if (!fs.existsSync(file)) {
           const dir = path.join(stateDir(), hash);
@@ -3234,11 +3341,12 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         }
         const params: Record<string, unknown> = { path: file };
         params.pause = p.pause !== false;
-        const r = await bh.call<{ paused?: boolean; state?: StateSummary }>("load_state", params);
+        const r = await bh.call<{ paused?: boolean; state?: StateSummary }>(target, "load_state", params);
         return ok(withState(`Loaded slot '${p.name}' (${r.paused ? "paused" : "running"})`, r.state));
       }
       case "bizhawk_list_slots": {
-        const hash = await currentRomHash(bh);
+        const target = p.target as string;
+        const hash = await currentRomHash(target, bh);
         const dir = path.join(stateDir(), hash);
         if (!fs.existsSync(dir)) return ok("(no slots saved for this ROM)");
         const entries = fs.readdirSync(dir).filter((f) => f.endsWith(".State")).sort()
@@ -3250,25 +3358,29 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_trace_start": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.path !== undefined) params.path = p.path;
         if (p.osd  !== undefined) params.osd  = p.osd;
-        const r = await bh.call<{ path: string; osd: boolean }>("trace_start", params);
+        const r = await bh.call<{ path: string; osd: boolean }>(target, "trace_start", params);
         return ok(`Trace started → ${r.path} (osd: ${r.osd ? "on" : "off"})`);
       }
       case "bizhawk_trace_stop": {
-        const r = await bh.call<{ path?: string; frames: number }>("trace_stop");
+        const target = p.target as string;
+        const r = await bh.call<{ path?: string; frames: number }>(target, "trace_stop");
         return ok(`Trace stopped after ${r.frames} rows${r.path ? ` (${r.path})` : ""}`);
       }
       case "bizhawk_trace_status": {
-        const r = await bh.call<{ active: boolean; path?: string; frames: number; osd: boolean }>("trace_status");
+        const target = p.target as string;
+        const r = await bh.call<{ active: boolean; path?: string; frames: number; osd: boolean }>(target, "trace_status");
         return ok(
           `Trace ${r.active ? "active" : "inactive"}: ${r.path ?? "(no file)"}, ${r.frames} rows, ` +
           `osd: ${r.osd ? "on" : "off"}`,
         );
       }
       case "bizhawk_trace_tail": {
-        const st = await bh.call<{ active: boolean; path?: string }>("trace_status");
+        const target = p.target as string;
+        const st = await bh.call<{ active: boolean; path?: string }>(target, "trace_status");
         if (!st.path) throw new Error("no trace file — the trace has never been started on this bridge");
         const rows = (p.rows as number) ?? 10;
         const text = fs.readFileSync(st.path, "utf8");
@@ -3283,25 +3395,29 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_phys_trace_start": {
+        const target = p.target as string;
         const params: Record<string, unknown> = {};
         if (p.path !== undefined) params.path = p.path;
-        const r = await bh.call<{ path: string; latch_addr: string; emit_addr: string }>(
+        const r = await bh.call<{ path: string; latch_addr: string; emit_addr: string }>(target, 
           "phys_trace_start", params);
         return ok(`Physics-sync trace started → ${r.path} (latch ${r.latch_addr}, emit ${r.emit_addr})`);
       }
       case "bizhawk_phys_trace_stop": {
-        const r = await bh.call<{ path?: string; ticks: number }>("phys_trace_stop");
+        const target = p.target as string;
+        const r = await bh.call<{ path?: string; ticks: number }>(target, "phys_trace_stop");
         return ok(`Physics-sync trace stopped after ${r.ticks} ticks${r.path ? ` (${r.path})` : ""}`);
       }
       case "bizhawk_phys_trace_status": {
-        const r = await bh.call<{ active: boolean; path?: string; ticks: number; latched_d7: number }>(
+        const target = p.target as string;
+        const r = await bh.call<{ active: boolean; path?: string; ticks: number; latched_d7: number }>(target, 
           "phys_trace_status");
         return ok(
           `Physics-sync trace ${r.active ? "active" : "inactive"}: ${r.path ?? "(no file)"}, ` +
           `${r.ticks} ticks, last D7: ${r.latched_d7}`);
       }
       case "bizhawk_phys_trace_tail": {
-        const st = await bh.call<{ active: boolean; path?: string }>("phys_trace_status");
+        const target = p.target as string;
+        const st = await bh.call<{ active: boolean; path?: string }>(target, "phys_trace_status");
         if (!st.path) throw new Error("no phys trace file — the physics-sync trace has never been started on this bridge");
         const rows = (p.rows as number) ?? 10;
         const text = fs.readFileSync(st.path, "utf8");
@@ -3320,6 +3436,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         // ADDITIVE: the inline PNG is ALWAYS returned; the caption is appended
         // when vision is available. Best-effort — a missing config or a vision
         // outage degrades to image-only + a short note, never a hard error.
+        const target = p.target as string;
         const wantCaption = p.describe !== false;
         const cfg = wantCaption ? visionConfig() : null;
         // An explicit caller path is used verbatim (no translation); an auto path
@@ -3329,7 +3446,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const { local: readPath, remote: sendPath } = explicit
           ? { local: explicit, remote: explicit }
           : shotPaths(`mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
-        const saved = await bh.call<string>("screenshot", { path: sendPath });
+        const saved = await bh.call<string>(target, "screenshot", { path: sendPath });
 
         // Build the caption (best-effort) before assembling the content blocks.
         let caption: string | null = null;
@@ -3367,18 +3484,21 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
       }
 
       case "bizhawk_osd_message": {
-        const r = await bh.call<{ message: string }>("osd_message", { message: p.message });
+        const target = p.target as string;
+        const r = await bh.call<{ message: string }>(target, "osd_message", { message: p.message });
         return ok(`OSD message shown: ${r.message}`);
       }
 
       case "bizhawk_save_state": {
-        const r = await bh.call<{ path: string }>("save_state", { path: p.path });
+        const target = p.target as string;
+        const r = await bh.call<{ path: string }>(target, "save_state", { path: p.path });
         return ok(`Saved state to ${r.path}`);
       }
       case "bizhawk_load_state": {
+        const target = p.target as string;
         const params: Record<string, unknown> = { path: p.path };
         params.pause = p.pause !== false;
-        const r = await bh.call<{ path: string; paused?: boolean; state?: StateSummary }>("load_state", params);
+        const r = await bh.call<{ path: string; paused?: boolean; state?: StateSummary }>(target, "load_state", params);
         const base = `Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`;
         const st = fmtState(r.state);
         return ok(st ? `${base}\nState: ${st}` : base);
@@ -3395,6 +3515,7 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const target = args.target as string | undefined;
     const startedMs = Date.now();
     let ok = true;
     let errMsg: string | undefined;
@@ -3405,13 +3526,13 @@ export function registerTools(server: Server, bh: BizhawkServer): void {
         const c = (res as { content?: { type: string; text?: string }[] }).content;
         errMsg = c?.find((x) => x.type === "text")?.text;
       }
+      recordUsage(name, target, args, ok, Date.now() - startedMs, errMsg);
       return res;
     } catch (e) {
       ok = false;
-      errMsg = (e as Error).message;
+      errMsg = errorCode(e as Error);
+      recordUsage(name, target, args, ok, Date.now() - startedMs, errMsg);
       throw e;
-    } finally {
-      recordUsage(name, args, ok, Date.now() - startedMs, errMsg);
     }
   });
 }
