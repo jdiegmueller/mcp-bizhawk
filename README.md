@@ -22,23 +22,23 @@ One bridge, **many systems**: NES, SNES, Game Boy / GBC / GBA, Sega Master Syste
 ## How it works
 
 ```
- Claude session 1 ─┐
- Claude session 2 ─┼─ HTTP MCP ─▶ mcp-bizhawk daemon ─ TCP :8766 ─▶  BizHawk
- Claude session N ─┘  :8765/mcp    (Node.js, always-on)  newline JSON  bridge_JD.lua
+ Claude session N ─┐
+                    ├─ HTTP MCP ─▶ mcp-bizhawk daemon ─ TCP :8766 ─▶  BizHawk "windows"
+ Claude session 1 ─┘  :8765/mcp    (Node.js, always-on)  ─ TCP :8764 ─▶  BizHawk "linux1"
+                            │                            ─ TCP :8763 ─▶  BizHawk "linux2"
+                            │   backends.json            ─ TCP :8762 ─▶  BizHawk "linux3"
+                            └─ (MCP_BIZHAWK_CONFIG)       newline JSON    bridge_JD.lua
 ```
 
-The server runs as a **single always-on daemon** that speaks MCP over
-**streamable-HTTP** (`http://127.0.0.1:8765/mcp` by default). Any number of MCP
-clients (Claude Code sessions, etc.) connect to it concurrently, and it owns the
-one TCP socket the BizHawk bridge dials. All clients' commands interleave into a
-single serial, frame-paced queue to the one emulator — no arbitration,
-last-writer-wins.
+The server runs as a **single daemon** managing **N labelled BizHawk backends**,
+each on its own TCP port. All MCP clients connect to one HTTP URL; every
+backend-scoped tool takes a `target` parameter to choose which emulator.
 
 The BizHawk transport is **inverted** compared to most other emulator-MCP bridges: BizHawk's Lua doesn't have native server sockets, only an outbound `comm.socketServer*` client. So `mcp-bizhawk` runs the TCP **listener**, and BizHawk's Lua bridge dials in once per frame to ferry commands and replies.
 
 Two pieces:
 - **`lua/bridge_JD.lua`** — runs *inside* BizHawk's Lua Console, polls our TCP server once per frame
-- **`dist/index.js`** — the Node.js MCP daemon: serves streamable-HTTP on `127.0.0.1:8765/mcp` and listens for the bridge on `127.0.0.1:8766` (both overridable)
+- **`dist/index.js`** — the Node.js MCP daemon: serves streamable-HTTP on `127.0.0.1:8765/mcp` and listens for bridges on one TCP port per backend (configured via `MCP_BIZHAWK_CONFIG`)
 
 Trade-off: this design adds **~one frame of latency** per call (≈16ms at 60Hz). Fine for interactive memory hunting, save-state experimentation, and frame-by-frame inspection. Less ideal for high-rate-of-fire scripting.
 
@@ -111,20 +111,39 @@ The server is an always-on HTTP daemon — start it once and leave it running;
 every MCP client connects to it by URL. It's fine to start the daemon before
 BizHawk is up: tool calls queue until the bridge dials in.
 
+First, create a config file (see [`deploy/backends.example.json`](deploy/backends.example.json)):
+
 ```bash
-npm run daemon        # or: node dist/index.js
-# [mcp-bizhawk] MCP server vX ready — streamable-HTTP at http://127.0.0.1:8765/mcp
+# Example: backends.json
+{
+  "backends": {
+    "windows": { "bizhawkPort": 8766, "bizhawkHost": "0.0.0.0", "allowedRemoteAddresses": ["192.168.1.50"] },
+    "linux1":  { "bizhawkPort": 8764 }
+  }
+}
+```
+
+Then run:
+
+```bash
+MCP_BIZHAWK_CONFIG=/path/to/backends.json npm run daemon
+# [mcp-bizhawk] v2026.7.39-jd starting multiplexer with 2 backend(s)
+#               windows: 0.0.0.0:8766
+#               linux1: 127.0.0.1:8764
+# [mcp-bizhawk v2026.7.39-jd] backend "windows" listening on 0.0.0.0:8766
+# [mcp-bizhawk v2026.7.39-jd] backend "linux1" listening on 127.0.0.1:8764
+# [mcp-bizhawk] MCP server v2026.7.39-jd ready — streamable-HTTP at http://127.0.0.1:8765/mcp
 ```
 
 For always-on operation, install the systemd **user** unit in
-[`deploy/bizhawk-daemon-windows.service`](deploy/bizhawk-daemon-windows.service):
+[`deploy/bizhawk-daemon.service`](deploy/bizhawk-daemon.service):
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp deploy/bizhawk-daemon-windows.service ~/.config/systemd/user/   # edit WorkingDirectory first
+cp deploy/bizhawk-daemon.service ~/.config/systemd/user/   # edit paths first
 systemctl --user daemon-reload
-systemctl --user enable --now bizhawk-daemon-windows
-systemctl --user restart bizhawk-daemon-windows    # after `npm run build` on a version bump
+systemctl --user enable --now bizhawk-daemon
+systemctl --user restart bizhawk-daemon    # after `npm run build` on a version bump
 ```
 
 ## Register with your MCP client
@@ -175,25 +194,54 @@ The server speaks standard MCP over **streamable-HTTP** at
 
 ## Configuration
 
+The daemon reads its backends from a single JSON config file:
+
 | Env var         | Default       | Purpose                                    |
 |-----------------|---------------|--------------------------------------------|
+| `MCP_BIZHAWK_CONFIG` | *(required)* | Path to the JSON config file declaring backends |
 | `MCP_HTTP_HOST` | `127.0.0.1`   | Host the streamable-HTTP MCP endpoint binds |
 | `MCP_HTTP_PORT` | `8765`        | Port the streamable-HTTP MCP endpoint binds |
-| `BIZHAWK_HOST`  | `127.0.0.1`   | TCP host to listen on for BizHawk          |
-| `BIZHAWK_PORT`  | `8766`        | TCP port to listen on for BizHawk          |
-| `MCP_BIZHAWK_SHOT_DIR` | OS temp dir | Screenshot directory as the server sees it |
-| `MCP_BIZHAWK_SHOT_DIR_BRIDGE` | unset | Same screenshot directory as remote BizHawk sees it, e.g. `X:\tmp` |
-| `MCP_BIZHAWK_STATE_DIR` | `~/.mcp-bizhawk/states` | Managed named savestate slot directory as the server sees it |
-| `MCP_BIZHAWK_STATE_DIR_BRIDGE` | unset | Same managed state directory as remote BizHawk sees it, e.g. `X:\.mcp-bizhawk\states` |
-| `MCP_BIZHAWK_RIG_DIR` | `~/.mcp-bizhawk/rigs` | NHL94 rig directory as the server sees it |
-| `MCP_BIZHAWK_RIG_DIR_BRIDGE` | unset | Same rig directory as remote BizHawk sees it, e.g. `X:\.mcp-bizhawk\rigs` |
 
-For remote/cross-OS BizHawk setups, the server must validate files using its local path while BizHawk saves/loads using its own path spelling. Set the `*_BRIDGE` variables when those path spellings differ.
+The config file declares one backend per key, keyed by the target name:
+```json
+{
+  "backends": {
+    "linux1": { "bizhawkPort": 8764 },
+    "windows": {
+      "bizhawkHost": "0.0.0.0",
+      "bizhawkPort": 8766,
+      "allowedRemoteAddresses": ["192.168.1.50"],
+      "shotDir": "/mnt/8tb/jason/tmp",
+      "shotDirBridge": "X:\\tmp"
+    }
+  },
+  "vision": {
+    "baseUrl": "http://localhost:1234/v1",
+    "model": "qwen2.5-vl-7b"
+  }
+}
+```
+
+Per-backend options (all optional except `bizhawkPort`):
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `bizhawkPort` | *(required)* | TCP port to listen on for this backend's BizHawk bridge |
+| `bizhawkHost` | `127.0.0.1` | Host to bind the listener on |
+| `allowedRemoteAddresses` | (none) | Whitelist of remote IPs; requires non-loopback `bizhawkHost` |
+| `shotDir` / `shotDirBridge` | `MCP_BIZHAWK_SHOT_DIR` env | Server-side and bridge-side screenshot paths |
+| `stateDir` / `stateDirBridge` | `MCP_BIZHAWK_STATE_DIR` env | Server-side and bridge-side savestate paths |
+| `rigDir` / `rigDirBridge` | `MCP_BIZHAWK_RIG_DIR` env | Server-side and bridge-side rig paths |
+
+The `vision` section overrides `VISION_BASE_URL`/`VISION_MODEL`/`VISION_API_KEY` env vars.
+
+For remote/cross-OS BizHawk setups, the server must validate files using its local path while BizHawk saves/loads using its own path spelling. Set the `*Bridge` variants when those path spellings differ.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
+| `bizhawk_list_backends` | List configured backends and their connection states (the only tool without a `target` param) |
 | `bizhawk_ping` | Verify bridge connectivity (returns `pong`) |
 | `bizhawk_get_info` | ROM name, ROM hash, framecount, memory domains, capabilities — plus system id, paused state, lag count, and movie status where the loaded core/build exposes them |
 | `bizhawk_list_memory_domains` | List available memory domains for the loaded core |
@@ -284,7 +332,7 @@ Browse and call this server's tools interactively with the [MCP Inspector](https
 npm run inspector
 ```
 
-Build first if you've edited `src/` since your last `npm install` (`npm run build`, or keep `npm run dev` running). Override the listener with `BIZHAWK_HOST` / `BIZHAWK_PORT` (default `127.0.0.1:8766`). `tools/list` works even without BizHawk connected; *calling* a tool needs EmuHawk running with the socket flags and `lua/bridge_JD.lua` loaded.
+Build first if you've edited `src/` since your last `npm install` (`npm run build`, or keep `npm run dev` running). Requires `MCP_BIZHAWK_CONFIG` set to your backends.json path. `tools/list` works even without BizHawk connected; *calling* a tool needs EmuHawk running with the socket flags and `lua/bridge_JD.lua` loaded.
 
 ## License
 

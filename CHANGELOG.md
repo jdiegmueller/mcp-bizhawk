@@ -7,7 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<!-- No unreleased changes yet. -->
+## [2026.7.39-jd] - 2026-07-17
+
+### Added
+
+- **Multiplexer.** One daemon now owns N labelled BizHawk connections instead
+  of 1:1 daemon-to-emulator. A single JSON config file (`MCP_BIZHAWK_CONFIG`)
+  declares backends by name — adding an emulator adds one stanza, no new daemon
+  or MCP endpoint. All backend-scoped tools require a `target` parameter.
+- **`bizhawk_list_backends`** — global tool (no target) listing all configured
+  backends with connection state, queued/inflight commands, and remote address.
+- **`BizhawkError` hierarchy** with typed error classes (`UnknownBackendError`,
+  `BackendNotConnectedError`, etc.) and `errorCode()` mapping for usage logging.
+- **Per-backend path pairs** (`shotDir`/`shotDirBridge`, `stateDir`/`stateDirBridge`,
+  `rigDir`/`rigDirBridge`) so cross-OS file sharing is configured per backend
+  rather than per daemon.
+- **Remote listener protection** via `allowedRemoteAddresses` per backend.
+- **Single systemd unit** (`deploy/bizhawk-daemon.service`) replaces old
+  per-emulator units.
+
+### Changed
+
+- **All backend-scoped tools now require `target`** in their schemas and handlers.
+  The sole exception is `bizhawk_list_backends`.
+- **Usage log entries** now include `target` and normalized `errorCode` on failure
+  (e.g. `BACKEND_NOT_CONNECTED` instead of a raw message).
+- **Version bumped** to `2026.7.39-jd` (server + bridge); protocol unchanged at `2`.
+
+### Removed
+
+- **`BIZHAWK_HOST` / `BIZHAWK_PORT`** env vars — replaced by `MCP_BIZHAWK_CONFIG`
+  JSON file.
+- **Old per-emulator systemd units** (`bizhawk-daemon-windows.service`,
+  `bizhawk-daemon-linux.service`).
 
 ## [2026.7.6-jd] - 2026-07-14
 

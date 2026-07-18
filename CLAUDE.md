@@ -4,40 +4,33 @@ MCP server (Node/TypeScript) + BizHawk-side Lua bridge that drives emulation
 and exposes NHL94 state/physics tooling. The `-jd` suffix marks this modified
 build vs upstream.
 
-## Architecture — one always-on HTTP daemon
+## Architecture — one HTTP daemon, N BizHawk backends
 
 The server runs as a **single always-on process** that speaks MCP over
-**streamable-HTTP** (`http://127.0.0.1:8765/mcp` by default) and internally owns
-the one TCP socket the Lua bridge dials (`:8766`). Any number of Claude Code
-sessions connect to the HTTP endpoint concurrently (stateless mode, a fresh MCP
-`Server` per request bound to the shared `BizhawkServer` singleton). All
-sessions' commands interleave into one serial, frame-paced FIFO to the single
-emulator — **no arbitration, last-writer-wins**.
+**streamable-HTTP** (`http://127.0.0.1:8765/mcp` by default) and internally
+manages **N labelled BizHawk backends**, each on its own TCP port. Any number
+of Claude Code sessions connect to the HTTP endpoint concurrently (stateless
+mode, a fresh MCP `Server` per request bound to the shared `BizhawkServer`
+singleton). All sessions' commands interleave into one serial, frame-paced FIFO
+per backend — **no arbitration, last-writer-wins**. Every backend-scoped tool
+requires a `target` parameter (use `bizhawk_list_backends` to discover names).
 
-- `src/bizhawk.ts` — the `BizhawkServer` singleton: `:8766` listener, command
-  queue, id-correlated `RESULT` handling, HELLO/version handshake.
+- `src/errors.ts` — typed error hierarchy (`BizhawkError` subclasses) + `errorCode()` mapping for usage logging.
+- `src/config.ts` — `loadConfig()` / `validateConfig()` for `MCP_BIZHAWK_CONFIG` JSON file.
+- `src/backend.ts` — `BizhawkBackend`: per-emulator TCP state machine (listener, command queue, generation guards, handshake timeout, NHL domain cache, path resolution).
+- `src/bizhawk.ts` — `BizhawkServer`: thin multiplexer router over `Map<string, BizhawkBackend>`.
 - `src/http.ts` — the streamable-HTTP front end (`createMcpHttpServer(bh)`).
-- `src/index.ts` — wires the two together, handles startup/shutdown.
-- `deploy/bizhawk-daemon-windows.service` — systemd **user** unit for always-on
-  operation (`systemctl --user {enable --now,restart,status} bizhawk-daemon-windows`).
+- `src/index.ts` — wires config → backends → HTTP, handles startup/shutdown.
+- `deploy/bizhawk-daemon.service` — systemd **user** unit for always-on operation (`systemctl --user {enable --now,restart,status} bizhawk-daemon`).
 
 Sessions configure this as an **HTTP** MCP server (by `url`), not a `command`
 stdio subprocess. There is no stdio transport — point `npm run inspector` at
 the HTTP URL.
 
-Each daemon still owns exactly **one** BizHawk socket (a second BizHawk dialing
-the same listener is refused). To drive more than one emulator today you run
-**one daemon per BizHawk**, each on its own MCP+BizHawk port pair, exposed as a
-distinct MCP server — e.g. `bizhawk_windows` (daemon `:8765`/BizHawk `:8766`)
-and `bizhawk_linux` (daemon `:8763`/BizHawk `:8764`, unit
-`deploy/bizhawk-daemon-linux.service`).
-
-> **Near-term TODO — first-class multi-BizHawk support.** The one-daemon-per-
-> emulator setup above is a stopgap. A single daemon should own N labelled
-> BizHawk connections (named/keyed sockets) and expose them through one MCP
-> endpoint — tools taking a `target` (or similar) to pick which emulator — so
-> adding an emulator doesn't mean standing up another daemon + MCP entry + port
-> pair. Until then, per-daemon is the way.
+Backends are configured via a single JSON file pointed at by
+`MCP_BIZHAWK_CONFIG`. Each entry gets its own TCP listener; a second bridge
+client dialling the same port gets `BUSY`. Adding an emulator means adding
+one stanza — no new daemon, MCP endpoint, or port pair needed.
 
 ## Versioning — keep the two halves in sync
 
@@ -54,7 +47,7 @@ driven by the **RPC protocol version**, not the version string.
   or server-only release is fine). Bump `PROTOCOL_VERSION`/`BRIDGE.protocol`
   together **only when the RPC contract itself changes** (command framing,
   command/RESULT shapes, HELLO) — a tool-surface or OSD change does NOT touch it.
-  Currently `1`. (A pre-protocol server that sends no `protocol_version` falls
+  Currently `2`. (A pre-protocol server that sends no `protocol_version` falls
   back to the old version-string-age comparison.)
 
 Version lives in three files — update all three together:
@@ -75,7 +68,7 @@ leave it alone.
 
 - **Server** (`src/**`): run `npm run build` (compiles to `dist/`, what the
   server actually runs), then restart the daemon so the running instance
-  reports the new version — `systemctl --user restart bizhawk-daemon-windows` (or, if
+  reports the new version — `systemctl --user restart bizhawk-daemon` (or, if
   running it by hand, kill and re-run `npm run daemon`). The bridge
   auto-reconnects on restart.
 - **Bridge** (`lua/bridge_JD.lua`): reload the Lua script in BizHawk. If the
@@ -89,16 +82,16 @@ default) writes a PNG that the **server** then reads back to inline/caption it.
 When BizHawk runs on the **same** host (e.g. the linux daemon) the default OS
 temp dir works. When BizHawk is **remote on another OS** (the windows daemon:
 Windows BizHawk, Linux server over a shared mount) the two spell the shared dir
-differently, so set both per daemon: `MCP_BIZHAWK_SHOT_DIR` = the shared dir as
-the **server** sees it (read-back), `MCP_BIZHAWK_SHOT_DIR_BRIDGE` = the same dir
-as **BizHawk** sees it (write). E.g. `X:\` (Windows) == `/mnt/8tb/jason` (Linux)
-→ `MCP_BIZHAWK_SHOT_DIR=/mnt/8tb/jason/tmp` + `MCP_BIZHAWK_SHOT_DIR_BRIDGE=X:\tmp`
-(see `deploy/bizhawk-daemon-windows.service`). Auto paths only; an explicit
+differently, so set both per backend: `shotDir`/`shotDirBridge` in the backend's
+config stanza (or `MCP_BIZHAWK_SHOT_DIR` + `MCP_BIZHAWK_SHOT_DIR_BRIDGE` env
+vars as fallback). E.g. `X:\` (Windows) == `/mnt/8tb/jason` (Linux)
+→ `shotDir=/mnt/8tb/jason/tmp` + `shotDirBridge=X:\tmp`
+(see `deploy/backends.example.json`). Auto paths only; an explicit
 `path` arg is used verbatim. Without this, remote describe fails `ENOENT`.
 
 ## Usage logging
 
-Every MCP tool call appends one JSONL row (`ts`/`tool`/`ok`/`ms`/`args`, plus
+Every MCP tool call appends one JSONL row (`ts`/`tool`/`target`/`ok`/`ms`/`args`, plus
 `error` on failure) to `~/.mcp-bizhawk/usage/usage-<MCP_HTTP_PORT>.jsonl` — a
 per-daemon record of what's actually being exercised, to inform where the tool
 surface grows next. On by default; `MCP_BIZHAWK_USAGE_LOG=off` disables it,
