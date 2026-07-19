@@ -2677,6 +2677,10 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "home_line", address: d.addr(nhl94.G.home_line), width: "u8", domain },
           { name: "away_line", address: d.addr(nhl94.G.away_line), width: "u8", domain },
         );
+        for (const [name, address] of Object.entries(nhl94.CONTROL_G)) {
+          const width = name.startsWith("switch_debounce_") ? "u8" : "u16_be";
+          gReads.push({ name, address: d.addr(address), width, domain });
+        }
         // Session/phase byte (0xFFC735) — read in the same round-trip; drives the
         // `phase:` label below (see nhl94.classifyPhase / SESSION_BYTE comment).
         gReads.push({ name: "session", address: d.addr(nhl94.SESSION_BYTE), width: "u8", domain });
@@ -2793,6 +2797,37 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // (sN, or none when < 0 / out of range); pass is the last pass vector.
         const slotName = (v: number) => (v >= 0 && v <= 11 ? `s${v}` : `none (${v})`);
         lines.push(`shot: ${slotName(gv.shotplayer)}${markG("shotplayer")}   last: ${slotName(gv.lastplayer)}${markG("lastplayer")}   pass: dir=${gv.passdir}${markG("passdir")} speed=${gv.passspeed}${markG("passspeed")}`);
+        const activeHomeRaw = gv.active_control_home ?? 0xffff;
+        const activeAwayRaw = gv.active_control_away ?? 0xffff;
+        const homeControl = nhl94.controlSlotInfo(activeHomeRaw, "home");
+        const awayControl = nhl94.controlSlotInfo(activeAwayRaw, "away");
+        const controlMode = nhl94.inferControlMode(activeHomeRaw, activeAwayRaw);
+        const coopNote = controlMode === "1P-CPU" || controlMode === "CPU-1P" ? "; coop_unverified=true" : "";
+        const unexpected = (info: nhl94.ControlSlotInfo) => info.slotTeamUnexpected ? " slot_team_unexpected=true" : "";
+        lines.push("control:");
+        lines.push(
+          `  home(team0): ${homeControl.role} active=${homeControl.active}${unexpected(homeControl)} ` +
+          `switch_debounce=${nhl94.formatSwitchDebounce(gv.switch_debounce_home ?? 0)} ` +
+          `line=${nhl94.lineLabel(gv.home_line ?? -1)} raw_active=${homeControl.raw}`,
+        );
+        lines.push(
+          `  away(team1): ${awayControl.role} active=${awayControl.active}${unexpected(awayControl)} ` +
+          `switch_debounce=${nhl94.formatSwitchDebounce(gv.switch_debounce_away ?? 0)} ` +
+          `line=${nhl94.lineLabel(gv.away_line ?? -1)} raw_active=${awayControl.raw}`,
+        );
+        lines.push(`  mode: ${controlMode} inferred from active control slots${coopNote}`);
+        lines.push(`  input_route: ${nhl94.formatInputRoute(controlMode, homeControl.active, awayControl.active)}`);
+        lines.push(
+          `  pad_words: word0@0xFFBEEE=${nhl94.formatPadWord(gv.pad_word_0 ?? 0)} ` +
+          `word1@0xFFBEF0=${nhl94.formatPadWord(gv.pad_word_1 ?? 0)} ` +
+          `word2@0xFFBEF2=${nhl94.formatPadWord(gv.pad_word_2 ?? 0)} ` +
+          `word3@0xFFBEF4=${nhl94.formatPadWord(gv.pad_word_3 ?? 0)}`,
+        );
+        lines.push(
+          `  caveat: c1playernum=${nhl94.hexWord(gv.c1playernum ?? 0)} ` +
+          `c2playernum=${nhl94.hexWord(gv.c2playernum ?? 0)} are reported raw only; ` +
+          `they are not active skater indices and are not used for mode/input_route inference`,
+        );
         lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
         const baseHex = d.addr(nhl94.SORTCORDS).toString(16).toUpperCase();
         lines.push(

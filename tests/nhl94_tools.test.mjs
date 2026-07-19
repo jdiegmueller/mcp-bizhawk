@@ -5,6 +5,45 @@ import { startHarness, textOf } from "./helpers/harness.mjs";
 const DOMAINS = ["M68K BUS", "68K RAM"];
 const CARRIER = 0xffb7aa;
 
+function minimalNhlRec(i, over = {}) {
+  return {
+    _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0,
+    attr: 0, anim: 0, spanum: 0, spacnt: 0, shotpwr: 0, shotacc: 0,
+    passacc: 0, energy: 0, ...over,
+  };
+}
+
+function defaultNhlGlobals(over = {}) {
+  return {
+    carrier: 0xff02,
+    gameclock: 300,
+    gsp: 0,
+    gmode: 0,
+    vpos: 0,
+    hpos: 0,
+    yleader: 0,
+    session: 0xff,
+    shotplayer: -1,
+    lastplayer: -1,
+    passdir: 0,
+    passspeed: 0,
+    faceoff_window_latch: 0,
+    home_line: 0,
+    away_line: 2,
+    active_control_home: 0xffff,
+    active_control_away: 0xffff,
+    c1playernum: 0,
+    c2playernum: 0,
+    switch_debounce_home: 0,
+    switch_debounce_away: 0,
+    pad_word_0: 0,
+    pad_word_1: 0,
+    pad_word_2: 0,
+    pad_word_3: 0,
+    ...over,
+  };
+}
+
 test("nhl94_teleport writes provided axes as 16.16 and reports decoded coords", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
@@ -197,6 +236,76 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(textOf(rawRes), /s3 @0xFFB1CA:/);
   } finally {
     await h.close();
+  }
+});
+
+test("nhl94_state reports 1P-CPU control context, pad words, and route confidence", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i)),
+    read_many: () => defaultNhlGlobals({
+      active_control_home: 4,
+      active_control_away: 0xffff,
+      c1playernum: 0,
+      c2playernum: 0,
+      switch_debounce_home: 0,
+      switch_debounce_away: 12,
+      pad_word_0: 0x0010,
+      pad_word_1: 0,
+      pad_word_2: 0,
+      pad_word_3: 0,
+      home_line: 0,
+      away_line: 2,
+    }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
+    assert.match(text, /control:/);
+    assert.match(text, /home\(team0\): human active=s4 switch_debounce=0\(ready\) line=Sc1 raw_active=0x0004/);
+    assert.match(text, /away\(team1\): CPU active=none switch_debounce=12\(gated 12f\) line=Chk raw_active=0xFFFF/);
+    assert.match(text, /mode: 1P-CPU inferred from active control slots; coop_unverified=true/);
+    assert.match(text, /input_route: player1 likely controls home\/team0 -> s4; player2 inactive\/CPU; route_verified=true/);
+    assert.match(text, /pad_words: word0@0xFFBEEE=0x0010\(B\) word1@0xFFBEF0=0x0000 word2@0xFFBEF2=0x0000 word3@0xFFBEF4=0x0000/);
+    assert.match(text, /caveat: c1playernum=0x0000 c2playernum=0x0000 are reported raw only; they are not active skater indices and are not used for mode\/input_route inference/);
+
+    const readManyCalls = h.bridge.calls.filter((c) => c.method === "read_many");
+    assert.equal(readManyCalls.length, 1, "control fields should ride the existing globals read_many call");
+    const reads = readManyCalls[0].params.reads;
+    assert.ok(reads.some((r) => r.name === "active_control_home" && r.address === 0xffc320 && r.width === "u16_be"));
+    assert.ok(reads.some((r) => r.name === "active_control_away" && r.address === 0xffc322 && r.width === "u16_be"));
+    assert.ok(reads.some((r) => r.name === "switch_debounce_home" && r.address === 0xffbf06 && r.width === "u8"));
+    assert.ok(reads.some((r) => r.name === "pad_word_0" && r.address === 0xffbeee && r.width === "u16_be"));
+    assert.ok(reads.some((r) => r.name === "pad_word_3" && r.address === 0xffbef4 && r.width === "u16_be"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state infers control modes and flags unexpected slot-team pairings", async () => {
+  const cases = [
+    { label: "CPU-CPU", home: 0xffff, away: 0xffff, pattern: /mode: CPU-CPU inferred from active control slots/, route: /input_route: no active input route known; route_verified=false/ },
+    { label: "CPU-1P", home: 0xffff, away: 8, pattern: /mode: CPU-1P inferred from active control slots; coop_unverified=true/, route: /input_route: player1 likely controls away\/team1 -> s8; player2 inactive\/CPU; route_verified=false/ },
+    { label: "1P-2P", home: 4, away: 8, pattern: /mode: 1P-2P inferred from active control slots/, route: /input_route: player1\/player2 likely map to home\/away human teams; verify with pad words or live input; route_verified=false/ },
+    { label: "unknown-word", home: 0x1234, away: 0xffff, pattern: /mode: unknown inferred from active control slots/, route: /input_route: no active input route known; route_verified=false/ },
+    { label: "cross-slot", home: 8, away: 0xffff, pattern: /mode: 1P-CPU inferred from active control slots; coop_unverified=true/, route: /input_route: player1 likely controls home\/team0 -> s8; player2 inactive\/CPU; route_verified=true/, extra: /home\(team0\): human active=s8 slot_team_unexpected=true/ },
+  ];
+
+  for (const c of cases) {
+    const h = await startHarness({
+      list_memory_domains: () => DOMAINS,
+      read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i)),
+      read_many: () => defaultNhlGlobals({ active_control_home: c.home, active_control_away: c.away }),
+      list_frozen: () => ({ frozen: [] }),
+    });
+    try {
+      const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
+      assert.match(text, c.pattern, c.label);
+      assert.match(text, c.route, c.label);
+      if (c.extra) assert.match(text, c.extra, c.label);
+    } finally {
+      await h.close();
+    }
   }
 });
 

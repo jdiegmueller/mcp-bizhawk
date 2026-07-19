@@ -97,6 +97,21 @@ export const G: Record<string, number> = {
   away_line: 0xffca48,
 };
 
+// Read-only control context globals. Kept separate from G so nhl94_fields does
+// not expose semantic writes to control state.
+export const CONTROL_G: Record<string, number> = {
+  active_control_home: 0xffc320,
+  active_control_away: 0xffc322,
+  c1playernum: 0xffc656,
+  c2playernum: 0xffc658,
+  switch_debounce_home: 0xffbf06,
+  switch_debounce_away: 0xffbf07,
+  pad_word_0: 0xffbeee,
+  pad_word_1: 0xffbef0,
+  pad_word_2: 0xffbef2,
+  pad_word_3: 0xffbef4,
+};
+
 // Screen/session-phase byte at 0xFFC735. NHL94 has NO clean single "screen
 // state" enum — a two-playthrough full-RAM diff (2026-07-16, see memory
 // nhl94-game-phase-flags.md) found every scalar candidate was either
@@ -141,6 +156,64 @@ export function lineLabel(v: number): "Sc1" | "Sc2" | "Chk" | "unknown" {
     case 1: return "Sc2";
     case 2: return "Chk";
     default: return "unknown";
+  }
+}
+
+export function hexWord(v: number): string {
+  return `0x${(v & 0xffff).toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+export function formatSwitchDebounce(v: number): string {
+  return v === 0 ? "0(ready)" : `${v}(gated ${v}f)`;
+}
+
+export function formatPadWord(v: number): string {
+  const decoded = (v & 0x10) !== 0 ? "(B)" : "";
+  return `${hexWord(v)}${decoded}`;
+}
+
+export interface ControlSlotInfo {
+  role: "human" | "CPU" | "unknown";
+  active: string;
+  raw: string;
+  validSlot: boolean;
+  slotTeamUnexpected: boolean;
+}
+
+export function controlSlotInfo(raw: number, team: "home" | "away"): ControlSlotInfo {
+  const validSlot = raw >= 0 && raw <= 11;
+  const slotTeamUnexpected = validSlot && (team === "home" ? raw > 5 : raw < 6);
+  if (raw === 0xffff) {
+    return { role: "CPU", active: "none", raw: hexWord(raw), validSlot: false, slotTeamUnexpected: false };
+  }
+  if (validSlot) {
+    return { role: "human", active: `s${raw}`, raw: hexWord(raw), validSlot, slotTeamUnexpected };
+  }
+  return { role: "unknown", active: `unknown(${hexWord(raw)})`, raw: hexWord(raw), validSlot: false, slotTeamUnexpected: false };
+}
+
+export function inferControlMode(homeRaw: number, awayRaw: number): string {
+  const homeValid = homeRaw >= 0 && homeRaw <= 11;
+  const awayValid = awayRaw >= 0 && awayRaw <= 11;
+  const homeCpu = homeRaw === 0xffff;
+  const awayCpu = awayRaw === 0xffff;
+  if (homeCpu && awayCpu) return "CPU-CPU";
+  if (homeValid && awayCpu) return "1P-CPU";
+  if (homeCpu && awayValid) return "CPU-1P";
+  if (homeValid && awayValid) return "1P-2P";
+  return "unknown";
+}
+
+export function formatInputRoute(mode: string, homeActive: string, awayActive: string): string {
+  switch (mode) {
+    case "1P-CPU":
+      return `player1 likely controls home/team0 -> ${homeActive}; player2 inactive/CPU; route_verified=true`;
+    case "CPU-1P":
+      return `player1 likely controls away/team1 -> ${awayActive}; player2 inactive/CPU; route_verified=false`;
+    case "1P-2P":
+      return "player1/player2 likely map to home/away human teams; verify with pad words or live input; route_verified=false";
+    default:
+      return "no active input route known; route_verified=false";
   }
 }
 
