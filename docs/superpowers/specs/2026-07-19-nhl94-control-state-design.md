@@ -70,6 +70,36 @@ Also validate team/slot consistency:
 - if the pointer is a valid slot but on the other team's side, print
   `active_valid=false` with the observed slot.
 
+## Manual Capture Plan
+
+The first implementation should expose the verified RAM fields above and label
+controller routing as inferred where necessary. We will then manually capture the
+ambiguous controller/team mappings from live gameplay so the heuristic can become
+verified behavior.
+
+Capture target modes:
+
+- `2P-CPU`
+- `1P-2P`
+- `CPU-1P`
+- any other menu/player assignment that makes the active-slot words disagree
+  with the simple `player1 -> home` assumption
+
+For each capture, record:
+
+- selected menu mode and which side is home/away
+- which physical controller port is being used
+- which team and visible skater that controller moves
+- `0xFFC320`, `0xFFC322`, `0xFFC656`, `0xFFC658`
+- `0xFFBEEE`, `0xFFBEF0`, `0xFFBEF2`, `0xFFBEF4`
+- `0xFFBF06`, `0xFFBF07`
+- current `phase`, `carrier`, and whether the clock/input gate is open
+
+Useful artifacts are named savestates/rigs plus one `nhl94_state raw:true`
+snapshot per mode. Once captured, update the source facts and tests so
+`input_route` can distinguish verified controller-port binding from fallback
+inference.
+
 ## Data Flow
 
 Extend `src/nhl94.ts` with named globals for the control offsets and helper
