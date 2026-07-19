@@ -1397,7 +1397,7 @@ const TOOLS: Tool[] = [
       required: ["target"],
       properties: { ...targetProp, 
         raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
-        verbose: { type: "boolean", default: false, description: "Add a per-entity extended line: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf,pf2,pf3(+0x62-64)/wgt8(+0x67) — the accumulator/flag/weight fields (use nhl94_read for arbitrary fields)." },
+        verbose: { type: "boolean", default: false, description: "Add per-entity raw diagnostic fields: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf2,pf3(+0x63-64)/wgt8(+0x67) plus raw assignment queue bytes. Normal output already decodes pf(+0x62), assidx(+0x36), and assq(+0x38..3F) into role/control context." },
         describe: { type: "boolean", default: true, description: "Default TRUE and recommended for staging/post-action verification: append a vision caption to the structured RAM state so placement, contact, and animation can be checked. Set false only for a fast RAM-only read (for example an interaction_gate preflight) or when vision is unnecessary. The structured result still returns if vision fails." },
         describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot (unless describe:false). Falls back to the server's built-in NHL94 system prompt / VISION_DEFAULT_PROMPT." },
       },
@@ -2649,11 +2649,21 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "shotacc", offset: nhl94.OFF.shotacc, width: "u8" },
           { name: "passacc", offset: nhl94.OFF.passacc, width: "u8" },
           { name: "energy", offset: nhl94.OFF.energy, width: "u8" },
+          { name: "pf", offset: nhl94.OFF.pf, width: "u8" },
+          { name: "assidx", offset: 0x36, width: "u16_be" },
+          { name: "assq0", offset: 0x38, width: "u8" },
+          { name: "assq1", offset: 0x39, width: "u8" },
+          { name: "assq2", offset: 0x3a, width: "u8" },
+          { name: "assq3", offset: 0x3b, width: "u8" },
+          { name: "assq4", offset: 0x3c, width: "u8" },
+          { name: "assq5", offset: 0x3d, width: "u8" },
+          { name: "assq6", offset: 0x3e, width: "u8" },
+          { name: "assq7", offset: 0x3f, width: "u8" },
         ];
         // verbose adds the extended per-entity fields (accumulators/flags/weight)
         // — the ones agents otherwise hand-read; kept off the default block to
         // avoid bloating the common snapshot.
-        const EXTRA_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf", "pf2", "pf3", "wgt8"];
+        const EXTRA_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf2", "pf3", "wgt8"];
         if (verbose) {
           for (const name of EXTRA_FIELDS) fields.push({ name, offset: nhl94.OFF[name], width: nhl94.FIELD_WIDTH[name] });
         }
@@ -2663,14 +2673,13 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           domain,
         });
         const byIndex = new Map<number, Record<string, number>>(recs.map((r) => [r._index, r]));
-        // gmode is a BYTE flag register at 0xFFC2EA (the game tests it with
-        // `btst #n,($C2EA)`, a byte op) — read it as u8, NOT u16_be, or `& 1`
-        // would test the wrong byte (0xFFC2EB). Matches the bridge OSD's tr_u8.
+        // gmode is a full u16 state word for clock semantics: the clock runs
+        // only when the whole word is 0. The low bit still gates interaction.
         const S16G = new Set(["vpos", "hpos", "yleader", "shotplayer", "lastplayer", "passdir", "passspeed"]);
         const gReads: { name: string; address: number; width: string; domain: string }[] =
           (["carrier", "gameclock", "gsp", "gmode", "vpos", "hpos", "yleader",
             "shotplayer", "lastplayer", "passdir", "passspeed"] as const).map((k) => ({
-            name: k, address: d.addr(nhl94.G[k]), width: k === "gmode" ? "u8" : (S16G.has(k) ? "s16_be" : "u16_be"), domain,
+            name: k, address: d.addr(nhl94.G[k]), width: S16G.has(k) ? "s16_be" : "u16_be", domain,
           }));
         gReads.push(
           { name: "faceoff_window_latch", address: d.addr(nhl94.G.faceoff_window_latch), width: "u16_be", domain },
@@ -2709,6 +2718,11 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // Absolute (domain-relative) struct base for a slot — the same number an
         // agent needs to read any field this tool doesn't decode (base + OFF.*).
         const slotAddr = (idx: number) => d.addr(nhl94.SORTCORDS + idx * nhl94.SCSIZE);
+        const activeHomeRaw = gv.active_control_home ?? 0xffff;
+        const activeAwayRaw = gv.active_control_away ?? 0xffff;
+        const humanPointerSlots = new Set<number>();
+        if (activeHomeRaw >= 0 && activeHomeRaw <= 11) humanPointerSlots.add(activeHomeRaw);
+        if (activeAwayRaw >= 0 && activeAwayRaw <= 11) humanPointerSlots.add(activeAwayRaw);
         const targetLines = (label: string, idx: number): string[] => {
           const rec = byIndex.get(idx);
           const at = raw ? ` @0x${slotAddr(idx).toString(16).toUpperCase()}` : "";
@@ -2733,6 +2747,12 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             `${label}${at}: ${pos} | ${vel} | dir=${rec.fdir} frame=${rec.frame}`,
             `     ${anim}`,
           ];
+          if (idx <= 11) {
+            const ctx = nhl94.decodeSlotControl(rec);
+            const mismatch = humanPointerSlots.has(idx) && !ctx.humanActive ? " control_pointer_mismatch=true" : "";
+            const assqRaw = verbose ? ` assidx=${ctx.assidx} assq=[${ctx.assq.join(",")}]` : "";
+            out.push(`     ${nhl94.formatSlotControlContext(ctx)}${mismatch}${assqRaw}`);
+          }
           if (verbose) {
             out.push(
               `     impact=${rec.impact}${mark(label, "impact")} impactp=${rec.impactp}${mark(label, "impactp")} ` +
@@ -2752,19 +2772,21 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           ? `s${gv.carrier}`
           : `none (0x${(gv.carrier >>> 0).toString(16).toUpperCase()})`;
         const period = ["1st", "2nd", "3rd", "OT"][gv.gsp] ?? `OT${gv.gsp - 2}`;
-        // gmode bit 0 SET = clock stopped = whistle/faceoff/stoppage mode
-        // (verified: RETAIL_OFFSETS.md; the game gates the clock, goal processing
-        // and body-checks on it). `faceoff` is that same bit surfaced explicitly.
-        const play = (gv.gmode & 1) ? "stopped" : "running";
-        const faceoff = (gv.gmode & 1) ? "yes" : "no";
+        // Full-word gmode == 0 is the verified clock-run condition. Bit0 is a
+        // narrower interaction/stoppage gate and can be clear in stopped
+        // presentation states such as faceoff/goal/period transitions.
+        const gmodeWord = gv.gmode ?? 0;
+        const interactionGateClosed = (gmodeWord & 1) === 1;
+        const play = gmodeWord === 0 ? "running" : "stopped";
+        const faceoff = interactionGateClosed ? "yes" : "no";
         // Coarse phase headline (heuristic: session byte + gmode bit0). Answers
         // the "is this a menu waiting for START, or live/faceoff on the ice?"
         // question that a bare positions read can't — see nhl94.classifyPhase.
-        const phaseLabel = nhl94.classifyPhase(gv.session, (gv.gmode & 1) === 1);
+        const phaseLabel = nhl94.classifyPhase(gv.session, interactionGateClosed);
         const faceoffLatch = gv.faceoff_window_latch ?? 0;
         const inFaceoffWindow = faceoffLatch !== 0;
         const phase = inFaceoffWindow ? "faceoff_line_change" : phaseLabel;
-        const phaseRaw = raw ? `  [session=0x${hex2(gv.session)} gmode=0x${hex2(gv.gmode)}]` : "";
+        const phaseRaw = raw ? `  [session=0x${hex2(gv.session)} gmode=0x${hex4(gmodeWord)}]` : "";
         lines.push("");
         lines.push(`phase: ${phase}${phaseRaw}`);
         if (inFaceoffWindow) {
@@ -2777,11 +2799,11 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             `home=${nhl94.lineLabel(homeRaw)}(${homeRaw}) away=${nhl94.lineLabel(awayRaw)}(${awayRaw})`,
           );
           lines.push(
-            `evidence: latch_nonzero=true stoppage_gate_closed=${(gv.gmode & 1) === 1 ? "true" : "false"} ` +
+            `evidence: latch_nonzero=true interaction_gate_closed=${interactionGateClosed ? "true" : "false"} ` +
             `puck_loose=${puckLoose ? "true" : "false"}`,
           );
         }
-        lines.push((gv.gmode & 1)
+        lines.push(interactionGateClosed
           ? `interaction_gate: CLOSED (gmode.bit0=1; collision/check dispatch is blocked during whistle/faceoff mode)`
           : `interaction_gate: OPEN (gmode.bit0=0; stoppage gate is clear — necessary, not proof that contact/resolver dispatch occurred)`);
         lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}   faceoff: ${faceoff}`);
@@ -2797,8 +2819,6 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // (sN, or none when < 0 / out of range); pass is the last pass vector.
         const slotName = (v: number) => (v >= 0 && v <= 11 ? `s${v}` : `none (${v})`);
         lines.push(`shot: ${slotName(gv.shotplayer)}${markG("shotplayer")}   last: ${slotName(gv.lastplayer)}${markG("lastplayer")}   pass: dir=${gv.passdir}${markG("passdir")} speed=${gv.passspeed}${markG("passspeed")}`);
-        const activeHomeRaw = gv.active_control_home ?? 0xffff;
-        const activeAwayRaw = gv.active_control_away ?? 0xffff;
         const homeControl = nhl94.controlSlotInfo(activeHomeRaw, "home");
         const awayControl = nhl94.controlSlotInfo(activeAwayRaw, "away");
         const controlMode = nhl94.inferControlMode(activeHomeRaw, activeAwayRaw);

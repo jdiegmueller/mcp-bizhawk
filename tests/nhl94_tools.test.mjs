@@ -282,6 +282,66 @@ test("nhl94_state reports 1P-CPU control context, pad words, and route confidenc
   }
 });
 
+test("nhl94_state treats full nonzero gmode as stopped while bit0 only gates interactions", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i)),
+    read_many: () => defaultNhlGlobals({ gmode: 0x0100, session: 0xff }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, raw: true, describe: false } }));
+    assert.match(text, /play: stopped/);
+    assert.match(text, /interaction_gate: OPEN \(gmode\.bit0=0;/);
+    assert.match(text, /gmode=0x0100/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state decodes per-slot control bits and assignment role names", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i, i === 4
+      ? { pf: 0x88, assidx: 7, assq7: 17 }
+      : i === 7
+        ? { pf: 0x60, assidx: 0, assq0: 3 }
+        : {})),
+    read_many: () => defaultNhlGlobals({ active_control_home: 4, active_control_away: 0xffff, gmode: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, verbose: true, describe: false } }));
+    assert.match(text, /s4[\s\S]*role=assnearest\(q7=17\) team=home human_active=true active_player=false attack_dir=top pf=0x88/);
+    assert.match(text, /s7[\s\S]*role=asswingd\(q0=3\) team=away human_active=false active_player=true attack_dir=bottom pf=0x60/);
+
+    const structCall = h.bridge.calls.find((c) => c.method === "read_struct_array");
+    assert.ok(structCall.params.fields.some((f) => f.name === "assidx" && f.offset === 0x36));
+    assert.ok(structCall.params.fields.some((f) => f.name === "assq0" && f.offset === 0x38));
+    assert.ok(structCall.params.fields.some((f) => f.name === "assq7" && f.offset === 0x3f));
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state flags control pointer mismatches and unknown role indices", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i, i === 4
+      ? { pf: 0x80, assidx: 2, assq2: 99 }
+      : {})),
+    read_many: () => defaultNhlGlobals({ active_control_home: 4, active_control_away: 0xffff }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, verbose: true, describe: false } }));
+    assert.match(text, /s4[\s\S]*role=role_unknown\(99\)\(q2=99\)/);
+    assert.match(text, /s4[\s\S]*control_pointer_mismatch=true/);
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_state infers control modes and flags unexpected slot-team pairings", async () => {
   const cases = [
     { label: "CPU-CPU", home: 0xffff, away: 0xffff, pattern: /mode: CPU-CPU inferred from active control slots/, route: /input_route: no active input route known; route_verified=false/ },
@@ -371,8 +431,8 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
-    // gmode 1 = clock-stopped / faceoff-whistle mode; gmode must be read as a
-    // byte, so bit 0 here is the C2EA flag bit.
+    // gmode 1 = clock-stopped / faceoff-whistle mode. gmode is read as a full
+    // word for clock semantics; bit 0 remains the interaction gate.
     read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 1, vpos: 0, hpos: 0, yleader: 0, session: 0xff, shotplayer: -1, lastplayer: -1, passdir: 0, passspeed: 0 }),
     list_frozen: () => ({ frozen: [] }),
   });
@@ -383,10 +443,11 @@ test("nhl94_state reports play: stopped / faceoff: yes when gmode bit 0 is set",
     // phase headline: session=0xFF + gmode bit0 set ⇒ on-ice faceoff/stoppage.
     assert.match(text, /phase: faceoff\/stoppage \(on ice/);
     assert.match(text, /interaction_gate: CLOSED \(gmode\.bit0=1;/);
-    // gmode is requested as a byte read, not u16_be (the endianness fix).
+    // gmode is requested as the full word because high-byte presentation states
+    // also stop the clock.
     const call = h.bridge.calls.find((c) => c.method === "read_many");
     const gmodeRead = call.params.reads.find((r) => r.name === "gmode");
-    assert.equal(gmodeRead.width, "u8");
+    assert.equal(gmodeRead.width, "u16_be");
   } finally {
     await h.close();
   }
@@ -430,7 +491,7 @@ test("nhl94_state reports RAM-backed faceoff line-change window", async () => {
     assert.match(text, /phase: faceoff_line_change/);
     assert.match(text, /phase_label: faceoff \/ line-change \(pre-drop\)/);
     assert.match(text, /faceoff_window: active=true latch=0x2710\(10000\) home=Chk\(2\) away=Sc1\(0\)/);
-    assert.match(text, /evidence: latch_nonzero=true stoppage_gate_closed=true puck_loose=true/);
+    assert.match(text, /evidence: latch_nonzero=true interaction_gate_closed=true puck_loose=true/);
     assert.doesNotMatch(text, /c2ea_bit8/);
   } finally {
     await h.close();

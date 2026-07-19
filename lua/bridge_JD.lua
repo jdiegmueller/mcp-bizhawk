@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.42-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.43-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.43-jd changes: nhl94_state decodes verified per-slot control
+--   and assignment role context, and reports full-word gmode clock semantics.
+--   Protocol stays 3.
 --
 -- v2026.7.42-jd changes: nhl94_state adds a server-side control context block
 --   with active human-controlled slot words, switch debounce, conservative raw
@@ -659,7 +663,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.42-jd",
+    version    = "2026.7.43-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

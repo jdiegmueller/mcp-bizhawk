@@ -159,6 +159,76 @@ export function lineLabel(v: number): "Sc1" | "Sc2" | "Chk" | "unknown" {
   }
 }
 
+export const ROLE_NAMES: Record<number, string> = {
+  0: "idle",
+  1: "assdefo",
+  2: "assdefd",
+  3: "asswingd",
+  4: "asswingo",
+  5: "asscenterd",
+  6: "asscentero",
+  7: "assscore",
+  8: "assstanley",
+  9: "assben",
+  10: "assepen",
+  11: "assbench",
+  12: "asspenalty",
+  13: "assdopen",
+  14: "assgoaliecpu",
+  15: "assgoalietopuck",
+  16: "asspuckc",
+  17: "assnearest",
+  18: "assshoot",
+  19: "asspassrec",
+  20: "assfight",
+  21: "fwatch",
+  22: "assfaceoff",
+  23: "assfaceoffpl",
+  29: "assgoaliectrl",
+  32: "assgoaliebreakwait",
+};
+
+export function roleName(idx: number): string {
+  return ROLE_NAMES[idx] ?? `role_unknown(${idx})`;
+}
+
+export interface SlotControlContext {
+  assidx: number;
+  assq: number[];
+  roleIdx: number;
+  role: string;
+  team: "home" | "away";
+  humanActive: boolean;
+  activePlayer: boolean;
+  attackDir: "bottom" | "top";
+  pf: number;
+}
+
+export function decodeSlotControl(rec: Record<string, number>): SlotControlContext {
+  const pf = rec.pf ?? 0;
+  const assidx = (rec.assidx ?? 0) & 7;
+  const assq = Array.from({ length: 8 }, (_, i) => rec[`assq${i}`] ?? 0);
+  const roleIdx = assq[assidx] ?? 0;
+  return {
+    assidx,
+    assq,
+    roleIdx,
+    role: roleName(roleIdx),
+    team: (pf & 0x40) !== 0 ? "away" : "home",
+    humanActive: (pf & 0x08) !== 0,
+    activePlayer: (pf & 0x20) !== 0,
+    attackDir: (pf & 0x80) !== 0 ? "top" : "bottom",
+    pf,
+  };
+}
+
+export function formatSlotControlContext(ctx: SlotControlContext): string {
+  return `role=${ctx.role}(q${ctx.assidx}=${ctx.roleIdx}) ` +
+    `team=${ctx.team} human_active=${ctx.humanActive ? "true" : "false"} ` +
+    `active_player=${ctx.activePlayer ? "true" : "false"} attack_dir=${ctx.attackDir} ` +
+    `pf=0x${ctx.pf.toString(16).toUpperCase().padStart(2, "0")}`;
+}
+
 export function hexWord(v: number): string {
   return `0x${(v & 0xffff).toString(16).toUpperCase().padStart(4, "0")}`;
 }
