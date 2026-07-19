@@ -10,4 +10,4 @@ export const VERSION = "2026.7.39-jd";
 // protocol number; the two are "compatible" (no OSD stale-version warning) as
 // long as the PROTOCOL numbers match, even when the display VERSION strings
 // differ — so a bridge-only or server-only release no longer trips the warning.
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;

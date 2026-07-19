@@ -32,6 +32,30 @@ Backends are configured via a single JSON file pointed at by
 client dialling the same port gets `BUSY`. Adding an emulator means adding
 one stanza — no new daemon, MCP endpoint, or port pair needed.
 
+## Client contract — target plus names, no filesystem paths
+
+MCP clients see one unified BizHawk server. They choose the emulator instance
+with the required `target` parameter (`bizhawk_list_backends` discovers names)
+and then refer to saved artifacts by short names. Do not switch MCP tool
+namespaces to change OS, and do not hand-convert `X:\...` and
+`/mnt/8tb/jason/...` paths.
+
+Normal client-side workflow:
+
+- Pick one backend `target` and use it consistently for the task.
+- Save/load states with `bizhawk_save_state` / `bizhawk_load_state` using
+  `name`.
+- Use `load_slot` on `bizhawk_play_input_sequence` and `state_slot` on
+  `bizhawk_run_trials` for named baselines.
+- Use `nhl94_rig` names for NHL94 rigs.
+- Use screenshot `name`, or omit it for an auto-generated capture.
+
+The backend config owns all filesystem details. Its `os` field (`"linux"` or
+`"windows"`) plus optional `shotDirBridge` / `stateDirBridge` / `rigDirBridge`
+tell the server how to translate the server-visible path to the BizHawk-visible
+path. Raw path arguments are legacy/internal compatibility only; do not add them
+to agent instructions or examples.
+
 ## Versioning — keep the two halves in sync
 
 The **server** and the **Lua bridge** ship a version string each, displayed
@@ -47,7 +71,7 @@ driven by the **RPC protocol version**, not the version string.
   or server-only release is fine). Bump `PROTOCOL_VERSION`/`BRIDGE.protocol`
   together **only when the RPC contract itself changes** (command framing,
   command/RESULT shapes, HELLO) — a tool-surface or OSD change does NOT touch it.
-  Currently `2`. (A pre-protocol server that sends no `protocol_version` falls
+  Currently `3`. (A pre-protocol server that sends no `protocol_version` falls
   back to the old version-string-age comparison.)
 
 Version lives in three files — update all three together:
@@ -82,12 +106,10 @@ default) writes a PNG that the **server** then reads back to inline/caption it.
 When BizHawk runs on the **same** host (e.g. the linux daemon) the default OS
 temp dir works. When BizHawk is **remote on another OS** (the windows daemon:
 Windows BizHawk, Linux server over a shared mount) the two spell the shared dir
-differently, so set both per backend: `shotDir`/`shotDirBridge` in the backend's
-config stanza (or `MCP_BIZHAWK_SHOT_DIR` + `MCP_BIZHAWK_SHOT_DIR_BRIDGE` env
-vars as fallback). E.g. `X:\` (Windows) == `/mnt/8tb/jason` (Linux)
-→ `shotDir=/mnt/8tb/jason/tmp` + `shotDirBridge=X:\tmp`
-(see `deploy/backends.example.json`). Auto paths only; an explicit
-`path` arg is used verbatim. Without this, remote describe fails `ENOENT`.
+differently, so set `os` and the per-backend shared directories. Explicit
+`*DirBridge` values win; otherwise `os:"windows"` derives `X:\...` from the
+shared `/mnt/8tb/jason/...` root. Clients still pass only screenshot names.
+Without correct backend mapping, remote describe fails `ENOENT`.
 
 ## Usage logging
 

@@ -14,7 +14,7 @@ test("trace start/stop/status round-trip", async () => {
   try {
     let res = await h.client.callTool({
       name: "bizhawk_trace_start",
-      arguments: { target: h.target, path: "/tmp/nhl94_trace_test.csv" },
+      arguments: { target: h.target },
     });
     assert.match(textOf(res), /Trace started → \/tmp\/nhl94_trace_test\.csv/);
 

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { startHarness, textOf } from "./helpers/harness.mjs";
 
 // Feature 1: load_state / frame_advance / play_input_sequence append a
@@ -9,7 +12,11 @@ import { startHarness, textOf } from "./helpers/harness.mjs";
 // no change.
 
 test("bizhawk_load_state appends a state summary when the bridge supplies one", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-summary-state-"));
+  fs.mkdirSync(path.join(stateDir, "DEADBEEF"), { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "DEADBEEF", "x.State"), "fake-state");
   const h = await startHarness({
+    get_info: () => ({ rom_hash: "DEADBEEF", rom_name: "Test ROM" }),
     load_state: (p) => {
       assert.equal(p.pause, true);
       return {
@@ -18,22 +25,27 @@ test("bizhawk_load_state appends a state summary when the bridge supplies one", 
         state: { framecount: 999, paused: true, rom_hash: "DEADBEEF" },
       };
     },
-  });
+  }, { backend: { stateDir } });
   try {
     const res = await h.client.callTool({
       name: "bizhawk_load_state",
-      arguments: { target: h.target, path: "/x.State" },
+      arguments: { target: h.target, name: "x" },
     });
     const t = textOf(res);
-    assert.match(t, /Loaded state from \/x\.State \(paused\)/);
+    assert.match(t, /Loaded state 'x' \(paused\)/);
     assert.match(t, /State: frame 999, paused, rom DEADBEEF/);
   } finally {
     await h.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
   }
 });
 
 test("bizhawk_load_state honors explicit pause:false", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-summary-running-"));
+  fs.mkdirSync(path.join(stateDir, "ABCD1234"), { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "ABCD1234", "x.State"), "fake-state");
   const h = await startHarness({
+    get_info: () => ({ rom_hash: "ABCD1234", rom_name: "Test ROM" }),
     load_state: (p) => {
       assert.equal(p.pause, false);
       return {
@@ -42,17 +54,18 @@ test("bizhawk_load_state honors explicit pause:false", async () => {
         state: { framecount: 1000, paused: false },
       };
     },
-  });
+  }, { backend: { stateDir } });
   try {
     const res = await h.client.callTool({
       name: "bizhawk_load_state",
-      arguments: { target: h.target, path: "/x.State", pause: false },
+      arguments: { target: h.target, name: "x", pause: false },
     });
     const t = textOf(res);
-    assert.match(t, /Loaded state from \/x\.State \(running\)/);
+    assert.match(t, /Loaded state 'x' \(running\)/);
     assert.match(t, /State: frame 1000, running/);
   } finally {
     await h.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
   }
 });
 

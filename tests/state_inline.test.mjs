@@ -92,7 +92,7 @@ test("pause with a legacy bridge (returns true) still works, no State line", asy
   }
 });
 
-test("load_slot appends the state summary from its underlying load_state", async () => {
+test("load_state by name appends the state summary from its underlying load_state", async () => {
   const h = await startHarness({
     get_info: () => ({ rom_hash: "ABCD1234", rom_name: "Test ROM" }),
     save_state: (p) => { fs.writeFileSync(p.path, "fake"); return { path: p.path }; },
@@ -102,10 +102,10 @@ test("load_slot appends the state summary from its underlying load_state", async
     },
   });
   try {
-    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { target: h.target, name: "sp" } });
-    const res = await h.client.callTool({ name: "bizhawk_load_slot", arguments: { target: h.target, name: "sp" } });
+    await h.client.callTool({ name: "bizhawk_save_state", arguments: { target: h.target, name: "sp" } });
+    const res = await h.client.callTool({ name: "bizhawk_load_state", arguments: { target: h.target, name: "sp" } });
     const t = textOf(res);
-    assert.match(t, /Loaded slot 'sp' \(paused\)/);
+    assert.match(t, /Loaded state 'sp' \(paused\)/);
     assert.match(t, /State: frame 555, paused, lag 2/);
   } finally {
     await h.close();

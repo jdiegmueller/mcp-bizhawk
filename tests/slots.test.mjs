@@ -37,6 +37,39 @@ test("save → list → load slot round-trip", async () => {
   }
 });
 
+test("save/load slot sends bridge-side path while storing under server-side state dir", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-slots-host-"));
+  const bridgeDir = "X:\\.mcp-bizhawk\\states";
+  const calls = [];
+  const h = await startHarness({
+    get_info: () => ({ rom_hash: "ABCD1234", rom_name: "Test ROM" }),
+    save_state: (p) => {
+      calls.push({ method: "save_state", path: p.path });
+      fs.mkdirSync(path.join(stateDir, "ABCD1234"), { recursive: true });
+      fs.writeFileSync(path.join(stateDir, "ABCD1234", "before-boss.State"), "fake-state-bytes");
+      return { path: p.path };
+    },
+    load_state: (p) => {
+      calls.push({ method: "load_state", path: p.path });
+      return { path: p.path, paused: p.pause === true };
+    },
+  }, {
+    backend: { stateDir, stateDirBridge: bridgeDir },
+  });
+  try {
+    await h.client.callTool({ name: "bizhawk_save_slot", arguments: { target: h.target, name: "before-boss" } });
+    const expectedLocal = path.join(stateDir, "ABCD1234", "before-boss.State");
+    assert.ok(fs.existsSync(expectedLocal), `state file missing at ${expectedLocal}`);
+    assert.equal(calls[0].path, "X:\\.mcp-bizhawk\\states\\ABCD1234\\before-boss.State");
+
+    await h.client.callTool({ name: "bizhawk_load_slot", arguments: { target: h.target, name: "before-boss" } });
+    assert.equal(calls[1].path, "X:\\.mcp-bizhawk\\states\\ABCD1234\\before-boss.State");
+  } finally {
+    await h.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("load slot honors explicit pause:false", async () => {
   const h = await startHarness(HANDLERS);
   try {

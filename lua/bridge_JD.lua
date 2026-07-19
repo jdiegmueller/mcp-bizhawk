@@ -1,6 +1,12 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
 -- v2026.7.39-jd  (was semver 0.16.0; version scheme now matches the server)
 --
+-- v2026.7.40-jd changes: first public multiplex/name-based client contract.
+--   MCP clients choose backend instances with target and use artifact names
+--   instead of filesystem paths; the server owns bridge-visible path resolution
+--   for Windows/Linux backends. Bump protocol 2→3 so older agents/bridges show
+--   stale-component warning around this public-facing contract change.
+--
 -- v2026.7.39-jd multiplexer support (server-side; bridge unchanged)
 --
 -- v2026.7.38-jd changes: save_state/load_state and savestate-backed batch
@@ -643,13 +649,13 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.39-jd",
+    version    = "2026.7.40-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
     -- (see version.ts PROTOCOL_VERSION), NOT when the display versions differ.
     -- Bump only on an actual wire-contract change.
-    protocol   = 2,
+    protocol   = 3,
     pause_safe = true,
 }
 
@@ -706,6 +712,8 @@ local pending_result = nil
 local tick_count = 0
 local disconnected = false
 local reconnect_count = 0   -- successful re-dials since script load (shown in OSD)
+local ip = nil
+local port = nil
 
 -- Link-liveness bookkeeping. The server answers every frame's READY with at
 -- least "NONE", so a healthy link RECEIVES bytes every frame. last_rx_ms is
@@ -998,6 +1006,7 @@ local OSD_LINES  = 21   -- sys + phase + clk + cam + col-header + 12 slots + bla
 -- font trimmed ~10% (24→22) so the longer rows fit.
 local OSD_CANVAS_LINE_H = 32
 local OSD_CANVAS_FONT   = 22
+local OSD_CANVAS_BADGE_H = 18
 local OSD_CANVAS_W      = 1280  -- one line per entity (~85 cols): pos+heading+vel+anim+flags
 
 local osd_canvas = nil
@@ -1025,7 +1034,7 @@ local function osd_get_canvas()
         osd_canvas_failed = true
         return nil
     end
-    local ok, c = pcall(gui.createcanvas, OSD_CANVAS_W, 4 + OSD_LINES * OSD_CANVAS_LINE_H + 4)
+    local ok, c = pcall(gui.createcanvas, OSD_CANVAS_W, 4 + OSD_CANVAS_BADGE_H + OSD_LINES * OSD_CANVAS_LINE_H + 4)
     if ok and c then
         pcall(function() c.SetTitle(BRIDGE.name .. " — NHL94 state") end)
         osd_canvas = c
@@ -1081,6 +1090,8 @@ local function osd_frozen_fields()
         -- frozen carrier highlights "carry sN" instead of the bare "pk" label.
         if full == TRACE_G.puckc or full == TRACE_G.puckc + 1 then
             out.carry = true
+        elseif full == TRACE_G.gameclock or full == TRACE_G.gameclock + 1 then
+            out.clock = true
         elseif full >= SORTCORDS then
             local rel  = full - SORTCORDS
             local slot = rel // SCSIZE
@@ -1094,6 +1105,12 @@ end
 
 local OSD_RED    = 0xFFFF4040   -- frozen-value highlight (ARGB)
 local OSD_ORANGE = 0xFFFFA030   -- stale-version highlight (ARGB) on the system line
+local OSD_BADGE  = 0xFFB8C0C8   -- subtle socket/status badge
+
+local function socket_badge_text()
+    return tostring(ip or "(unknown)") .. ":" .. tostring(port or "(unknown)") .. ":" ..
+        (disconnected and "NOT CONNECTED" or "CONNECTED")
+end
 
 -- Compare two calendar-version strings by their numeric components only
 -- ("2026.7.6-jd" → {2026,7,6}; the "-jd" suffix and any other non-digits are
@@ -1146,6 +1163,17 @@ local function osd_build(segs)
         else ov[#ov + 1] = string.rep(" ", #s[1]) end
     end
     return table.concat(vis), (any and table.concat(ov) or nil)
+end
+
+local function osd_clock_line(ff, period, clock, running, carrier)
+    ff = ff or {}
+    local vis, ov = osd_build({
+        { string.format("%-3s ", period), false },
+        { string.format("%d:%02d", clock // 60, clock % 60), ff.clock },
+        { string.format(" %s   carry ", running and "run " or "stop"), false },
+        { carrier and ("s" .. carrier) or "--", ff.carry },
+    })
+    return vis, ov
 end
 
 -- One entity (skater or puck) as a SINGLE columnar row: position, heading,
@@ -1244,11 +1272,7 @@ local function osd_lines()
     -- a frozen carrier (ff.carry) turns just "sN"/"--" red (like the per-field
     -- freeze highlight on skater rows).
     local period = period_label(tr_u16(TRACE_G.gsp))
-    local vis, ov = osd_build({
-        { string.format("%-3s %d:%02d %s   carry ",
-            period, clock // 60, clock % 60, running and "run " or "stop"), false },
-        { carrier and ("s" .. carrier) or "--", ff.carry },
-    })
+    local vis, ov = osd_clock_line(ff, period, clock, running, carrier)
     lines[#lines + 1] = vis
     overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
     -- Camera scroll line (mirror nhl94_state `camera:`): vpos/hpos = scroll,
@@ -1336,6 +1360,9 @@ end
 
 local function osd_tick()
     osd_poll_toggle()
+    if gui and has(gui, "text") then
+        pcall(function() gui.text(2, 2, socket_badge_text()) end)
+    end
     if not TRACE_OSD then return end
     -- Repaint throttle (see OSD_REFRESH_EVERY). Keyed off the emulated frame
     -- counter, NOT poll count: emu.yield() can re-enter this several times per
@@ -1364,8 +1391,9 @@ local function osd_tick()
         local ok = pcall(function()
             local lines, overlays = osd_lines()
             canvas.Clear(0xFF101010)
+            canvas.DrawText(4, 2, socket_badge_text(), OSD_BADGE, nil, 14, "Courier New")
             for i, s in ipairs(lines) do
-                local y = 4 + (i - 1) * OSD_CANVAS_LINE_H
+                local y = 4 + OSD_CANVAS_BADGE_H + (i - 1) * OSD_CANVAS_LINE_H
                 canvas.DrawText(4, y, s, 0xFFFFFFFF, nil, OSD_CANVAS_FONT, "Courier New")
                 -- Over-draw only the highlighted field(s) — frozen values in
                 -- red, a stale version in orange — on the same layout → exact
@@ -1385,8 +1413,9 @@ local function osd_tick()
         console.log("[mcp-bizhawk] LuaCanvas draw failed — OSD falling back to on-game overlay")
     end
     if not osd_text then return end
+    osd_text(4, 4, socket_badge_text())
     for i, s in ipairs(osd_lines()) do
-        osd_text(4, 4 + (i - 1) * OSD_LINE_H, s)
+        osd_text(4, 4 + i * OSD_LINE_H, s)
     end
 end
 
@@ -3171,8 +3200,8 @@ local function safe_get(fn)
     if ok then return v end
     return nil
 end
-local ip   = safe_get(comm.socketServerGetIp)
-local port = tonumber(safe_get(comm.socketServerGetPort))
+ip   = safe_get(comm.socketServerGetIp)
+port = tonumber(safe_get(comm.socketServerGetPort))
 
 -- Without a configured target the comm.socketServer* functions still EXIST,
 -- so the capability check above passes — but every send fails, and the

@@ -33,6 +33,28 @@ interface NhlDomain {
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MAX_QUEUED_COMMANDS = 100;
+const SHARED_LINUX_ROOT = "/mnt/8tb/jason";
+const SHARED_WINDOWS_ROOT = "X:\\";
+
+function joinForOs(dir: string, filename: string, osHint?: "windows" | "linux"): string {
+  const isWin = osHint === "windows" || (!osHint && (/\\/.test(dir) || /^[A-Za-z]:/.test(dir)));
+  const sep = isWin ? "\\" : "/";
+  const trimmed = dir.replace(/[\\/]+$/, "");
+  return `${trimmed}${sep}${filename.replace(/[\\/]+/g, sep)}`;
+}
+
+function deriveBridgeDir(hostDir: string | undefined, osHint?: "windows" | "linux"): string | undefined {
+  if (!hostDir) return undefined;
+  if (osHint === "windows" && (hostDir === SHARED_LINUX_ROOT || hostDir.startsWith(`${SHARED_LINUX_ROOT}/`))) {
+    const rel = hostDir.slice(SHARED_LINUX_ROOT.length).replace(/^\/+/, "").replace(/\//g, "\\");
+    return rel ? joinForOs(SHARED_WINDOWS_ROOT, rel, "windows") : SHARED_WINDOWS_ROOT;
+  }
+  if (osHint === "linux" && /^X:[\\/]/i.test(hostDir)) {
+    const rel = hostDir.slice(3).replace(/[\\/]/g, "/");
+    return rel ? path.posix.join(SHARED_LINUX_ROOT, rel) : SHARED_LINUX_ROOT;
+  }
+  return hostDir;
+}
 
 export class BizhawkBackend {
   readonly name: string;
@@ -76,15 +98,30 @@ export class BizhawkBackend {
 
   resolvePathPair(kind: "shot" | "state" | "rig", filename: string): PathPair {
     const dirKey = `${kind}Dir` as const;
-    const bridgeDirKey = `${kind}DirBridge` as const;
     const hostDir = this.config[dirKey];
     if (!hostDir) throw new Error(
       `Backend "${this.name}" has no ${kind} directory configured. ` +
       `Set ${kind}Dir in the backend config.`
     );
     const host = path.join(hostDir, filename);
-    const bridgeDir = this.config[bridgeDirKey];
-    return { host, bridge: bridgeDir ? path.posix.join(bridgeDir, filename) : undefined };
+    const bridgeDir = this.bridgeDir(kind);
+    return { host, bridge: bridgeDir ? joinForOs(bridgeDir, filename, this.config.os) : undefined };
+  }
+
+  private bridgeDir(kind: "shot" | "state" | "rig"): string | undefined {
+    if (kind === "shot") {
+      return this.config.shotDirBridge
+        || process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE
+        || deriveBridgeDir(this.config.shotDir || process.env.MCP_BIZHAWK_SHOT_DIR, this.config.os);
+    }
+    if (kind === "state") {
+      return this.config.stateDirBridge
+        || process.env.MCP_BIZHAWK_STATE_DIR_BRIDGE
+        || deriveBridgeDir(this.config.stateDir || process.env.MCP_BIZHAWK_STATE_DIR, this.config.os);
+    }
+    return this.config.rigDirBridge
+      || process.env.MCP_BIZHAWK_RIG_DIR_BRIDGE
+      || deriveBridgeDir(this.config.rigDir || process.env.MCP_BIZHAWK_RIG_DIR, this.config.os);
   }
 
   /** Return the host-side shot dir, or undefined. Falls back to env var. */
@@ -94,7 +131,7 @@ export class BizhawkBackend {
 
   /** Return the bridge-side shot dir, or undefined. Falls back to env var. */
   shotDirBridge(): string | undefined {
-    return this.config.shotDirBridge || process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE || undefined;
+    return this.bridgeDir("shot");
   }
 
   stateDirHost(): string | undefined {
@@ -102,7 +139,7 @@ export class BizhawkBackend {
   }
 
   stateDirBridge(): string | undefined {
-    return this.config.stateDirBridge || process.env.MCP_BIZHAWK_STATE_DIR_BRIDGE || undefined;
+    return this.bridgeDir("state");
   }
 
   rigDirHost(): string | undefined {
@@ -110,7 +147,7 @@ export class BizhawkBackend {
   }
 
   rigDirBridge(): string | undefined {
-    return this.config.rigDirBridge || process.env.MCP_BIZHAWK_RIG_DIR_BRIDGE || undefined;
+    return this.bridgeDir("rig");
   }
 
   // ── NHL domain cache ─────────────────────────────────────────

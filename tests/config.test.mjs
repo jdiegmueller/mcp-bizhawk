@@ -74,6 +74,7 @@ describe("config validation", () => {
       backends: {
         w: {
           bizhawkPort: 8766,
+          os: "windows",
           bizhawkHost: "0.0.0.0",
           allowedRemoteAddresses: ["10.0.0.5"],
           shotDir: "/tmp/shot",
@@ -85,7 +86,15 @@ describe("config validation", () => {
         }
       }
     });
+    assert.equal(cfg.backends.w.os, "windows");
     assert.equal(cfg.backends.w.shotDir, "/tmp/shot");
     assert.equal(cfg.backends.w.shotDirBridge, "X:\\tmp\\shot");
+  });
+
+  it("rejects invalid backend os", () => {
+    assert.throws(
+      () => validateConfig({ backends: { a: { bizhawkPort: 8766, os: "mac" } } }),
+      /os must be "windows" or "linux"/,
+    );
   });
 });

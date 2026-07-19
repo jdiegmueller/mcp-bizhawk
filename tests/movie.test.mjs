@@ -17,16 +17,16 @@ test("bizhawk_movie_status formats loaded state", async () => {
   }
 });
 
-test("bizhawk_movie_play passes the path and reports status", async () => {
+test("bizhawk_movie_play restarts the currently loaded movie", async () => {
   const h = await startHarness({
-    movie_play: (p) => ({ loaded: true, mode: "PLAY", filename: p.path, length: 500 }),
+    movie_play: () => ({ loaded: true, mode: "PLAY", filename: "current.bk2", length: 500 }),
   });
   try {
     const res = await h.client.callTool({
       name: "bizhawk_movie_play",
-      arguments: { target: h.target, path: "/tmp/demo.bk2" },
+      arguments: { target: h.target },
     });
-    assert.match(textOf(res), /Movie: \/tmp\/demo\.bk2 \(loaded, mode: PLAY, length: 500\)/);
+    assert.match(textOf(res), /Movie: current\.bk2 \(loaded, mode: PLAY, length: 500\)/);
   } finally {
     await h.close();
   }

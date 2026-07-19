@@ -22,8 +22,9 @@ const HIDDEN_SAMPLE = [
   "bizhawk_read8", "bizhawk_write16", "bizhawk_memory_ops", "bizhawk_freeze",
   "bizhawk_unfreeze", "bizhawk_list_frozen", "bizhawk_read_struct_array",
   "bizhawk_search_begin", "bizhawk_get_registers", "bizhawk_run_trials",
-  "bizhawk_save_slot", "bizhawk_list_memory_domains",
+  "bizhawk_list_memory_domains",
 ];
+const DROPPED_TOOLS = ["bizhawk_save_slot", "bizhawk_load_slot", "bizhawk_list_slots"];
 
 test("default surface: the nhl94_* set + the curated bizhawk_* core, nothing else", async () => {
   const h = await startHarness({});
@@ -36,8 +37,53 @@ test("default surface: the nhl94_* set + the curated bizhawk_* core, nothing els
     for (const hidden of HIDDEN_SAMPLE) {
       assert.ok(!names.includes(hidden), `${hidden} should be hidden`);
     }
+    for (const dropped of DROPPED_TOOLS) {
+      assert.ok(!names.includes(dropped), `${dropped} should not be advertised`);
+    }
   } finally {
     await h.close();
+  }
+});
+
+test("advertised tools do not ask clients for filesystem paths", async () => {
+  const h = await startHarness({});
+  try {
+    const forbidden = new Set(["path", "state_path", "load_state_path", "screenshot_dir"]);
+    const tools = (await h.client.listTools()).tools;
+    for (const tool of tools) {
+      const props = tool.inputSchema?.properties ?? {};
+      for (const name of Object.keys(props)) {
+        assert.equal(
+          forbidden.has(name),
+          false,
+          `${tool.name} should not advertise filesystem parameter ${name}`,
+        );
+      }
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("full tool surface does not ask clients for filesystem paths", async () => {
+  process.env.BIZHAWK_ALL_TOOLS = "1";
+  const h = await startHarness({});
+  try {
+    const forbidden = new Set(["path", "state_path", "load_state_path", "screenshot_dir"]);
+    const tools = (await h.client.listTools()).tools;
+    for (const tool of tools) {
+      const props = tool.inputSchema?.properties ?? {};
+      for (const name of Object.keys(props)) {
+        assert.equal(
+          forbidden.has(name),
+          false,
+          `${tool.name} should not advertise filesystem parameter ${name}`,
+        );
+      }
+    }
+  } finally {
+    await h.close();
+    delete process.env.BIZHAWK_ALL_TOOLS;
   }
 });
 
@@ -48,6 +94,9 @@ test("BIZHAWK_ALL_TOOLS=1 re-exposes the full surface", async () => {
     const names = (await h.client.listTools()).tools.map((t) => t.name);
     for (const hidden of HIDDEN_SAMPLE) {
       assert.ok(names.includes(hidden), `${hidden} should be exposed under override`);
+    }
+    for (const dropped of DROPPED_TOOLS) {
+      assert.ok(!names.includes(dropped), `${dropped} should remain dropped under override`);
     }
     assert.ok(names.length > 60, "full surface exposed");
   } finally {

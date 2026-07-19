@@ -83,6 +83,48 @@ test("nhl94_rig save → list → apply → delete round-trips through the store
   }
 });
 
+test("nhl94_rig save/apply sends bridge-side state path while metadata stays server-side", async () => {
+  const rigDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-rig-host-"));
+  const bridgeDir = "X:\\.mcp-bizhawk\\rigs";
+  const calls = [];
+  const h = await startHarness({
+    get_info: () => ({ rom_hash: "ABC123" }),
+    list_memory_domains: () => DOMAINS,
+    save_state: (p) => {
+      calls.push({ method: "save_state", path: p.path });
+      fs.mkdirSync(path.join(rigDir, "ABC123"), { recursive: true });
+      fs.writeFileSync(path.join(rigDir, "ABC123", "faceoff.State"), "fake-state-bytes");
+      return { path: p.path };
+    },
+    load_state: (p) => {
+      calls.push({ method: "load_state", path: p.path });
+      return { path: p.path, paused: true };
+    },
+    unfreeze: () => ({ frozen_count: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+    memory_ops: (p) => ({ frozen_count: p.ops.length }),
+  }, {
+    backend: { rigDir, rigDirBridge: bridgeDir },
+  });
+  try {
+    await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "save", name: "faceoff" } });
+    const jsonPath = path.join(rigDir, "ABC123", "faceoff.json");
+    const statePath = path.join(rigDir, "ABC123", "faceoff.State");
+    assert.ok(fs.existsSync(jsonPath), `rig metadata missing at ${jsonPath}`);
+    assert.ok(fs.existsSync(statePath), `rig state missing at ${statePath}`);
+    assert.equal(calls[0].path, "X:\\.mcp-bizhawk\\rigs\\ABC123\\faceoff.State");
+
+    const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+    assert.equal(rig.savestate_path, statePath);
+
+    await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "apply", name: "faceoff" } });
+    assert.equal(calls[1].path, "X:\\.mcp-bizhawk\\rigs\\ABC123\\faceoff.State");
+  } finally {
+    await h.close();
+    fs.rmSync(rigDir, { recursive: true, force: true });
+  }
+});
+
 test("nhl94_rig apply on a missing name errors with available rigs", async () => {
   const rigDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-rig-"));
   process.env.MCP_BIZHAWK_RIG_DIR = rigDir;

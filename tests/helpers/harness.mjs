@@ -5,14 +5,14 @@ import { BizhawkServer } from "../../dist/bizhawk.js";
 import { registerTools } from "../../dist/tools.js";
 import { FakeBridge } from "./fake-bridge.mjs";
 
-export async function startHarness(handlers = {}) {
+export async function startHarness(handlers = {}, options = {}) {
   let bh = null;
   let port;
   for (let attempt = 0; attempt < 5 && !bh; attempt++) {
     port = 20000 + Math.floor(Math.random() * 20000);
     const candidate = new BizhawkServer();
     try {
-      await candidate.start({ test: { bizhawkPort: port } });
+      await candidate.start({ test: { bizhawkPort: port, ...(options.backend ?? {}) } });
       bh = candidate;
       bh.testPort = port;
       bh.testTarget = "test";

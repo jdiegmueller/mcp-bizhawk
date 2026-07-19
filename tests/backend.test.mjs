@@ -43,12 +43,24 @@ describe("BizhawkBackend", () => {
   it("resolvePathPair resolves shot path", () => {
     const b = new BizhawkBackend("w", {
       bizhawkPort: 8766,
+      os: "windows",
       shotDir: "/tmp/s",
       shotDirBridge: "X:\\tmp\\s",
     });
     const p = b.resolvePathPair("shot", "cap.png");
     assert.equal(p.host, "/tmp/s/cap.png");
-    assert.equal(p.bridge, "X:\\tmp\\s/cap.png");
+    assert.equal(p.bridge, "X:\\tmp\\s\\cap.png");
+  });
+
+  it("derives Windows bridge paths from the shared /mnt/8tb/jason root", () => {
+    const b = new BizhawkBackend("w", {
+      bizhawkPort: 8766,
+      os: "windows",
+      shotDir: "/mnt/8tb/jason/tmp",
+    });
+    const p = b.resolvePathPair("shot", "cap.png");
+    assert.equal(p.host, "/mnt/8tb/jason/tmp/cap.png");
+    assert.equal(p.bridge, "X:\\tmp\\cap.png");
   });
 
   it("rejects path pair when dir not configured", () => {

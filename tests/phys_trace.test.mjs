@@ -18,7 +18,7 @@ test("phys trace start/stop/status round-trip", async () => {
   try {
     let res = await h.client.callTool({
       name: "bizhawk_phys_trace_start",
-      arguments: { target: h.target, path: "/tmp/nhl94_phys_1.csv" },
+      arguments: { target: h.target },
     });
     assert.match(textOf(res), /Physics-sync trace started → \/tmp\/nhl94_phys_1\.csv \(latch 0x7958, emit 0x7966\)/);
 

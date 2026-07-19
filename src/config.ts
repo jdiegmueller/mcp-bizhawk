@@ -13,6 +13,7 @@ export interface BackendPaths {
 
 export interface BackendConfig {
   bizhawkPort: number;
+  os?: "windows" | "linux";
   bizhawkHost?: string;
   allowedRemoteAddresses?: string[];
   shotDir?: string;
@@ -36,7 +37,7 @@ export interface MultiplexerConfig {
 
 const VALID_TOP_KEYS = new Set(["backends", "vision"]);
 const VALID_BACKEND_KEYS = new Set([
-  "bizhawkPort", "bizhawkHost", "allowedRemoteAddresses",
+  "bizhawkPort", "os", "bizhawkHost", "allowedRemoteAddresses",
   "shotDir", "shotDirBridge",
   "stateDir", "stateDirBridge",
   "rigDir", "rigDirBridge",
@@ -82,6 +83,14 @@ export function validateConfig(raw: Record<string, unknown>): MultiplexerConfig 
 
     const host: string | undefined = typeof raw.bizhawkHost === "string" ? raw.bizhawkHost : undefined;
 
+    let backendOs: "windows" | "linux" | undefined;
+    if (raw.os !== undefined) {
+      if (raw.os !== "windows" && raw.os !== "linux") {
+        throw new Error(`Backend "${name}": os must be "windows" or "linux".`);
+      }
+      backendOs = raw.os;
+    }
+
     let allowedRemoteAddresses: string[] | undefined;
     if (raw.allowedRemoteAddresses !== undefined) {
       if (!host || host === "127.0.0.1") {
@@ -95,6 +104,7 @@ export function validateConfig(raw: Record<string, unknown>): MultiplexerConfig 
 
     backends[name] = {
       bizhawkPort: port,
+      os: backendOs,
       bizhawkHost: host,
       allowedRemoteAddresses,
       shotDir: typeof raw.shotDir === "string" ? raw.shotDir : undefined,

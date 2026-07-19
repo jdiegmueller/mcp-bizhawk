@@ -117,8 +117,8 @@ First, create a config file (see [`deploy/backends.example.json`](deploy/backend
 # Example: backends.json
 {
   "backends": {
-    "windows": { "bizhawkPort": 8766, "bizhawkHost": "0.0.0.0", "allowedRemoteAddresses": ["192.168.1.50"] },
-    "linux1":  { "bizhawkPort": 8764 }
+    "windows": { "bizhawkPort": 8766, "os": "windows", "bizhawkHost": "0.0.0.0", "allowedRemoteAddresses": ["192.168.1.50"] },
+    "linux1":  { "bizhawkPort": 8764, "os": "linux" }
   }
 }
 ```
@@ -210,6 +210,7 @@ The config file declares one backend per key, keyed by the target name:
     "windows": {
       "bizhawkHost": "0.0.0.0",
       "bizhawkPort": 8766,
+      "os": "windows",
       "allowedRemoteAddresses": ["192.168.1.50"],
       "shotDir": "/mnt/8tb/jason/tmp",
       "shotDirBridge": "X:\\tmp"
@@ -227,6 +228,7 @@ Per-backend options (all optional except `bizhawkPort`):
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `bizhawkPort` | *(required)* | TCP port to listen on for this backend's BizHawk bridge |
+| `os` | inferred from paths | Bridge OS path style: `linux` or `windows` |
 | `bizhawkHost` | `127.0.0.1` | Host to bind the listener on |
 | `allowedRemoteAddresses` | (none) | Whitelist of remote IPs; requires non-loopback `bizhawkHost` |
 | `shotDir` / `shotDirBridge` | `MCP_BIZHAWK_SHOT_DIR` env | Server-side and bridge-side screenshot paths |
@@ -235,7 +237,9 @@ Per-backend options (all optional except `bizhawkPort`):
 
 The `vision` section overrides `VISION_BASE_URL`/`VISION_MODEL`/`VISION_API_KEY` env vars.
 
-For remote/cross-OS BizHawk setups, the server must validate files using its local path while BizHawk saves/loads using its own path spelling. Set the `*Bridge` variants when those path spellings differ.
+For remote/cross-OS BizHawk setups, the server validates files using its local path while BizHawk saves/loads using its own path spelling. Set `os` on each backend. Explicit `*DirBridge` variants win when path spellings differ; otherwise `os:"windows"` derives `X:\...` from the shared `/mnt/8tb/jason/...` root.
+
+MCP clients should not pass filesystem paths. Use `target` to choose the backend, then refer to artifacts by name: state `name`, sequence `load_slot`, trial `state_slot`, rig `name`, and screenshot `name` (or omit screenshot `name` for an auto capture). Backend config handles `X:\` vs `/mnt/8tb/jason`.
 
 ## Tools
 
@@ -256,8 +260,8 @@ For remote/cross-OS BizHawk setups, the server must validate files using its loc
 | `bizhawk_frame_advance` | Step the emulator by N frames |
 | `bizhawk_pause` / `bizhawk_unpause` | Pause / resume emulation |
 | `bizhawk_reset` | Reset the loaded core |
-| `bizhawk_screenshot` | Capture the current display — returns the PNG inline as an image block; optional path to also choose where it's saved |
-| `bizhawk_save_state` / `bizhawk_load_state` | Save / load emulator state to a file path; loads pause by default so state does not drift between tool calls |
+| `bizhawk_screenshot` | Capture the current display by optional name — returns the PNG inline as an image block |
+| `bizhawk_save_state` / `bizhawk_load_state` | Save / load emulator state by name; loads pause by default so state does not drift between tool calls |
 | `bizhawk_eval_lua` | Run an arbitrary Lua chunk in the bridge (JSON-encoded result); `unpause: true` runs it via the pause-safe path so `emu.frameadvance()` inside the chunk doesn't block forever |
 | `bizhawk_disassemble` | Decode one or more machine instructions at an address (or the current PC) |
 | `bizhawk_osd_message` | Draw a short message in BizHawk's on-screen OSD area |

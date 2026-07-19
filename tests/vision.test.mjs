@@ -23,15 +23,15 @@ function writingScreenshot(p) {
 
 test("bizhawk_screenshot returns the PNG AND a vision caption by default", async () => {
   const stub = await startVisionStub("A hockey rink; the puck is near center ice.");
-  const png = tempPng();
+  const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-shot-"));
   process.env.VISION_BASE_URL = stub.baseUrl;
   process.env.VISION_MODEL = "test-vlm";
-  const h = await startHarness({ screenshot: (p) => p.path });
+  const h = await startHarness({ screenshot: writingScreenshot }, { backend: { shotDir } });
   try {
     // describe defaults to true — no need to pass it.
     const res = await h.client.callTool({
       name: "bizhawk_screenshot",
-      arguments: { target: h.target, path: png, describe_prompt: "Where is the puck?" },
+      arguments: { target: h.target, name: "captioned", describe_prompt: "Where is the puck?" },
     });
     const t = textOf(res);
     // The PNG is STILL inlined (describe is additive now, not a replacement)...
@@ -52,7 +52,7 @@ test("bizhawk_screenshot returns the PNG AND a vision caption by default", async
   } finally {
     delete process.env.VISION_BASE_URL;
     delete process.env.VISION_MODEL;
-    fs.rmSync(png, { force: true });
+    fs.rmSync(shotDir, { recursive: true, force: true });
     await h.close();
     await stub.close();
   }
@@ -60,14 +60,14 @@ test("bizhawk_screenshot returns the PNG AND a vision caption by default", async
 
 test("bizhawk_screenshot describe:false returns the PNG only, no vision call", async () => {
   const stub = await startVisionStub("should never be produced");
-  const png = tempPng();
+  const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-no-desc-"));
   process.env.VISION_BASE_URL = stub.baseUrl;
   process.env.VISION_MODEL = "test-vlm";
-  const h = await startHarness({ screenshot: (p) => p.path });
+  const h = await startHarness({ screenshot: writingScreenshot }, { backend: { shotDir } });
   try {
     const res = await h.client.callTool({
       name: "bizhawk_screenshot",
-      arguments: { target: h.target, path: png, describe: false },
+      arguments: { target: h.target, name: "no-desc", describe: false },
     });
     assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG inlined");
     assert.equal(stub.received.length, 0, "vision endpoint not called when describe:false");
@@ -75,7 +75,7 @@ test("bizhawk_screenshot describe:false returns the PNG only, no vision call", a
   } finally {
     delete process.env.VISION_BASE_URL;
     delete process.env.VISION_MODEL;
-    fs.rmSync(png, { force: true });
+    fs.rmSync(shotDir, { recursive: true, force: true });
     await h.close();
     await stub.close();
   }
@@ -84,18 +84,18 @@ test("bizhawk_screenshot describe:false returns the PNG only, no vision call", a
 test("bizhawk_screenshot degrades to image + note when vision is unconfigured", async () => {
   delete process.env.VISION_BASE_URL;
   delete process.env.VISION_MODEL;
-  const png = tempPng();
-  const h = await startHarness({ screenshot: (p) => p.path });
+  const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-unconfigured-"));
+  const h = await startHarness({ screenshot: writingScreenshot }, { backend: { shotDir } });
   try {
     // describe defaults true, but vision isn't configured: still succeed, still
     // return the image, and append a short note instead of erroring.
-    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { target: h.target, path: png } });
+    const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { target: h.target, name: "unconfigured" } });
     assert.equal(res.isError ?? false, false);
     assert.equal(res.content.filter((c) => c.type === "image").length, 1, "PNG still returned");
     assert.match(textOf(res), /vision caption unavailable/);
   } finally {
-    fs.rmSync(png, { force: true });
     await h.close();
+    fs.rmSync(shotDir, { recursive: true, force: true });
   }
 });
 

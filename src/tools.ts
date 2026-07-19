@@ -198,10 +198,10 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_ram_snapshot",
     description:
-      "PURPOSE: Snapshot a contiguous memory range to a binary FILE on the server's filesystem (with a sha256 digest) — the tool for reverse-engineering by RAM diffing across game states, instead of hand-rolling a memory-dump loop in bizhawk_eval_lua. " +
-      "USAGE: Capture the same range in several states (e.g. gameplay vs menu vs title) then diff the files (they live on the server host, readable regardless of which BizHawk) to isolate the bytes that track a state/flag — exactly the workflow used to hunt game-phase globals. Defaults to the whole 64 KiB Genesis work RAM ('68K RAM', base 0, size 0x10000). The `digest` alone lets you cheaply tell whether two states differ without re-reading. Pair with bizhawk_search_begin/filter when you want the bridge to diff for you against a live-changing value instead. " +
-      "BEHAVIOR: No side effects on the emulator — pure reads, chunked into ≤4096-byte read_range calls and assembled + written server-side. DESTRUCTIVE to the target file (overwrites `path`). Errors if the domain is unknown or the range exceeds it. " +
-      "RETURNS: 'PATH (N bytes, DOMAIN @0xBASE) sha256=…' — the file path, byte count, domain, base, and the digest.",
+      "PURPOSE: Snapshot a contiguous memory range to a named binary file on the server side (with a sha256 digest) — the tool for reverse-engineering by RAM diffing across game states, instead of hand-rolling a memory-dump loop in bizhawk_eval_lua. " +
+      "USAGE: Capture the same range in several states (e.g. gameplay vs menu vs title) then diff the named files to isolate the bytes that track a state/flag — exactly the workflow used to hunt game-phase globals. Defaults to the whole 64 KiB Genesis work RAM ('68K RAM', base 0, size 0x10000). The `digest` alone lets you cheaply tell whether two states differ without re-reading. Pair with bizhawk_search_begin/filter when you want the bridge to diff for you against a live-changing value instead. " +
+      "BEHAVIOR: No side effects on the emulator — pure reads, chunked into ≤4096-byte read_range calls and assembled + written server-side. DESTRUCTIVE to the named snapshot file. Errors if the domain is unknown or the range exceeds it. Do not pass filesystem paths; omit `name` for an auto name. " +
+      "RETURNS: 'SNAPSHOT NAME (N bytes, DOMAIN @0xBASE) sha256=…' plus the server-side file location for human follow-up.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -209,7 +209,7 @@ const TOOLS: Tool[] = [
         base: { type: "integer", minimum: 0, default: 0, description: "Starting byte offset within the domain (0-based per-domain). Default 0." },
         size: { type: "integer", minimum: 1, maximum: 1048576, default: 65536, description: "Number of bytes to snapshot (default 65536 = full 64 KiB 68K RAM; max 1 MiB)." },
         domain: { type: "string", description: "Memory domain (default '68K RAM' — the Genesis work RAM)." },
-        path: { type: "string", description: "Output file path on the SERVER host. Omit for an auto temp file. Overwritten if present." },
+        name: { type: "string", description: "Optional snapshot name: 1-64 chars of letters, digits, dot, underscore, hyphen. `.bin` is appended if omitted. Omit for an auto name." },
       },
       additionalProperties: false,
     },
@@ -375,7 +375,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_play_input_sequence",
     description:
       "PURPOSE: Play a pre-built sequence of per-frame joypad inputs back-to-back, advancing one frame per element, ENTIRELY SERVER-SIDE in a single bridge round-trip. Optionally captures screenshots AND labeled memory reads at fixed frame intervals during the play, and optionally aborts play early when a specified memory address changes. All observations come back inline so the agent sees the full trajectory + game state in one tool response. " +
-      "USAGE: Use whenever you have ≥10 frames of inputs to play in order — TAS movie playback, scripted multi-frame sequences, AI-search of input patterns, agent-driven gameplay. ONE bridge round-trip ships N frames instead of the 2N round-trips you'd pay looping bizhawk_press_buttons + bizhawk_frame_advance(1). Use `hold` on each element to run-length-encode repeated input ({buttons:{}, hold:60} = 60 idle frames in one entry) — this keeps the JSON tiny for long sequences. The RPC timeout scales with the total frame count, so multi-thousand-frame batches are fine; the practical reason to chunk is responsiveness (the bridge can't service other calls mid-batch). To compare several input variations from ONE baseline savestate (reloaded per variation), use bizhawk_run_trials instead. Prefer `observe_every` over `screenshot_every` for a dense memory-only trajectory (no PNGs = far cheaper); set `describe`+`describe_prompt` to get vision-model TEXT back per screenshot instead of binary; pass `load_state_path` to reload a baseline and play in one round-trip. " +
+      "USAGE: Use whenever you have ≥10 frames of inputs to play in order — TAS movie playback, scripted multi-frame sequences, AI-search of input patterns, agent-driven gameplay. ONE bridge round-trip ships N frames instead of the 2N round-trips you'd pay looping bizhawk_press_buttons + bizhawk_frame_advance(1). Use `hold` on each element to run-length-encode repeated input ({buttons:{}, hold:60} = 60 idle frames in one entry) — this keeps the JSON tiny for long sequences. The RPC timeout scales with the total frame count, so multi-thousand-frame batches are fine; the practical reason to chunk is responsiveness (the bridge can't service other calls mid-batch). To compare several input variations from ONE baseline savestate (reloaded per variation), use bizhawk_run_trials instead. Prefer `observe_every` over `screenshot_every` for a dense memory-only trajectory (no PNGs = far cheaper); set `describe`+`describe_prompt` to get vision-model TEXT back per screenshot instead of binary; pass `load_slot` to reload a named baseline and play in one round-trip. " +
       "FOR AGENT-DRIVEN PLAY: combine `screenshot_every`, `observe_memory`, and `stop_on_memory_change` for the killer pattern — 'walk right for up to 200 frames, observing screenshot+x+y+hp every second, but STOP the moment the room ID changes'. The agent sees: where Samus was at each second, AND whether the goal (room transition) was reached, AND screenshots for visual confirmation — all in one tool response. " +
       "BEHAVIOR: For each `frames` element, calls joypad.set with that frame's buttons then emu.frameadvance. The bridge's main poll loop is BLOCKED for the duration of the call (no other RPCs, no heartbeat) until the sequence finishes or fails. With `screenshot_every`, each captured screenshot adds ~1 frame of wall-clock. With `observe_memory`, each observation also reads the listed memory addresses at the same frame the screenshot was taken — values come back labeled by `name` in each observation's `memory` field. With `stop_on_memory_change`, the bridge records the listed address's value before the first frame, re-reads it after each frame, and aborts the sequence the moment it changes (a final observation is captured at the stop frame regardless of cadence). Returns an error if joypad.set / emu.frameadvance / client.screenshot is missing when needed, if any `observe_memory` entry references an unknown domain, if any `width` isn't 'u8' / 'u16' / 'u32', or if any address is out of range. " +
       "RETURNS: A text summary ('Played N frames. Final framecount: M. Stopped early: yes/no [reason]. Captured K observations with their memory values') followed by K inline image content blocks (one per observation, in frame order). Each observation in the text summary includes its frame_offset and labeled memory values so the agent can correlate the visible screenshot with the game state at that exact frame.",
@@ -383,11 +383,11 @@ const TOOLS: Tool[] = [
       type: "object",
       required: ["target", "frames"],
       properties: { ...targetProp, 
-        load_state_path: {
+        load_slot: {
           type: "string",
           description:
-            "Optional. Absolute path to a .State file to load IMMEDIATELY before playback begins, in the same round-trip. " +
-            "Collapses the common 'load_state then play_input_sequence' trial loop into a single call: reset to a known baseline and run the sequence with no intermediate round-trip. This is intentionally NOT a paused inspection load: the bridge loads the state and immediately unpauses to play the sequence. The load happens before any stop_on_memory_change baseline is captured and before frame 0. Same ROM/core constraints as bizhawk_load_state. Omit to play from the current live state.",
+            "Optional named slot to load IMMEDIATELY before playback begins, in the same round-trip. " +
+            "Collapses the common 'load_state then play_input_sequence' trial loop into a single call: reset to a known baseline and run the sequence with no intermediate round-trip. This is intentionally NOT a paused inspection load: the bridge loads the state and immediately unpauses to play the sequence. The load happens before any stop_on_memory_change baseline is captured and before frame 0. Same ROM/core constraints as bizhawk_load_state. Omit to play from the current live state. Do not pass filesystem paths; the selected backend resolves the slot name.",
         },
         frames: {
           type: "array",
@@ -433,11 +433,6 @@ const TOOLS: Tool[] = [
           minimum: 1,
           description:
             "Optional. If set, capture a PNG screenshot every N frames during playback (and one extra at the final frame regardless of remainder). Each screenshot costs ~1 wall-clock frame for client.screenshot, so 60 (≈1 sec of game time) is a good default — captures meaningful state changes without doubling batch latency. Omit to skip screenshots. If `observe_memory` is also set, screenshots and memory reads happen at the same observation points. To capture memory WITHOUT screenshots (far fewer tokens), use `observe_every` instead. To get screenshots back as text descriptions rather than binary images, add `describe: true`.",
-        },
-        screenshot_dir: {
-          type: "string",
-          description:
-            "Optional. Directory to write screenshot PNGs into when `screenshot_every` is set. Default: C:/temp. Must exist and be writable. Files are named `<prefix>-NNNN.png` where NNNN is the frame offset within the batch (zero-padded to 4 digits).",
         },
         screenshot_prefix: {
           type: "string",
@@ -521,22 +516,22 @@ const TOOLS: Tool[] = [
     name: "bizhawk_run_trials",
     description:
       "PURPOSE: Run a SWEEP of input experiments from one savestate — for each trial, reload the same baseline state, play that trial's input sequence, and read a shared set of memory values — all in ONE bridge round-trip, returning a per-trial table of outcomes. " +
-      "USAGE: The tool for savestate-anchored parameter sweeps and input search: 'from this faceoff, try shot A, shot B, and a pass — where does the puck end up in each?'. Replaces the manual loop of (load_state → play_input_sequence → read) repeated once per candidate, which costs 3+ round-trips PER trial and floods the transcript with intermediate results. Here N trials cost one call and one compact table. Each trial reloads `state_path` first, so trials are independent — trial K never sees trial K-1's mutations. For a single sequence with mid-play observation cadence or stop-on-change, use bizhawk_play_input_sequence (optionally with its load_state_path). " +
-      "BEHAVIOR: For each trial in order: loads `state_path`, intentionally unpauses to play the trial, plays the trial's `frames` (same hold/RLE semantics as play_input_sequence), then reads every `observe_memory` entry at the final frame and optionally captures one screenshot. This is a play/sweep tool, not a paused restore; use bizhawk_load_state for a paused inspection restore. The bridge's poll loop is BLOCKED for the whole sweep (no other RPCs) — the RPC timeout scales with the total frame count across all trials. Any pre-existing freezes are re-asserted each frame exactly as in play_input_sequence. Errors (unknown domain, invalid width, missing state file, missing joypad/frameadvance/screenshot capability) fail the whole call. " +
-      "RETURNS: A text table — 'Ran N trials from PATH.' then one line per trial: '[name] played F, frame FC — label=value, ...' — followed by one inline PNG content block per trial that captured a screenshot, in trial order.",
+      "USAGE: The tool for savestate-anchored parameter sweeps and input search: 'from this faceoff, try shot A, shot B, and a pass — where does the puck end up in each?'. Replaces the manual loop of (load_state → play_input_sequence → read) repeated once per candidate, which costs 3+ round-trips PER trial and floods the transcript with intermediate results. Here N trials cost one call and one compact table. Each trial reloads `state_slot` first, so trials are independent — trial K never sees trial K-1's mutations. For a single sequence with mid-play observation cadence or stop-on-change, use bizhawk_play_input_sequence with `load_slot`. " +
+      "BEHAVIOR: For each trial in order: loads `state_slot`, intentionally unpauses to play the trial, plays the trial's `frames` (same hold/RLE semantics as play_input_sequence), then reads every `observe_memory` entry at the final frame and optionally captures one screenshot. This is a play/sweep tool, not a paused restore; use bizhawk_load_state for a paused inspection restore. The bridge's poll loop is BLOCKED for the whole sweep (no other RPCs) — the RPC timeout scales with the total frame count across all trials. Any pre-existing freezes are re-asserted each frame exactly as in play_input_sequence. Errors (unknown domain, invalid width, missing state file, missing joypad/frameadvance/screenshot capability) fail the whole call. " +
+      "RETURNS: A text table — 'Ran N trials from slot NAME.' then one line per trial: '[name] played F, frame FC — label=value, ...' — followed by one inline PNG content block per trial that captured a screenshot, in trial order.",
     inputSchema: {
       type: "object",
-      required: ["target", "state_path", "trials"],
+      required: ["target", "state_slot", "trials"],
       properties: { ...targetProp, 
-        state_path: {
+        state_slot: {
           type: "string",
-          description: "Absolute path to the .State file reloaded before EVERY trial (the shared baseline). Same ROM/core constraints as bizhawk_load_state.",
+          description: "Named slot reloaded before EVERY trial (the shared baseline). Same ROM/core constraints as bizhawk_load_state. Do not pass filesystem paths; the selected backend resolves the slot name.",
         },
         trials: {
           type: "array",
           minItems: 1,
           maxItems: 64,
-          description: "The experiments to run, in order. Each reloads state_path, plays its frames, then observes.",
+          description: "The experiments to run, in order. Each reloads state_slot, plays its frames, then observes.",
           items: {
             type: "object",
             required: ["frames"],
@@ -579,10 +574,6 @@ const TOOLS: Tool[] = [
           type: "boolean",
           default: false,
           description: "If true, capture one PNG at the final frame of each trial and return them inline. Requires client.screenshot on the build.",
-        },
-        screenshot_dir: {
-          type: "string",
-          description: "Directory for per-trial screenshots when `screenshot` is set. Default: C:/temp. Must exist and be writable.",
         },
         screenshot_prefix: {
           type: "string",
@@ -661,14 +652,14 @@ const TOOLS: Tool[] = [
     name: "bizhawk_screenshot",
     description:
       "PURPOSE: Capture a PNG screenshot of the current emulator display and return it INLINE as an image content block (also saved to disk). " +
-      "USAGE: The primary 'look at the screen' tool — call it whenever you need visual confirmation of game state. To capture a specific state, pause / advance frames / load state first. Pass `path` only if you want the PNG at a specific location; otherwise a temp file is used. For screenshots DURING an input sequence use bizhawk_play_input_sequence's screenshot_every instead. " +
-      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists. The image is read back from disk and inlined; if the file can't be read the tool still succeeds and returns the path with a note instead of the image. When BizHawk runs on a DIFFERENT filesystem than this server (e.g. a Windows BizHawk driven by a Linux daemon over a shared mount), set MCP_BIZHAWK_SHOT_DIR (the shared dir as the SERVER sees it) + MCP_BIZHAWK_SHOT_DIR_BRIDGE (the same dir as BizHawk sees it, e.g. 'X:\\tmp') so auto (no-`path`) screenshots — including the default-on vision caption here and in nhl94_state — write on the BizHawk side and read back on the server side. An explicit `path` is used verbatim (no translation). Returns an error if the parent directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info. " +
+      "USAGE: The primary 'look at the screen' tool — call it whenever you need visual confirmation of game state. To capture a specific state, pause / advance frames / load a named state first. Omit `name` for an auto-generated screenshot file, or pass a short name if you need to refer to this capture later. For screenshots DURING an input sequence use bizhawk_play_input_sequence's screenshot_every instead. Do not pass filesystem paths; the selected backend resolves where the PNG is written and read back. " +
+      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the named screenshot file if it exists. The image is read back from disk and inlined; if the file can't be read the tool still succeeds and returns the backend path with a note instead of the image. When BizHawk runs on a DIFFERENT filesystem than this server (e.g. a Windows BizHawk driven by a Linux daemon over a shared mount), the backend's path config maps the server-visible directory to the bridge-visible directory. Returns an error if the target directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info first. " +
       "RETURNS: A text block 'Screenshot saved: PATH', an inline PNG image content block, and (unless describe:false) a vision-model caption of the screen.",
     inputSchema: {
       type: "object",
       required: ["target"],
       properties: { ...targetProp, 
-        path: { type: "string", description: "Optional absolute filesystem path for the PNG (e.g. /tmp/snap.png). Omit to use an auto-generated temp file. Parent directory must exist. Overwritten without prompt if present." },
+        name: { type: "string", description: "Optional screenshot name: 1-64 chars of letters, digits, dot, underscore, hyphen. `.png` is appended if omitted. Omit for an auto-generated name." },
         describe: {
           type: "boolean",
           default: true,
@@ -704,15 +695,15 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_save_state",
     description:
-      "PURPOSE: Save the entire emulator state (RAM, CPU/PPU/APU registers, mapper state, sound chip state, timing) to a file at the given path. " +
-      "USAGE: Use as a rollback point before risky writes, to bookmark interesting game states, or to share repro states. The companion bizhawk_load_state can perfectly restore from this file. BizHawk's savestate API is path-based (NOT slot-based like mGBA's). " +
-      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the file at `path` if it exists, with no prompt or backup. The state file is bound to the EXACT ROM and BizHawk core version that produced it — loading it on a different ROM or core version usually crashes the core. Returns an error if the parent directory doesn't exist, the path isn't writable, or the core doesn't expose savestate.save. " +
-      "RETURNS: Single line 'Saved state to PATH'.",
+      "PURPOSE: Save the entire emulator state (RAM, CPU/PPU/APU registers, mapper state, sound chip state, timing) under a named slot. " +
+      "USAGE: Use as a rollback point before risky writes, to bookmark interesting game states, or to share repro states by name. The companion bizhawk_load_state can perfectly restore from the same name. Do not pass filesystem paths; the selected backend resolves where the file lives. " +
+      "BEHAVIOR: DESTRUCTIVE TO NAMED STATE: overwrites an existing state with the same name for the current ROM, with no prompt or backup. The state file is bound to the EXACT ROM and BizHawk core version that produced it — loading it on a different ROM or core version usually crashes the core. Returns an error if the backend state directory isn't writable or the core doesn't expose savestate.save. " +
+      "RETURNS: Single line 'Saved state NAME'.",
     inputSchema: {
       type: "object",
-      required: ["target", "path"],
+      required: ["target", "name"],
       properties: { ...targetProp, 
-        path: { type: "string", description: "Absolute filesystem path to write the .State file to (extension is convention, not required). Parent directory must exist. File is overwritten without prompt if present." },
+        name: { type: "string", description: "State name: 1-64 chars of letters, digits, dot, underscore, hyphen. Namespaced per ROM hash automatically." },
       },
       additionalProperties: false,
     },
@@ -720,15 +711,15 @@ const TOOLS: Tool[] = [
   {
     name: "bizhawk_load_state",
     description:
-      "PURPOSE: Restore the emulator from a previously saved .State file at the given path. " +
-      "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. Default is PAUSED after load; drive the restored state deliberately with bizhawk_frame_advance, bizhawk_play_input_sequence, or bizhawk_unpause. To start fresh from console boot instead, use bizhawk_reset. " +
-      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the file's contents. Anything not previously snapshotted is lost. The state file MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge leaves the emulator PAUSED by default after load so game time cannot drift between agent commands; pass pause=false only when you intentionally want real-time playback to resume. The pause is applied in the same callback after the load (ZERO frames run between load and pause). Returns an error if the file doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
-      "RETURNS: 'Loaded state from PATH (paused/running)' plus a `State:` line (frame/paused/lag/domain) — no bizhawk_get_info needed.",
+      "PURPOSE: Restore the emulator from a previously saved named state. " +
+      "USAGE: Counterpart to bizhawk_save_state. Use to undo a sequence of writes/inputs (the snapshot/experiment/restore workflow), to jump to a bookmarked game state, or to start each tool-call sequence from a known baseline. Default is PAUSED after load; drive the restored state deliberately with bizhawk_frame_advance, bizhawk_play_input_sequence, or bizhawk_unpause. To start fresh from console boot instead, use bizhawk_reset. Do not pass filesystem paths; the selected backend resolves the named state. " +
+      "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: replaces ALL current emulator state (RAM, registers, mapper, audio, framecount) with the named state's contents. Anything not previously snapshotted is lost. The state MUST come from the same ROM and same BizHawk core version that produced it — loading an incompatible state typically crashes the core. The bridge leaves the emulator PAUSED by default after load so game time cannot drift between agent commands; pass pause=false only when you intentionally want real-time playback to resume. The pause is applied in the same callback after the load (ZERO frames run between load and pause). Returns an error if the named state doesn't exist, isn't a valid BizHawk state, or the core doesn't expose savestate.load. " +
+      "RETURNS: 'Loaded state NAME (paused/running)' plus a `State:` line (frame/paused/lag/domain) — no bizhawk_get_info needed.",
     inputSchema: {
       type: "object",
-      required: ["target", "path"],
+      required: ["target", "name"],
       properties: { ...targetProp, 
-        path:  { type: "string", description: "Absolute filesystem path to an existing .State file produced by bizhawk_save_state on this same ROM and BizHawk core version. Loading mismatched files typically crashes the core." },
+        name:  { type: "string", description: "State name as given to bizhawk_save_state." },
         pause: { type: "boolean", default: true, description: "Default true: leave the emulator PAUSED after load so state cannot drift before the next command. Set false only when you intentionally want real-time playback to resume immediately." },
       },
       additionalProperties: false,
@@ -1134,15 +1125,13 @@ const TOOLS: Tool[] = [
     name: "bizhawk_movie_play",
     description:
       "PURPOSE: Load and play a BizHawk .bk2 movie from frame 0 (power-on), using BizHawk's native movie engine. " +
-      "USAGE: Deterministic replay of TAS movies / recorded runs without the bridge shipping inputs (native playback is frame-perfect and fast). Omit `path` to restart the currently loaded movie. Check progress with bizhawk_movie_status; detach with bizhawk_movie_stop. " +
+      "USAGE: Restart the currently loaded movie from frame 0. Check progress with bizhawk_movie_status; detach with bizhawk_movie_stop. Movie file selection is a BizHawk-side setup step, not an MCP path argument. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: resets the core to power-on before playback — current game state is lost (savestate first if needed). The .bk2 must match the loaded ROM and the authoring CORE (header records it; mismatches fail to load or desync). Returns an error if movie.play_from_start is unavailable or the file fails to load. " +
       "RETURNS: 'Movie: PATH (loaded, mode: MODE, length: N)'.",
     inputSchema: {
       type: "object",
       required: ["target"],
-      properties: { ...targetProp, 
-        path: { type: "string", description: "Absolute path to a .bk2 movie file. Omit to restart the currently loaded movie from frame 0." },
-      },
+      properties: { ...targetProp },
       additionalProperties: false,
     },
   },
@@ -1211,13 +1200,12 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Start (or rotate) the bridge's per-frame trace CSV — a game-specific dump of entity/game state written after every emulated frame (as configured in the bridge script; the stock bridge_JD.lua traces NHL94 player structs, puck, RNG, and pad state). " +
       "USAGE: Rotate to a fresh file before an experiment so the CSV covers exactly that run; re-enable after bizhawk_trace_stop. The osd flag also toggles the on-screen overlay. NOTE: the trace layout is defined in the bridge script for a specific game — on other ROMs it records garbage; stop it or ignore it there. " +
-      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: opens `path` in write mode (truncates). Closes any previously open trace file first. Tracing costs a few hundred memory reads per frame. " +
+      "BEHAVIOR: DESTRUCTIVE TO TRACE FILE: opens the bridge's per-backend trace file in write mode (truncates). Closes any previously open trace file first. Tracing costs a few hundred memory reads per frame. Do not pass filesystem paths; the bridge chooses the file for this backend. " +
       "RETURNS: 'Trace started → PATH (osd: on|off)'.",
     inputSchema: {
       type: "object",
       required: ["target"],
       properties: { ...targetProp, 
-        path: { type: "string", description: "File path for the CSV. Omit to reuse the bridge's default (per-port /tmp/nhl94_trace_<port>.csv)." },
         osd:  { type: "boolean", description: "Also enable/disable the on-screen animation overlay. Omit to leave unchanged." },
       },
       additionalProperties: false,
@@ -1262,14 +1250,12 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Start the bridge's physics-sync trace — one CSV row per NHL94 `updateplayers` physics tick (NOT per video frame), each carrying the per-pass D7 step multiplier latched inside the retail Gameloop. " +
       "USAGE: The right trace when you need physics-tick resolution and the actual D7 sub-step count per tick (e.g. speed/acceleration work), which the per-frame bizhawk_trace_* dump cannot expose. Start → drive input (bizhawk_play_input_sequence) → bizhawk_phys_trace_stop. " +
-      "BEHAVIOR: RETAIL nhl94.gen ONLY — hash-guarded (MD5 8356B3F0…), so it errors on any other ROM, and errors on cores without event.on_bus_exec. Registers two bus-exec hooks in the Gameloop. While active it SUPPRESSES the per-video-frame bizhawk_trace_* writer. DESTRUCTIVE TO TARGET FILE: opens `path` in write mode (truncates). " +
+      "BEHAVIOR: RETAIL nhl94.gen ONLY — hash-guarded (MD5 8356B3F0…), so it errors on any other ROM, and errors on cores without event.on_bus_exec. Registers two bus-exec hooks in the Gameloop. While active it SUPPRESSES the per-video-frame bizhawk_trace_* writer. DESTRUCTIVE TO TRACE FILE: opens the bridge's per-backend trace file in write mode (truncates). Do not pass filesystem paths. " +
       "RETURNS: 'Physics-sync trace started → PATH (latch ADDR, emit ADDR)'.",
     inputSchema: {
       type: "object",
       required: ["target"],
-      properties: { ...targetProp, 
-        path: { type: "string", description: "File path for the CSV. Omit to reuse the bridge default /tmp/nhl94_phys_<port>.csv." },
-      },
+      properties: { ...targetProp },
       additionalProperties: false,
     },
   },
@@ -1726,12 +1712,63 @@ function recordUsage(
   }
 }
 
-function slotPath(hash: string, name: string): string {
-  if (typeof name !== "string") throw new Error("slot name must be a string");
+function joinConfiguredPath(dir: string, ...parts: string[]): string {
+  const isWin = /\\/.test(dir) || /^[A-Za-z]:/.test(dir);
+  const sep = isWin ? "\\" : "/";
+  const trimmed = dir.replace(/[\\/]+$/, "");
+  return [trimmed, ...parts].join(sep);
+}
+function namedFile(name: unknown, kind: "slot" | "screenshot" | "snapshot"): string {
+  if (typeof name !== "string") throw new Error(`${kind} name must be a string`);
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
-    throw new Error("slot name must be 1-64 chars of letters, digits, dot, underscore, hyphen");
+    throw new Error(`${kind} name must be 1-64 chars of letters, digits, dot, underscore, hyphen`);
   }
-  return path.join(stateDir(), hash, `${name}.State`);
+  return name;
+}
+function screenshotFilename(name: unknown): string {
+  const n = namedFile(name, "screenshot");
+  return n.toLowerCase().endsWith(".png") ? n : `${n}.png`;
+}
+function rejectPathArg(tool: string, arg: string): never {
+  throw new Error(
+    `${tool}.${arg}: filesystem paths are not accepted by MCP clients; ` +
+    "use target plus artifact names and let the backend resolve Windows/Linux paths.",
+  );
+}
+function slotPath(hash: string, name: string, backend?: BizhawkBackend): string {
+  namedFile(name, "slot");
+  return path.join(stateDir(backend), hash, `${name}.State`);
+}
+function slotBridgePath(hash: string, name: string, backend?: BizhawkBackend): string {
+  const bridgeDir = backend?.stateDirBridge() || process.env.MCP_BIZHAWK_STATE_DIR_BRIDGE;
+  return bridgeDir ? joinConfiguredPath(bridgeDir, hash, `${name}.State`) : slotPath(hash, name, backend);
+}
+async function namedStatePaths(target: string, bh: BizhawkServer, name: unknown): Promise<{
+  name: string;
+  local: string;
+  bridge: string;
+}> {
+  const backend = bh.getBackend(target);
+  const hash = await currentRomHash(target, bh);
+  const slot = namedFile(name, "slot");
+  return { name: slot, local: slotPath(hash, slot, backend), bridge: slotBridgePath(hash, slot, backend) };
+}
+async function existingNamedStatePaths(target: string, bh: BizhawkServer, name: unknown): Promise<{
+  name: string;
+  local: string;
+  bridge: string;
+}> {
+  const resolved = await namedStatePaths(target, bh, name);
+  if (!fs.existsSync(resolved.local)) {
+    const dir = path.dirname(resolved.local);
+    const have = fs.existsSync(dir)
+      ? fs.readdirSync(dir).filter((f) => f.endsWith(".State")).map((f) => f.slice(0, -6))
+      : [];
+    throw new Error(
+      `no slot '${resolved.name}' for this ROM. Available: ${have.length ? have.join(", ") : "(none)"}`,
+    );
+  }
+  return resolved;
 }
 async function currentRomHash(target: string, bh: BizhawkServer): Promise<string> {
   const info = await bh.call<{ rom_hash?: string }>(target, "get_info");
@@ -1747,6 +1784,7 @@ interface Rig {
   rom_md5: string;
   created_at: string;
   savestate_path: string;
+  bridge_savestate_path?: string;
   freezes: RigFreeze[];
   freeze_count: number;
   note?: string;
@@ -1761,11 +1799,18 @@ function rigName(name: unknown): string {
   }
   return name;
 }
-function rigJsonPath(hash: string, name: string): string {
-  return path.join(rigRoot(), hash, `${name}.json`);
+function rigJsonPath(hash: string, name: string, backend?: BizhawkBackend): string {
+  return path.join(rigRoot(backend), hash, `${name}.json`);
 }
-function availableRigs(hash: string): string {
-  const dir = path.join(rigRoot(), hash);
+function rigStatePath(hash: string, name: string, backend?: BizhawkBackend): string {
+  return path.join(rigRoot(backend), hash, `${name}.State`);
+}
+function rigBridgeStatePath(hash: string, name: string, backend?: BizhawkBackend): string {
+  const bridgeDir = backend?.rigDirBridge() || process.env.MCP_BIZHAWK_RIG_DIR_BRIDGE;
+  return bridgeDir ? joinConfiguredPath(bridgeDir, hash, `${name}.State`) : rigStatePath(hash, name, backend);
+}
+function availableRigs(hash: string, backend?: BizhawkBackend): string {
+  const dir = path.join(rigRoot(backend), hash);
   if (!fs.existsSync(dir)) return "No rigs saved for this ROM.";
   const names = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
   return names.length ? `Available: ${names.join(", ")}.` : "No rigs saved for this ROM.";
@@ -1897,6 +1942,11 @@ async function nhlSettle(target: string, bh: BizhawkServer): Promise<boolean> {
   }
 }
 
+function ramSnapshotFilename(name: unknown): string {
+  const n = namedFile(name, "snapshot");
+  return n.toLowerCase().endsWith(".bin") ? n : `${n}.bin`;
+}
+
 // Screenshot path handling for cross-filesystem setups. When BizHawk runs on a
 // DIFFERENT host/OS than this server (e.g. a Windows BizHawk driven by a Linux
 // daemon over a shared mount), the two spell the SAME shared directory
@@ -1912,7 +1962,7 @@ async function nhlSettle(target: string, bh: BizhawkServer): Promise<boolean> {
 export function shotPaths(name: string, backend?: BizhawkBackend): { local: string; remote: string } {
   const localDir = backend?.shotDirHost() || process.env.MCP_BIZHAWK_SHOT_DIR || os.tmpdir();
   const local = path.join(localDir, name);
-  if (process.env.MCP_BIZHAWK_SHOT_DIR) {
+  if (backend?.shotDirHost() || process.env.MCP_BIZHAWK_SHOT_DIR) {
     try { fs.mkdirSync(localDir, { recursive: true }); } catch { /* best-effort */ }
   }
   const bridgeDir = backend?.shotDirBridge() || process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE;
@@ -1923,6 +1973,30 @@ export function shotPaths(name: string, backend?: BizhawkBackend): { local: stri
   const sep = isWin ? "\\" : "/";
   const trimmed = bridgeDir.replace(/[\\/]+$/, "");
   return { local, remote: `${trimmed}${sep}${name}` };
+}
+
+function pathStartsWithFileDir(filePath: string, dir: string): boolean {
+  const f = filePath.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const d = dir.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return f === d || f.startsWith(`${d}/`);
+}
+
+function bridgePathToHost(filePath: string, backend?: BizhawkBackend): string {
+  const pairs: { host?: string; bridge?: string }[] = [
+    { host: backend?.shotDirHost() || process.env.MCP_BIZHAWK_SHOT_DIR, bridge: backend?.shotDirBridge() || process.env.MCP_BIZHAWK_SHOT_DIR_BRIDGE },
+    { host: backend?.stateDirHost() || process.env.MCP_BIZHAWK_STATE_DIR, bridge: backend?.stateDirBridge() || process.env.MCP_BIZHAWK_STATE_DIR_BRIDGE },
+    { host: backend?.rigDirHost() || process.env.MCP_BIZHAWK_RIG_DIR, bridge: backend?.rigDirBridge() || process.env.MCP_BIZHAWK_RIG_DIR_BRIDGE },
+  ];
+  for (const pair of pairs) {
+    if (!pair.host || !pair.bridge || !pathStartsWithFileDir(filePath, pair.bridge)) continue;
+    const rel = filePath.replace(/\\/g, "/").slice(pair.bridge.replace(/\\/g, "/").replace(/\/+$/, "").length).replace(/^\/+/, "");
+    return path.join(pair.host, ...rel.split("/").filter(Boolean));
+  }
+  if (/^X:[\\/]/i.test(filePath)) {
+    const rel = filePath.slice(3).replace(/[\\/]/g, "/");
+    return path.join("/mnt/8tb/jason", ...rel.split("/").filter(Boolean));
+  }
+  return filePath;
 }
 
 // The JD build is NHL94-focused: expose all nhl94_* tools plus a curated core
@@ -1957,9 +2031,15 @@ const EXPOSED_BIZHAWK = new Set([
   "bizhawk_phys_trace_status",
   "bizhawk_phys_trace_tail",
 ]);
+const DROPPED_TOOL_NAMES = new Set([
+  "bizhawk_save_slot",
+  "bizhawk_load_slot",
+  "bizhawk_list_slots",
+]);
 function exposedTools(): Tool[] {
-  if (process.env.BIZHAWK_ALL_TOOLS) return TOOLS;
-  return TOOLS.filter((t) => t.name.startsWith("nhl94_") || EXPOSED_BIZHAWK.has(t.name));
+  const available = TOOLS.filter((t) => !DROPPED_TOOL_NAMES.has(t.name));
+  if (process.env.BIZHAWK_ALL_TOOLS) return available;
+  return available.filter((t) => t.name.startsWith("nhl94_") || EXPOSED_BIZHAWK.has(t.name));
 }
 
 export function registerTools(server: Server, bh: import("./bizhawk.js").BizhawkServer): void {
@@ -2071,11 +2151,15 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
 
       case "bizhawk_ram_snapshot": {
         const target = p.target as string;
+        if (p.path !== undefined) rejectPathArg(name, "path");
         const base = (p.base as number | undefined) ?? 0;
         const size = (p.size as number | undefined) ?? 0x10000;
         const domain = (p.domain as string | undefined) ?? "68K RAM";
+        const snapshotName = p.name !== undefined
+          ? ramSnapshotFilename(p.name)
+          : `bizhawk-ram-${domain.replace(/[^a-z0-9]/gi, "_")}-${base.toString(16)}-${size.toString(16)}.bin`;
         const outPath = (p.path as string | undefined)
-          ?? path.join(os.tmpdir(), `bizhawk-ram-${domain.replace(/[^a-z0-9]/gi, "_")}-${base.toString(16)}-${size.toString(16)}.bin`);
+          ?? path.join(os.homedir(), ".mcp-bizhawk", "ram-snapshots", snapshotName);
         // Chunk into <=4096-byte read_range calls (the bridge's per-call cap) and
         // assemble server-side, so the file lands on the server host regardless of
         // which BizHawk filesystem the emulator runs on.
@@ -2085,9 +2169,10 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           const chunk = await bh.call<number[]>(target, "read_range", { address: base + off, length: len, domain });
           for (let i = 0; i < len; i++) buf[off + i] = chunk[i] & 0xff;
         }
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
         fs.writeFileSync(outPath, buf);
         const digest = crypto.createHash("sha256").update(buf).digest("hex");
-        return ok(`${outPath} (${size} bytes, ${domain} @0x${base.toString(16).toUpperCase()}) sha256=${digest}`);
+        return ok(`${snapshotName} (${size} bytes, ${domain} @0x${base.toString(16).toUpperCase()}) sha256=${digest}\n${outPath}`);
       }
 
       case "bizhawk_trap_exec": {
@@ -2146,12 +2231,18 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // `describe` is server-side only (vision runs after the bridge replies);
         // validate config up front so we don't play frames then fail.
         const target = p.target as string;
+        const backend = bh.getBackend(target);
         const visCfg = p.describe ? requireVisionConfig() : null;
         const params: Record<string, unknown> = { frames: p.frames };
-        if (p.load_state_path        !== undefined) params.load_state_path        = p.load_state_path;
+        if (p.load_state_path !== undefined) rejectPathArg(name, "load_state_path");
+        if (p.screenshot_dir !== undefined) rejectPathArg(name, "screenshot_dir");
+        if (p.load_slot             !== undefined) {
+          const slot = await existingNamedStatePaths(target, bh, p.load_slot);
+          params.load_state_path = slot.bridge;
+        }
         if (p.observe_every          !== undefined) params.observe_every          = p.observe_every;
         if (p.screenshot_every       !== undefined) params.screenshot_every       = p.screenshot_every;
-        if (p.screenshot_dir         !== undefined) params.screenshot_dir         = p.screenshot_dir;
+        if (p.screenshot_every !== undefined && backend.shotDirBridge()) params.screenshot_dir = backend.shotDirBridge();
         if (p.screenshot_prefix      !== undefined) params.screenshot_prefix      = p.screenshot_prefix;
         if (p.observe_memory         !== undefined) params.observe_memory         = p.observe_memory;
         if (p.stop_on_memory_change  !== undefined) params.stop_on_memory_change  = p.stop_on_memory_change;
@@ -2192,7 +2283,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         if (visCfg) {
           for (let i = 0; i < obs.length; i++) {
             if (obs[i].path) {
-              captions.set(i, await safeDescribe(obs[i].path as string, p.describe_prompt as string | undefined, visCfg));
+              captions.set(i, await safeDescribe(bridgePathToHost(obs[i].path as string, backend), p.describe_prompt as string | undefined, visCfg));
             }
           }
         }
@@ -2221,7 +2312,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             continue;
           }
           try {
-            const bytes = fs.readFileSync(o.path);
+            const bytes = fs.readFileSync(bridgePathToHost(o.path, backend));
             content.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
           } catch (err) {
             content.push({
@@ -2235,12 +2326,19 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
 
       case "bizhawk_run_trials": {
         const target = p.target as string;
+        const backend = bh.getBackend(target);
         const trialsVisCfg = p.describe ? requireVisionConfig() : null;
         const trials = p.trials as { frames?: { hold?: number }[] }[];
-        const params: Record<string, unknown> = { state_path: p.state_path, trials: p.trials };
+        if (p.state_path !== undefined) rejectPathArg(name, "state_path");
+        if (p.screenshot_dir !== undefined) rejectPathArg(name, "screenshot_dir");
+        if (p.state_slot === undefined) throw new Error("bizhawk_run_trials.state_slot is required");
+        const slot = await existingNamedStatePaths(target, bh, p.state_slot);
+        const statePath = slot.bridge;
+        const stateLabel = `slot '${slot.name}'`;
+        const params: Record<string, unknown> = { state_path: statePath, trials: p.trials };
         if (p.observe_memory    !== undefined) params.observe_memory    = p.observe_memory;
         if (p.screenshot        !== undefined) params.screenshot        = p.screenshot;
-        if (p.screenshot_dir    !== undefined) params.screenshot_dir    = p.screenshot_dir;
+        if (p.screenshot === true && backend.shotDirBridge()) params.screenshot_dir = backend.shotDirBridge();
         if (p.screenshot_prefix !== undefined) params.screenshot_prefix = p.screenshot_prefix;
         if (p.turbo             !== undefined) params.turbo             = p.turbo;
         // Timeout scales with every emulated frame across all trials, plus a
@@ -2265,12 +2363,12 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         if (trialsVisCfg) {
           for (let i = 0; i < rows.length; i++) {
             if (rows[i].screenshot_path) {
-              trialCaptions.set(i, await safeDescribe(rows[i].screenshot_path as string, p.describe_prompt as string | undefined, trialsVisCfg));
+              trialCaptions.set(i, await safeDescribe(bridgePathToHost(rows[i].screenshot_path as string, backend), p.describe_prompt as string | undefined, trialsVisCfg));
             }
           }
         }
 
-        const lines = [`Ran ${rows.length} trial${rows.length === 1 ? "" : "s"} from ${p.state_path}.`];
+        const lines = [`Ran ${rows.length} trial${rows.length === 1 ? "" : "s"} from ${stateLabel}.`];
         for (let i = 0; i < rows.length; i++) {
           const t = rows[i];
           const memStr = t.memory && Object.keys(t.memory).length
@@ -2291,7 +2389,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             continue;
           }
           try {
-            const bytes = fs.readFileSync(t.screenshot_path);
+            const bytes = fs.readFileSync(bridgePathToHost(t.screenshot_path, backend));
             content.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
           } catch (err) {
             content.push({ type: "text", text: `(failed to read trial '${t.name}' screenshot from ${t.screenshot_path}: ${(err as Error).message})` });
@@ -2851,16 +2949,16 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         if (typeof p.rig === "string") {
           const hash = await currentRomHash(target, bh);
           const name = rigName(p.rig);
-          const jsonPath = rigJsonPath(hash, name);
+          const jsonPath = rigJsonPath(hash, name, backend);
           if (!fs.existsSync(jsonPath)) {
-            throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash)}`);
+            throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash, backend)}`);
           }
           const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as Rig;
           if (rig.rom_md5 !== hash) {
             throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
           }
           await bh.call(target, "unfreeze", { all: true });
-          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rig.savestate_path, pause: true });
+          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
             const ops = rig.freezes.map((f) => ({
@@ -2977,7 +3075,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const hash = await currentRomHash(target, bh);
 
         if (action === "list") {
-          const root = rigRoot();
+          const root = rigRoot(backend);
           const rows: string[] = [];
           if (fs.existsSync(root)) {
             for (const hd of fs.readdirSync(root)) {
@@ -2997,17 +3095,20 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         }
 
         const name = rigName(p.name);
-        const jsonPath = rigJsonPath(hash, name);
+        const jsonPath = rigJsonPath(hash, name, backend);
 
         if (action === "save") {
           fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
-          const savestatePath = path.join(path.dirname(jsonPath), `${name}.State`);
-          await bh.call(target, "save_state", { path: savestatePath });
+          const savestatePath = rigStatePath(hash, name, backend);
+          const bridgeSavestatePath = rigBridgeStatePath(hash, name, backend);
+          await bh.call(target, "save_state", { path: bridgeSavestatePath });
           const fl = await bh.call<{ frozen?: RigFreeze[] }>(target, "list_frozen");
           const freezes = Array.isArray(fl.frozen) ? fl.frozen : [];
           const rig: Rig = {
             name, rom_md5: hash, created_at: new Date().toISOString(),
-            savestate_path: savestatePath, freezes, freeze_count: freezes.length,
+            savestate_path: savestatePath,
+            ...(bridgeSavestatePath !== savestatePath ? { bridge_savestate_path: bridgeSavestatePath } : {}),
+            freezes, freeze_count: freezes.length,
             ...(typeof p.note === "string" ? { note: p.note } : {}),
           };
           fs.writeFileSync(jsonPath, JSON.stringify(rig, null, 2));
@@ -3016,14 +3117,14 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
 
         if (action === "apply") {
           if (!fs.existsSync(jsonPath)) {
-            throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash)}`);
+            throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash, backend)}`);
           }
           const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as Rig;
           if (rig.rom_md5 !== hash) {
             throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
           }
           await bh.call(target, "unfreeze", { all: true });
-          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rig.savestate_path, pause: true });
+          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
             const ops = rig.freezes.map((f) => ({
@@ -3038,7 +3139,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
 
         // delete
         if (!fs.existsSync(jsonPath)) {
-          throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash)}`);
+          throw new Error(`no rig "${name}" for the running ROM. ${availableRigs(hash, backend)}`);
         }
         const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as Rig;
         fs.rmSync(jsonPath, { force: true });
@@ -3303,7 +3404,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
       case "bizhawk_movie_play": {
         const target = p.target as string;
         const params: Record<string, unknown> = {};
-        if (p.path !== undefined) params.path = p.path;
+        if (p.path !== undefined) rejectPathArg(name, "path");
         const r = await bh.call<{ loaded: boolean; mode?: string; filename?: string; length?: number }>(target, 
           "movie_play", params, { timeoutMs: 30000 });
         return ok(fmtMovieStatus(r));
@@ -3321,34 +3422,24 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
 
       case "bizhawk_save_slot": {
         const target = p.target as string;
-        const hash = await currentRomHash(target, bh);
-        const file = slotPath(hash, p.name as string);
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        await bh.call(target, "save_state", { path: file });
-        return ok(`Saved slot '${p.name}' → ${file}`);
+        const slot = await namedStatePaths(target, bh, p.name);
+        fs.mkdirSync(path.dirname(slot.local), { recursive: true });
+        await bh.call(target, "save_state", { path: slot.bridge });
+        return ok(`Saved slot '${slot.name}'`);
       }
       case "bizhawk_load_slot": {
         const target = p.target as string;
-        const hash = await currentRomHash(target, bh);
-        const file = slotPath(hash, p.name as string);
-        if (!fs.existsSync(file)) {
-          const dir = path.join(stateDir(), hash);
-          const have = fs.existsSync(dir)
-            ? fs.readdirSync(dir).filter((f) => f.endsWith(".State")).map((f) => f.slice(0, -6))
-            : [];
-          throw new Error(
-            `no slot '${p.name}' for this ROM. Available: ${have.length ? have.join(", ") : "(none)"}`,
-          );
-        }
-        const params: Record<string, unknown> = { path: file };
+        const slot = await existingNamedStatePaths(target, bh, p.name);
+        const params: Record<string, unknown> = { path: slot.bridge };
         params.pause = p.pause !== false;
         const r = await bh.call<{ paused?: boolean; state?: StateSummary }>(target, "load_state", params);
-        return ok(withState(`Loaded slot '${p.name}' (${r.paused ? "paused" : "running"})`, r.state));
+        return ok(withState(`Loaded slot '${slot.name}' (${r.paused ? "paused" : "running"})`, r.state));
       }
       case "bizhawk_list_slots": {
         const target = p.target as string;
+        const backend = bh.getBackend(target);
         const hash = await currentRomHash(target, bh);
-        const dir = path.join(stateDir(), hash);
+        const dir = path.join(stateDir(backend), hash);
         if (!fs.existsSync(dir)) return ok("(no slots saved for this ROM)");
         const entries = fs.readdirSync(dir).filter((f) => f.endsWith(".State")).sort()
           .map((f) => {
@@ -3361,7 +3452,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
       case "bizhawk_trace_start": {
         const target = p.target as string;
         const params: Record<string, unknown> = {};
-        if (p.path !== undefined) params.path = p.path;
+        if (p.path !== undefined) rejectPathArg(name, "path");
         if (p.osd  !== undefined) params.osd  = p.osd;
         const r = await bh.call<{ path: string; osd: boolean }>(target, "trace_start", params);
         return ok(`Trace started → ${r.path} (osd: ${r.osd ? "on" : "off"})`);
@@ -3398,7 +3489,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
       case "bizhawk_phys_trace_start": {
         const target = p.target as string;
         const params: Record<string, unknown> = {};
-        if (p.path !== undefined) params.path = p.path;
+        if (p.path !== undefined) rejectPathArg(name, "path");
         const r = await bh.call<{ path: string; latch_addr: string; emit_addr: string }>(target, 
           "phys_trace_start", params);
         return ok(`Physics-sync trace started → ${r.path} (latch ${r.latch_addr}, emit ${r.emit_addr})`);
@@ -3438,15 +3529,17 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // when vision is available. Best-effort — a missing config or a vision
         // outage degrades to image-only + a short note, never a hard error.
         const target = p.target as string;
+        const backend = bh.getBackend(target);
         const wantCaption = p.describe !== false;
         const cfg = wantCaption ? visionConfig() : null;
-        // An explicit caller path is used verbatim (no translation); an auto path
-        // uses the shared-dir mapping so read-back works when BizHawk is on a
-        // different filesystem than this server (see shotPaths).
+        if (p.path !== undefined) rejectPathArg(name, "path");
         const explicit = p.path as string | undefined;
+        const shotName = p.name !== undefined
+          ? screenshotFilename(p.name)
+          : `mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`;
         const { local: readPath, remote: sendPath } = explicit
           ? { local: explicit, remote: explicit }
-          : shotPaths(`mcp-bizhawk-shot-${process.pid}-${Date.now()}.png`);
+          : shotPaths(shotName, backend);
         const saved = await bh.call<string>(target, "screenshot", { path: sendPath });
 
         // Build the caption (best-effort) before assembling the content blocks.
@@ -3492,15 +3585,30 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
 
       case "bizhawk_save_state": {
         const target = p.target as string;
-        const r = await bh.call<{ path: string }>(target, "save_state", { path: p.path });
-        return ok(`Saved state to ${r.path}`);
+        if (p.path !== undefined) rejectPathArg(name, "path");
+        if (p.name !== undefined) {
+          const slot = await namedStatePaths(target, bh, p.name);
+          fs.mkdirSync(path.dirname(slot.local), { recursive: true });
+          await bh.call<{ path: string }>(target, "save_state", { path: slot.bridge });
+          return ok(`Saved state '${slot.name}'`);
+        }
+        throw new Error("bizhawk_save_state.name is required");
       }
       case "bizhawk_load_state": {
         const target = p.target as string;
-        const params: Record<string, unknown> = { path: p.path };
+        if (p.path !== undefined) rejectPathArg(name, "path");
+        let stateName: string | null = null;
+        const params: Record<string, unknown> = {};
+        if (p.name !== undefined) {
+          const slot = await existingNamedStatePaths(target, bh, p.name);
+          params.path = slot.bridge;
+          stateName = slot.name;
+        } else throw new Error("bizhawk_load_state.name is required");
         params.pause = p.pause !== false;
         const r = await bh.call<{ path: string; paused?: boolean; state?: StateSummary }>(target, "load_state", params);
-        const base = `Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`;
+        const base = stateName
+          ? `Loaded state '${stateName}' (${r.paused ? "paused" : "running"})`
+          : `Loaded state from ${r.path} (${r.paused ? "paused" : "running"})`;
         const st = fmtState(r.state);
         return ok(st ? `${base}\nState: ${st}` : base);
       }
