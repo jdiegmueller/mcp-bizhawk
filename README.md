@@ -127,12 +127,12 @@ Then run:
 
 ```bash
 MCP_BIZHAWK_CONFIG=/path/to/backends.json npm run daemon
-# [mcp-bizhawk] v2026.7.39-jd starting multiplexer with 2 backend(s)
+# [mcp-bizhawk] v2026.7.41-jd starting multiplexer with 2 backend(s)
 #               windows: 0.0.0.0:8766
 #               linux1: 127.0.0.1:8764
-# [mcp-bizhawk v2026.7.39-jd] backend "windows" listening on 0.0.0.0:8766
-# [mcp-bizhawk v2026.7.39-jd] backend "linux1" listening on 127.0.0.1:8764
-# [mcp-bizhawk] MCP server v2026.7.39-jd ready — streamable-HTTP at http://127.0.0.1:8765/mcp
+# [mcp-bizhawk v2026.7.41-jd] backend "windows" listening on 0.0.0.0:8766
+# [mcp-bizhawk v2026.7.41-jd] backend "linux1" listening on 127.0.0.1:8764
+# [mcp-bizhawk] MCP server v2026.7.41-jd ready — streamable-HTTP at http://127.0.0.1:8765/mcp
 ```
 
 For always-on operation, install the systemd **user** unit in

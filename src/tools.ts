@@ -653,8 +653,8 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Capture a PNG screenshot of the current emulator display and return it INLINE as an image content block (also saved to disk). " +
       "USAGE: The primary 'look at the screen' tool — call it whenever you need visual confirmation of game state. To capture a specific state, pause / advance frames / load a named state first. Omit `name` for an auto-generated screenshot file, or pass a short name if you need to refer to this capture later. For screenshots DURING an input sequence use bizhawk_play_input_sequence's screenshot_every instead. Do not pass filesystem paths; the selected backend resolves where the PNG is written and read back. " +
-      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the named screenshot file if it exists. The image is read back from disk and inlined; if the file can't be read the tool still succeeds and returns the backend path with a note instead of the image. When BizHawk runs on a DIFFERENT filesystem than this server (e.g. a Windows BizHawk driven by a Linux daemon over a shared mount), the backend's path config maps the server-visible directory to the bridge-visible directory. Returns an error if the target directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info first. " +
-      "RETURNS: A text block 'Screenshot saved: PATH', an inline PNG image content block, and (unless describe:false) a vision-model caption of the screen.",
+      "BEHAVIOR: DESTRUCTIVE TO TARGET FILE: overwrites the named screenshot file if it exists. The image is read back from disk and inlined; if the file can't be read the tool still succeeds and returns the screenshot name with a note instead of the image. When BizHawk runs on a DIFFERENT filesystem than this server (e.g. a Windows BizHawk driven by a Linux daemon over a shared mount), the backend's path config maps the server-visible directory to the bridge-visible directory. Returns an error if the target directory doesn't exist or the core doesn't expose client.screenshot — check `capabilities.screenshot` in bizhawk_get_info first. " +
+      "RETURNS: A text block 'Screenshot captured: NAME', an inline PNG image content block, and (unless describe:false) a vision-model caption of the screen. Filesystem paths are intentionally not exposed to MCP clients.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1735,6 +1735,12 @@ function rejectPathArg(tool: string, arg: string): never {
     "use target plus artifact names and let the backend resolve Windows/Linux paths.",
   );
 }
+function pathlessFileReadError(err: unknown): string {
+  const code = typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code?: unknown }).code)
+    : "";
+  return code ? `${code}: file is not readable from the MCP server` : "file is not readable from the MCP server";
+}
 function slotPath(hash: string, name: string, backend?: BizhawkBackend): string {
   namedFile(name, "slot");
   return path.join(stateDir(backend), hash, `${name}.State`);
@@ -2317,7 +2323,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           } catch (err) {
             content.push({
               type: "text",
-              text: `(failed to read observation at frame ${o.frame_offset} from ${o.path}: ${(err as Error).message})`,
+              text: `(failed to read observation image at frame ${o.frame_offset}: ${pathlessFileReadError(err)})`,
             });
           }
         }
@@ -2392,7 +2398,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             const bytes = fs.readFileSync(bridgePathToHost(t.screenshot_path, backend));
             content.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
           } catch (err) {
-            content.push({ type: "text", text: `(failed to read trial '${t.name}' screenshot from ${t.screenshot_path}: ${(err as Error).message})` });
+            content.push({ type: "text", text: `(failed to read trial '${t.name}' screenshot: ${pathlessFileReadError(err)})` });
           }
         }
         return { content };
@@ -2958,7 +2964,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
           }
           await bh.call(target, "unfreeze", { all: true });
-          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
+          await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
             const ops = rig.freezes.map((f) => ({
@@ -2968,7 +2974,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops });
             frozenCount = r.frozen_count;
           }
-          lines.push(`Applied rig "${name}": loaded ${ld.path} (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
+          lines.push(`Applied rig "${name}": loaded named state (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
         }
 
         if (p.park && typeof p.park === "object") {
@@ -3124,7 +3130,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             throw new Error(`rig "${name}" is for ROM ${rig.rom_md5}, but ${hash} is running — not applied`);
           }
           await bh.call(target, "unfreeze", { all: true });
-          const ld = await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
+          await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
             const ops = rig.freezes.map((f) => ({
@@ -3134,7 +3140,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops });
             frozenCount = r.frozen_count;
           }
-          return ok(`Applied rig "${name}": loaded ${ld.path} (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
+          return ok(`Applied rig "${name}": loaded named state (paused), re-applied ${rig.freezes.length} freeze(s). ${frozenCount} address(es) frozen.`);
         }
 
         // delete
@@ -3540,7 +3546,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const { local: readPath, remote: sendPath } = explicit
           ? { local: explicit, remote: explicit }
           : shotPaths(shotName, backend);
-        const saved = await bh.call<string>(target, "screenshot", { path: sendPath });
+        await bh.call<string>(target, "screenshot", { path: sendPath });
 
         // Build the caption (best-effort) before assembling the content blocks.
         let caption: string | null = null;
@@ -3563,14 +3569,14 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         } catch (err) {
           // Can't inline the image (e.g. BizHawk on a different filesystem with no
           // shared-dir mapping) — still return the caption if we have one.
-          const note = `Screenshot saved: ${saved} (could not inline image: ${(err as Error).message}; for a cross-host BizHawk set MCP_BIZHAWK_SHOT_DIR + MCP_BIZHAWK_SHOT_DIR_BRIDGE)`;
+          const note = `Screenshot captured: ${shotName} (could not inline image: ${pathlessFileReadError(err)})`;
           return ok(caption ? `${note}\n\n${caption}` : note);
         }
         const content: (
           | { type: "text"; text: string }
           | { type: "image"; data: string; mimeType: string }
         )[] = [
-          { type: "text", text: `Screenshot saved: ${saved}` },
+          { type: "text", text: `Screenshot captured: ${shotName}` },
           { type: "image", data: bytes.toString("base64"), mimeType: "image/png" },
         ];
         if (caption) content.push({ type: "text", text: caption });

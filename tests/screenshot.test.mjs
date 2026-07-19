@@ -21,7 +21,10 @@ test("bizhawk_screenshot inlines the PNG as an image content block", async () =>
   try {
     // describe:false isolates the image-inlining behavior from the (default-on) vision caption.
     const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { target: h.target, name: "inline", describe: false } });
-    assert.match(textOf(res), /Screenshot saved: /);
+    const text = textOf(res);
+    assert.match(text, /Screenshot captured: inline\.png/);
+    assert.doesNotMatch(text, /X:\\|\/mnt\/8tb\/jason/);
+    assert.ok(!text.includes(shotDir), `leaked host screenshot dir in ${text}`);
     const img = res.content.find((c) => c.type === "image");
     assert.ok(img, "expected an inline image content block");
     assert.equal(img.mimeType, "image/png");
@@ -38,10 +41,10 @@ test("bizhawk_screenshot works with no path (defaults to a temp file)", async ()
     const res = await h.client.callTool({ name: "bizhawk_screenshot", arguments: { target: h.target, describe: false } });
     const img = res.content.find((c) => c.type === "image");
     assert.ok(img, "expected an inline image content block");
-    const m = textOf(res).match(/Screenshot saved: (\S+)/);
-    assert.ok(m, "expected the saved path in the text block");
-    assert.ok(m[1].includes("mcp-bizhawk-shot-"), `unexpected default path ${m[1]}`);
-    fs.rmSync(m[1], { force: true });
+    const m = textOf(res).match(/Screenshot captured: (mcp-bizhawk-shot-\d+-\d+\.png)/);
+    assert.ok(m, "expected the generated screenshot name in the text block");
+    assert.doesNotMatch(textOf(res), /X:\\|\/mnt\/8tb\/jason|\/tmp\//);
+    fs.rmSync(path.join(os.tmpdir(), m[1]), { force: true });
   } finally {
     await h.close();
   }
@@ -58,7 +61,9 @@ test("bizhawk_screenshot degrades to text-only when the file is unreadable", asy
       arguments: { target: h.target, name: "missing", describe: false },
     });
     assert.equal(res.isError ?? false, false);
+    assert.match(textOf(res), /Screenshot captured: missing\.png/);
     assert.match(textOf(res), /could not inline image/);
+    assert.doesNotMatch(textOf(res), /X:\\|\/mnt\/8tb\/jason|mcp-shot-missing-/);
     assert.equal(res.content.find((c) => c.type === "image"), undefined);
   } finally {
     await h.close();
@@ -86,7 +91,8 @@ test("bizhawk_screenshot resolves name through backend shot path config", async 
       name: "bizhawk_screenshot",
       arguments: { target: h.target, name: "named-shot", describe: false },
     });
-    assert.match(textOf(res), /Screenshot saved: X:\\tmp\\named-shot\.png/);
+    assert.match(textOf(res), /Screenshot captured: named-shot\.png/);
+    assert.doesNotMatch(textOf(res), /X:\\|\/mnt\/8tb\/jason/);
     const img = res.content.find((c) => c.type === "image");
     assert.ok(img, "expected an inline image content block");
     assert.equal(img.data, PNG_B64);

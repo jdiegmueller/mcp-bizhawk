@@ -1,5 +1,11 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.39-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.41-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.41-jd changes: server-side MCP responses now keep backend filesystem
+--   paths private for normal named-artifact flows (screenshots, rig apply, and
+--   screenshot read-failure notes). MCP clients see target + artifact names; the
+--   server still translates to bridge-visible Windows/Linux paths internally.
+--   Protocol stays 3.
 --
 -- v2026.7.40-jd changes: first public multiplex/name-based client contract.
 --   MCP clients choose backend instances with target and use artifact names
@@ -649,7 +655,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.40-jd",
+    version    = "2026.7.41-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

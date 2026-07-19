@@ -117,8 +117,10 @@ test("nhl94_rig save/apply sends bridge-side state path while metadata stays ser
     const rig = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
     assert.equal(rig.savestate_path, statePath);
 
-    await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "apply", name: "faceoff" } });
+    const apply = await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "apply", name: "faceoff" } });
     assert.equal(calls[1].path, "X:\\.mcp-bizhawk\\rigs\\ABC123\\faceoff.State");
+    assert.match(textOf(apply), /Applied rig "faceoff"/);
+    assert.doesNotMatch(textOf(apply), /X:\\|\/mnt\/8tb\/jason/);
   } finally {
     await h.close();
     fs.rmSync(rigDir, { recursive: true, force: true });
