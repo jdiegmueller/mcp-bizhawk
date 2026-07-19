@@ -12,6 +12,8 @@ players, or restage rigs without guessing.
 
 Use verified retail offsets from `docs/rom-reference/RETAIL_OFFSETS.md`:
 
+- Player structs: slots `s0..s5` are home/team0 and `s6..s11` are
+  away/team1. Use this only as the expected slot/team range for sanity flags.
 - Active controlled slot: team0/home `0xFFC320`, team1/away `0xFFC322`, `u16_be`.
   Values `0..11` are absolute skater slots; `0xFFFF` means that team has no human
   pad driving a skater.
@@ -20,9 +22,13 @@ Use verified retail offsets from `docs/rom-reference/RETAIL_OFFSETS.md`:
   raw context and should be reported with a caveat.
 - Switch debounce: home `0xFFBF06`, away `0xFFBF07`, `u8`.
 - Decoded controller RAM: `0xFFBEEE`, `0xFFBEF0`, `0xFFBEF2`, `0xFFBEF4`,
-  `u16_be`. The offsets doc only fully verifies B as bit `0x10`, so decoding
-  must be conservative: report raw words always, decode B, and decode any other
-  bits only if the implementation has a named mapping with a local comment.
+  `u16_be`. The offsets doc only says these are held-vs-edge variants; it does
+  not verify which word is held vs edge or which pair belongs to P1 vs P2. The
+  first implementation must therefore label them as indexed raw words
+  `pad_word_0..3` by address. The offsets doc only fully verifies B as bit
+  `0x10`, so decoding must be conservative: report raw words always, decode B,
+  and decode any other bits only if the implementation has a named mapping with
+  a local comment.
 - Existing line selection remains home `0xFFC6E5`, away `0xFFCA48`, `u8`.
 
 ## User-Facing Output
@@ -32,12 +38,12 @@ lines:
 
 ```text
 control:
-  team0/home: human active=s4 switch_debounce=0 line=Sc1 raw_active=0x0004
-  team1/away: CPU active=none switch_debounce=0 line=Chk raw_active=0xFFFF
-  mode: 1P-CPU inferred from active control slots
-  input_route: player1 likely controls team0/home -> s4; player2 likely inactive/CPU
-  pad: p1_held=0x0010(B) p1_edge=0x0000 p2_held=0x0000 p2_edge=0x0000
-  caveat: c1playernum=0x0000 c2playernum=0xFFFF are reported raw; they are not active skater indices
+  home(team0): human active=s4 switch_debounce=0(ready) line=Sc1 raw_active=0x0004
+  away(team1): CPU active=none switch_debounce=12(gated 12f) line=Chk raw_active=0xFFFF
+  mode: 1P-CPU inferred from active control slots; coop_unverified=true
+  input_route: player1 likely controls home/team0 -> s4; player2 inactive/CPU; route_verified=true
+  pad_words: word0@0xFFBEEE=0x0010(B) word1@0xFFBEF0=0x0000 word2@0xFFBEF2=0x0000 word3@0xFFBEF4=0x0000
+  caveat: c1playernum=0x0000 c2playernum=0x0000 are reported raw only; they are not active skater indices and are not used for mode/input_route inference
 ```
 
 The exact labels can be compact, but the block must always include:
@@ -45,13 +51,12 @@ The exact labels can be compact, but the block must always include:
 - team0/home active control status
 - team1/away active control status
 - inferred mode
-- controller-to-team route guidance
+- controller-to-team route guidance plus `route_verified=true|false`
 - pad raw words with conservative decoded button names
 - raw `c1playernum` / `c2playernum` caveat
 
-When `raw:true`, include raw hex for all control fields. In non-raw mode, include
-raw hex for active slots, pad words, and `c1/c2` anyway because these fields are
-new and still partly empirical.
+Always include raw hex for active slots, pad words, and `c1/c2` in this block.
+`raw:true` does not add additional control-context fields in the first pass.
 
 ## Mode Inference
 
@@ -62,13 +67,31 @@ Infer from active controlled slot words:
 - team0 `0xFFFF` and team1 active: `CPU-1P`
 - both teams active: `1P-2P`
 - any active word outside `0..11` and not `0xFFFF`: `unknown`
+- `2P-CPU` / same-team co-op cannot be disambiguated from the active-slot words
+  alone in the first implementation. Do not emit `2P-CPU` until manual capture
+  proves how two human pads on one team appear in RAM; include
+  `coop_unverified=true` on one-human-team snapshots (`1P-CPU` / `CPU-1P`) so
+  agents know that co-op mode has not been ruled out by RAM alone.
 
 Also validate team/slot consistency:
 
 - team0/home should normally be slots `s0..s5`
 - team1/away should normally be slots `s6..s11`
 - if the pointer is a valid slot but on the other team's side, print
-  `active_valid=false` with the observed slot.
+  `slot_team_unexpected=true` with the observed slot. Do not call the pointer
+  invalid; the slot value itself is valid, but it disagrees with the documented
+  normal home/away slot partition.
+
+## Input Route Derivation
+
+`input_route` must be paired with a machine-readable `route_verified` boolean.
+
+- `route_verified=true` only when the route matches a verified source fact or a
+  later manual-capture artifact.
+- `route_verified=false` when the route is inferred from active slots but
+  controller-port-to-team binding is not yet verified for that mode.
+- `c1playernum` and `c2playernum` are never inputs to mode or route inference in
+  this pass; they are reported raw only.
 
 ## Manual Capture Plan
 
@@ -98,7 +121,8 @@ For each capture, record:
 Useful artifacts are named savestates/rigs plus one `nhl94_state raw:true`
 snapshot per mode. Once captured, update the source facts and tests so
 `input_route` can distinguish verified controller-port binding from fallback
-inference.
+inference. Manual capture should also verify the held/edge and P1/P2 ordering of
+`0xFFBEEE/BEF0/BEF2/BEF4` before those words are renamed from `pad_word_N`.
 
 ## Data Flow
 
@@ -108,11 +132,13 @@ formatters:
 - `active_control_home`, `active_control_away`
 - `c1playernum`, `c2playernum`
 - `switch_debounce_home`, `switch_debounce_away`
-- `pad_p1_held`, `pad_p1_edge`, `pad_p2_held`, `pad_p2_edge`
+- `pad_word_0`, `pad_word_1`, `pad_word_2`, `pad_word_3`
 
 Extend the `nhl94_state` global `read_many` list in `src/tools.ts` to read those
 fields in the same globals round-trip. Format the new block from those values
-without adding bridge commands or changing Lua protocol.
+without adding bridge commands or changing Lua protocol. Prefer a read-only
+control-offset table over adding these fields to the generic `G` map if adding
+them would make `nhl94_fields` expose semantic writes to control state.
 
 ## Pad Decoding
 
@@ -131,17 +157,32 @@ Add focused tests in `tests/nhl94_tools.test.mjs`:
 - `nhl94_state` reports `1P-CPU`, routes player1 to team0/home, and names active
   slot `s4` when `0xFFC320=4` and `0xFFC322=0xFFFF`.
 - `nhl94_state` reports `CPU-CPU` when both active words are `0xFFFF`.
+- `nhl94_state` reports `CPU-1P` when team0 is `0xFFFF` and team1 points to a
+  valid away slot.
 - `nhl94_state` reports `1P-2P` when both active words point to valid team slots.
-- `nhl94_state` marks `active_valid=false` when a control pointer points to the
-  other team's slot range.
+- `nhl94_state` reports `unknown` when an active word is outside `0..11` and not
+  `0xFFFF`.
+- `nhl94_state` marks `slot_team_unexpected=true` when a control pointer points
+  to the other team's slot range.
+- `input_route` and `route_verified` are asserted for the `1P-CPU` case.
+- The `c1playernum` / `c2playernum` caveat line is present and not used as proof
+  of CPU or human control.
+- Nonzero switch debounce renders as gated, e.g. `switch_debounce=12(gated 12f)`.
 - Pad output includes raw hex and decodes B from bit `0x10`.
 - Tests assert the `read_many` request uses the verified addresses and widths.
+- Tests assert the new control reads are included in the same existing
+  `nhl94_state` globals `read_many` round-trip, not a new bridge call.
 
 ## Non-Goals
 
 - Do not reverse-engineer the unresolved meaning of `c1playernum`,
   `c2playernum`, or `$D05A/$D05C` in this pass.
 - Do not mutate game control state.
+- Do not extend the OSD overlay in this pass.
 - Do not change `bizhawk_play_input_sequence` semantics.
+- Do not bump `PROTOCOL_VERSION` / `BRIDGE.protocol`; this is a server-side tool
+  surface and formatting change. Implementation release work still bumps
+  `src/version.ts`, `package.json`, and `lua/bridge_JD.lua` `BRIDGE.version` +
+  changelog together per `CLAUDE.md`.
 - Do not claim a full button mapping unless every bit is verified or already
   documented elsewhere in this repo.
