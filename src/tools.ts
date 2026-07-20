@@ -1384,9 +1384,9 @@ const TOOLS: Tool[] = [
     name: "nhl94_teleport",
     description:
       "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions AND/OR set their x/y/z velocity — place a target, launch a moving one (e.g. fire the puck at the net with a chosen xv/yv/zv, or feed a one-timer), or both in one atomic write. " +
-      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts positions to 16.16 fixed-point, writes big-endian to the M68K BUS, and zeroes the sub-pixel fraction, so you never touch endianness/width/base arithmetic yourself. Velocity axes (xv/yv/zv) are RAW signed 16-bit words written as-is (no fixed-point scaling) — set them to give a target motion the game's physics then acts on; this is the tool for an inbound/loose puck with a specific vector (nhl94_freeze/park only ZERO velocity, they can't set one). For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. " +
-      "BEHAVIOR: DESTRUCTIVE: overwrites x/y/z (no undo — snapshot with nhl94_rig/save_state if needed). All writes land atomically in one frame. Teleport is PLACEMENT, not a state reset — latched per-skater flags survive it. FOOTGUN handled for you: teleporting pk while a skater carries it is futile (carry logic snaps it back next frame), so a pk teleport AUTO-DETACHES the puck (writes 'nobody' to the carrier word first) — the result is a loose puck at the given spot. To move a carried puck with its carrier, teleport the skater instead. Errors if a target is unknown, an entry sets no axis, or a coordinate is outside -32768..32767. After the write the tool steps a few frames (best-effort) so BizHawk re-renders the new positions — otherwise a paused emulator keeps showing the pre-move frame and a following screenshot/describe is stale. " +
-      "RETURNS: One line per target naming the decoded coordinates written (and whether the puck was detached), plus a note when the render-settle frames ran.",
+      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts positions to 16.16 fixed-point, writes big-endian to the M68K BUS, and zeroes the sub-pixel fraction, so you never touch endianness/width/base arithmetic yourself. Velocity axes (xv/yv/zv) are RAW signed 16-bit words written as-is (no fixed-point scaling) — set them to give a target motion the game's physics then acts on; this is the tool for an inbound/loose puck with a specific vector (nhl94_freeze/park only ZERO velocity, they can't set one). For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. If the next step is a screenshot/vision read and you need the render pass to catch up, request settle_frames explicitly; otherwise leave it omitted/0 for precise RAM staging. " +
+      "BEHAVIOR: DESTRUCTIVE: overwrites x/y/z (no undo — snapshot with nhl94_rig/save_state if needed). All writes land atomically in one frame. Teleport is PLACEMENT, not a state reset — latched per-skater flags survive it. FOOTGUN handled for you: teleporting pk while a skater carries it is futile (carry logic snaps it back next frame), so a pk teleport AUTO-DETACHES the puck (writes 'nobody' to the carrier word first) — the result is a loose puck at the given spot. To move a carried puck with its carrier, teleport the skater instead. Errors if a target is unknown, an entry sets no axis, or a coordinate is outside -32768..32767. It does not advance frames unless settle_frames > 0 is requested. " +
+      "RETURNS: One line per target naming the decoded coordinates written (and whether the puck was detached), plus a note when requested render-settle frames ran.",
     inputSchema: {
       type: "object",
       required: ["target", "targets"],
@@ -1410,6 +1410,7 @@ const TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
+        settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0, description: "Optional post-write frame advance so rendered sprites catch up before a screenshot/describe. Default 0: no frame advance." },
       },
       additionalProperties: false,
     },
@@ -1526,8 +1527,8 @@ const TOOLS: Tool[] = [
     name: "nhl94_fields",
     description:
       "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
-      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, read global.clock plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
-      "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. " +
+      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, read global.clock plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
+      "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words; fdir accepts either a raw integer or one of north/northeast/east/southeast/south/southwest/west/northwest. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. This tool does not advance frames. " +
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
       type: "object",
@@ -1545,7 +1546,7 @@ const TOOLS: Tool[] = [
               offset: { type: "string", description: "Raw entity-relative offset such as '0x71'. Requires allow_raw:true." },
               address: { type: "string", description: "Raw absolute M68K bus address such as '0xFFC304'. Requires target:'global' and allow_raw:true." },
               width: { type: "string", enum: WIDTH_ENUM, description: "Width for raw offsets/addresses. Defaults to u8 for raw entity offsets." },
-              value: { description: "Value for write/freeze. Named fields accept decoded values; raw fields use raw integer values. For op:'freeze', omit value to freeze the current RAM value." },
+              value: { description: "Value for write/freeze. Named fields accept decoded values; fdir accepts raw integers or compass strings: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Raw fields use raw integer values. For op:'freeze', omit value to freeze the current RAM value." },
               freeze: { type: "boolean", description: "For op:'write', freeze this field at the written value instead of a one-time write." },
               allow_raw: { type: "boolean", description: "Required for raw offset/address operations." },
             },
@@ -1563,7 +1564,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Stage a compact NHL94 experiment setup in one high-level call: clear freezes, apply a rig, park skaters, place targets, set possession, write/freeze selected fields, and optionally settle frames. " +
       "USAGE: Use when setting up RE experiments where ordering matters. Prefer this over a chatty sequence of unfreeze/rig/park/teleport/possession/field calls. `clear_freezes` runs before `rig` so a rig's saved freeze table is not destroyed. Do not combine puck placement with skater possession; possession snaps the puck to the carrier. After staging, call nhl94_state to verify RAM/vision stimulus before interpreting traps. " +
-      "BEHAVIOR: DESTRUCTIVE: mutates live emulator RAM/state. Operations run in deterministic order: clear freezes, rig, park, place, possession, fields, settle. Default settle_frames is 0 for RE precision. clear_freezes clears only bridge freezes; it does not stop bizhawk_trap_exec hooks. " +
+      "BEHAVIOR: DESTRUCTIVE: mutates live emulator RAM/state. Operations run in deterministic order: clear freezes, rig, park, place, possession, fields, settle. Default settle_frames is 0 for RE precision, so staging does not advance frames unless requested. clear_freezes clears only bridge freezes; it does not stop bizhawk_trap_exec hooks. " +
       "RETURNS: A concise ordered summary of what was staged.",
     inputSchema: {
       type: "object",
@@ -1586,15 +1587,21 @@ const TOOLS: Tool[] = [
               target: { type: "string" },
               x: { type: "integer" }, y: { type: "integer" }, z: { type: "integer" },
               xv: { type: "integer" }, yv: { type: "integer" }, zv: { type: "integer" },
-              fdir: { type: "integer" },
+              fdir: {
+                description: "Facing direction as raw integer or compass string: north, northeast, east, southeast, south, southwest, west, northwest.",
+                oneOf: [
+                  { type: "integer" },
+                  { type: "string", enum: [...nhl94.FDIR_DIRECTIONS] },
+                ],
+              },
             },
             required: ["target"],
             additionalProperties: false,
           },
         },
         possession: { type: "string", description: "'s0'..'s11' or 'none'." },
-        fields: { type: "array", items: { type: "object" }, description: "nhl94_fields-style write/freeze ops without the op property; op defaults to write." },
-        settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0 },
+        fields: { type: "array", items: { type: "object" }, description: "nhl94_fields-style write/freeze ops without the op property; op defaults to write. Use this for fdir compass strings such as value:'south'." },
+        settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0, description: "Optional final frame advance after staging. Default 0: no frame advance." },
       },
       additionalProperties: false,
     },
@@ -1603,9 +1610,9 @@ const TOOLS: Tool[] = [
     name: "nhl94_park",
     description:
       "PURPOSE: Get every skater except the one(s) under study off the ice and pinned, in one call — the standard 'clear the rink' experiment rig. " +
-      "USAGE: Pass `keep` with the skaters to leave alone; all other skaters (s0-s11) are teleported far off-ice (fixed y=32000) and frozen there (position + zeroed velocity). The puck is never touched. Release with nhl94_unfreeze on the parked targets, or apply a clean nhl94_rig. Unlike nhl94_freeze (which pins at CURRENT position, incl. z), park commands off-ice positions and leaves z alone. " +
-      "BEHAVIOR: DESTRUCTIVE: freezes x/y and zeroes+freezes xv/yv/zv for each parked skater every frame until released (5 freezes each). One atomic memory_ops round-trip. Positions are commanded (no read needed) — parked skaters are spread evenly across x=-32000..+32000 by count (1 parked → x=0; 2 → ±32000; N → endpoints ±32000, spacing 64000/(N-1)) so they never overlap. Errors if every skater is in `keep` (nothing to park). After freezing, the tool steps a few frames (best-effort) so BizHawk re-renders the parked positions for a following screenshot. " +
-      "RETURNS: A summary (count, y latitude, X range, kept list) plus the per-skater X assignments, and a note when the render-settle frames ran.",
+      "USAGE: Pass `keep` with the skaters to leave alone; all other skaters (s0-s11) are teleported far off-ice (fixed y=32000) and frozen there (position + zeroed velocity). The puck is never touched. Release with nhl94_unfreeze on the parked targets, or apply a clean nhl94_rig. Unlike nhl94_freeze (which pins at CURRENT position, incl. z), park commands off-ice positions and leaves z alone. If the next step is a screenshot/vision read and you need the render pass to catch up, request settle_frames explicitly; otherwise leave it omitted/0 for precise RAM staging. " +
+      "BEHAVIOR: DESTRUCTIVE: freezes x/y and zeroes+freezes xv/yv/zv for each parked skater every frame until released (5 freezes each). One atomic memory_ops round-trip. Positions are commanded (no read needed) — parked skaters are spread evenly across x=-32000..+32000 by count (1 parked → x=0; 2 → ±32000; N → endpoints ±32000, spacing 64000/(N-1)) so they never overlap. Errors if every skater is in `keep` (nothing to park). It does not advance frames unless settle_frames > 0 is requested. " +
+      "RETURNS: A summary (count, y latitude, X range, kept list) plus the per-skater X assignments, and a note when requested render-settle frames ran.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1615,6 +1622,7 @@ const TOOLS: Tool[] = [
           items: { type: "string", description: "Skater id 's0'..'s11' to leave alone." },
           description: "Skaters to leave in place (default none — parks all 12).",
         },
+        settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0, description: "Optional post-write frame advance so rendered sprites catch up before a screenshot/describe. Default 0: no frame advance." },
       },
       additionalProperties: false,
     },
@@ -1641,14 +1649,15 @@ const TOOLS: Tool[] = [
     name: "nhl94_possession",
     description:
       "PURPOSE: Give the puck to a skater (or make it loose) without fighting the game's carry logic. " +
-      "USAGE: `target:'sN'` assigns that slot as carrier and teleports the puck onto the skater in one batch. `target:'none'` writes 'nobody' for a loose puck. `hold:true` additionally freezes the carrier word so possession cannot change (EMPIRICAL — verify live). Every call first releases any prior carrier hold. Side benefit: the camera follows the puck/carrier, so `target:'sN'` also eases the camera onto sN. " +
-      "BEHAVIOR: DESTRUCTIVE: moves the puck and/or writes the carrier word (one atomic memory_ops). For `target:'sN'` reads sN's x/y first (one extra round-trip). Errors if target is not 's0'..'s11' or 'none'. " +
-      "RETURNS: What was done — puck recipient and destination, whether the carrier is held, and a note when the post-write render-settle frames ran (a few frames stepped best-effort so a following screenshot shows the puck's new position, not the pre-write frame).",
+      "USAGE: `target:'sN'` assigns that slot as carrier and teleports the puck onto the skater in one batch. `target:'none'` writes 'nobody' for a loose puck. `hold:true` additionally freezes the carrier word so possession cannot change (EMPIRICAL — verify live). Every call first releases any prior carrier hold. Side benefit: the camera follows the puck/carrier, so `target:'sN'` also eases the camera onto sN. If the next step is a screenshot/vision read and you need the render pass to catch up, request settle_frames explicitly; otherwise leave it omitted/0 for precise RAM staging. " +
+      "BEHAVIOR: DESTRUCTIVE: moves the puck and/or writes the carrier word (one atomic memory_ops). For `target:'sN'` reads sN's x/y first (one extra round-trip). Errors if target is not 's0'..'s11' or 'none'. It does not advance frames unless settle_frames > 0 is requested. " +
+      "RETURNS: What was done — puck recipient and destination, whether the carrier is held, and a note when requested render-settle frames ran.",
     inputSchema: {
       type: "object",
       properties: { ...targetProp,
         entity: { type: "string", description: "'s0'..'s11' to give the puck to that skater, or 'none' for a loose puck." },
         hold: { type: "boolean", default: false, description: "Also freeze the carrier word so possession can't change (empirical — verify it holds)." },
+        settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0, description: "Optional post-write frame advance so rendered sprites catch up before a screenshot/describe. Default 0: no frame advance." },
       },
       required: ["target", "entity"],
       additionalProperties: false,
@@ -2032,6 +2041,15 @@ interface Rig {
   freeze_count: number;
   note?: string;
 }
+function rigFreezeOp(f: RigFreeze): nhl94.MemOp & { domain?: string } {
+  return {
+    op: "freeze" as const,
+    address: f.address,
+    value: f.value,
+    width: memoryOpsWriteWidth(f.width),
+    ...(f.domain ? { domain: f.domain } : {}),
+  };
+}
 function rigRoot(backend?: BizhawkBackend): string {
   return backend?.rigDirHost() || process.env.MCP_BIZHAWK_RIG_DIR || path.join(os.homedir(), ".mcp-bizhawk", "rigs");
 }
@@ -2148,6 +2166,9 @@ function encodeNhlValue(ref: NhlFieldRef, value: unknown): number {
   if (ref.global && (ref.field === "home_line" || ref.field === "away_line")) {
     return lineValue(value);
   }
+  if (!ref.global && ref.field === "fdir") {
+    return nhl94.fdirValue(value) & 0xffff;
+  }
   if (typeof value !== "number" || !Number.isInteger(value)) {
     throw new Error(`${ref.label} value must be an integer`);
   }
@@ -2157,28 +2178,31 @@ function encodeNhlValue(ref: NhlFieldRef, value: unknown): number {
   return value & 0xff;
 }
 
+function memoryOpsWriteWidth(width: string): string {
+  if (width === "s8") return "u8";
+  if (width === "s16") return "u16";
+  if (width === "s16_be") return "u16_be";
+  if (width === "s32") return "u32";
+  if (width === "s32_be") return "u32_be";
+  return width;
+}
+
 function decodeNhlValue(ref: NhlFieldRef, raw: number): string {
   if (ref.fixed) return String(nhl94.fromFixed(raw >>> 0).whole);
+  if (!ref.global && ref.field === "fdir") return nhl94.fdirLabel(raw);
   if (ref.global && (ref.field === "clock" || ref.field === "gameclock")) return `${nhl94.formatClock(raw)} (${raw}s)`;
   if (ref.global && (ref.field === "home_line" || ref.field === "away_line")) return `${nhl94.lineLabel(raw)} (${raw})`;
   if (ref.global && ref.field === "carrier") return raw >= 0 && raw <= 11 ? `s${raw}` : `none (0x${(raw >>> 0).toString(16).toUpperCase()})`;
   return String(raw);
 }
 
-// Frames to step after a sprite-moving write so BizHawk re-renders the new
-// positions. A write to the position/carrier words only updates RAM — the
-// on-screen sprite is repainted by the game's render pass, which runs on frame
-// step. Without this, a PAUSED emulator keeps showing the pre-write frame and a
-// following bizhawk_screenshot/nhl94_state describe is misleading. Frozen
-// addresses (from park) are re-asserted by the bridge each stepped frame, so
-// the sprites render at the parked spot and stay put.
-const NHL_SETTLE_FRAMES = 5;
-// Best-effort: step NHL_SETTLE_FRAMES so the move is visible. Never throws — a
-// core that can't frame-advance just skips it (the write already landed).
+// Optional frame step after sprite-moving writes so BizHawk re-renders the new
+// positions. Default callers pass 0 for frame-precise RAM edits.
 // Returns whether the step actually ran, for an honest note in the output.
-async function nhlSettle(target: string, bh: BizhawkServer): Promise<boolean> {
+async function nhlSettle(target: string, bh: BizhawkServer, frames: number): Promise<boolean> {
+  if (frames <= 0) return false;
   try {
-    await bh.call(target, "frame_advance", { count: NHL_SETTLE_FRAMES }, { timeoutMs: frameTimeout(NHL_SETTLE_FRAMES) });
+    await bh.call(target, "frame_advance", { count: frames }, { timeoutMs: frameTimeout(frames) });
     return true;
   } catch {
     return false;
@@ -2862,8 +2886,9 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           if (e.target === "pk") line += detach ? ` (detached from s${carrier})` : " (loose puck)";
           return line;
         });
-        const settled = await nhlSettle(target, bh);
-        return ok(`${lines.join("\n")}${settled ? `\n(+${NHL_SETTLE_FRAMES} frames so the move renders)` : ""}`);
+        const settleFrames = typeof p.settle_frames === "number" ? p.settle_frames : 0;
+        const settled = await nhlSettle(target, bh, settleFrames);
+        return ok(`${lines.join("\n")}${settled ? `\n(+${settleFrames} frames so the move renders)` : ""}`);
       }
 
       case "nhl94_freeze": {
@@ -3267,13 +3292,13 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             readReqs.push({ name: ref.label, address: d.addr(ref.address), width: ref.width, domain });
           } else if (op === "write") {
             const value = encodeNhlValue(ref, input.value);
-            memOps.push({ op: input.freeze === true ? "freeze" : "write", address: ref.address, value, width: ref.width });
+            memOps.push({ op: input.freeze === true ? "freeze" : "write", address: ref.address, value, width: memoryOpsWriteWidth(ref.width) });
             if (p.readback !== "none") readbackRefs.push(ref);
           } else if (op === "freeze") {
             const value = input.value === undefined
               ? (currentFreezeVals[ref.label] ?? 0)
               : encodeNhlValue(ref, input.value);
-            memOps.push({ op: "freeze", address: ref.address, value, width: ref.width });
+            memOps.push({ op: "freeze", address: ref.address, value, width: memoryOpsWriteWidth(ref.width) });
             if (p.readback !== "none") readbackRefs.push(ref);
           } else if (op === "unfreeze") {
             memOps.push({ op: "unfreeze", address: ref.address, width: ref.width });
@@ -3357,10 +3382,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
-            const ops = rig.freezes.map((f) => ({
-              op: "freeze" as const, address: f.address, value: f.value, width: f.width,
-              ...(f.domain ? { domain: f.domain } : {}),
-            }));
+            const ops = rig.freezes.map(rigFreezeOp);
             const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops });
             frozenCount = r.frozen_count;
           }
@@ -3395,9 +3417,9 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             : [];
           const fdirOps: nhl94.MemOp[] = [];
           for (const e of place) {
-            if (typeof e.fdir !== "number") continue;
+            if (e.fdir === undefined) continue;
             const { base } = nhl94.resolveTarget(String(e.target));
-            fdirOps.push({ op: "write", address: base + nhl94.OFF.fdir, value: e.fdir & 0xffff, width: "u16_be" });
+            fdirOps.push({ op: "write", address: base + nhl94.OFF.fdir, value: nhl94.fdirValue(e.fdir) & 0xffff, width: "u16_be" });
           }
           const r = await bh.call<{ applied: number; frozen_count: number }>(target, "memory_ops", { ops: domainObj!.rebase([...ops, ...fdirOps]), domain: d });
           lines.push(`Placed ${place.length} target(s) (${r.applied ?? [...ops, ...fdirOps].length} op(s)).`);
@@ -3432,7 +3454,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           const memOps: nhl94.MemOp[] = stageFields.map((raw) => {
             const input: Record<string, unknown> = { op: "write", ...raw };
             const ref = resolveNhlFieldOp(input);
-            return { op: input.freeze === true ? "freeze" : "write", address: ref.address, value: encodeNhlValue(ref, input.value), width: ref.width };
+            return { op: input.freeze === true ? "freeze" : "write", address: ref.address, value: encodeNhlValue(ref, input.value), width: memoryOpsWriteWidth(ref.width) };
           });
           await bh.call(target, "memory_ops", { ops: domainObj!.rebase(memOps), domain: d });
           lines.push(`Wrote ${stageFields.length} field(s).`);
@@ -3460,8 +3482,9 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const head = `Parked ${assignments.length} skater(s) at y=${nhl94.PARK_Y} (x ${Math.min(...xs)}..${Math.max(...xs)})` +
           (keep.length ? `; kept ${keep.join(", ")}` : "");
         const detail = assignments.map((a) => `${a.target} x=${a.x}`).join(", ");
-        const settled = await nhlSettle(target, bh);
-        return ok(`${head}\n${detail}\n${r.frozen_count} address(es) frozen.${settled ? ` (+${NHL_SETTLE_FRAMES} frames so the move renders)` : ""}`);
+        const settleFrames = typeof p.settle_frames === "number" ? p.settle_frames : 0;
+        const settled = await nhlSettle(target, bh, settleFrames);
+        return ok(`${head}\n${detail}\n${r.frozen_count} address(es) frozen.${settled ? ` (+${settleFrames} frames so the move renders)` : ""}`);
       }
 
       case "nhl94_rig": {
@@ -3523,10 +3546,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           await bh.call<{ path: string }>(target, "load_state", { path: rigBridgeStatePath(hash, name, backend), pause: true });
           let frozenCount = 0;
           if (rig.freezes.length) {
-            const ops = rig.freezes.map((f) => ({
-              op: "freeze" as const, address: f.address, value: f.value, width: f.width,
-              ...(f.domain ? { domain: f.domain } : {}),
-            }));
+            const ops = rig.freezes.map(rigFreezeOp);
             const r = await bh.call<{ frozen_count: number }>(target, "memory_ops", { ops });
             frozenCount = r.frozen_count;
           }
@@ -3581,8 +3601,9 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           summary = `Puck given to ${entity} (teleported to x=${w(pos.x)},y=${w(pos.y)}); carrier hold: ${hold ? "on" : "off"}`;
         }
         await bh.call(target, "memory_ops", { ops, domain });
-        const settled = await nhlSettle(target, bh);
-        return ok(`${summary}${settled ? ` (+${NHL_SETTLE_FRAMES} frames so the move renders)` : ""}`);
+        const settleFrames = typeof p.settle_frames === "number" ? p.settle_frames : 0;
+        const settled = await nhlSettle(target, bh, settleFrames);
+        return ok(`${summary}${settled ? ` (+${settleFrames} frames so the move renders)` : ""}`);
       }
 
       case "nhl94_clock": {

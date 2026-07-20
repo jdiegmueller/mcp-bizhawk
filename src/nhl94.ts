@@ -84,6 +84,37 @@ export const FIELD_WIDTH: Record<string, string> = {
 // a plain integer at its declared width.
 export const FIXED_FIELDS = new Set(["x", "y", "z"]);
 
+export const FDIR_DIRECTIONS = [
+  "north",
+  "northeast",
+  "east",
+  "southeast",
+  "south",
+  "southwest",
+  "west",
+  "northwest",
+] as const;
+
+export type FdirDirection = typeof FDIR_DIRECTIONS[number];
+
+const FDIR_BY_NAME = new Map<string, number>(FDIR_DIRECTIONS.map((name, idx) => [name, idx]));
+
+export function fdirValue(v: unknown): number {
+  if (typeof v === "string") {
+    const found = FDIR_BY_NAME.get(v.toLowerCase());
+    if (found !== undefined) return found;
+    throw new Error(`fdir direction must be one of: ${FDIR_DIRECTIONS.join(", ")}`);
+  }
+  if (typeof v === "number" && Number.isInteger(v)) return v;
+  throw new Error("fdir value must be an integer or compass direction string");
+}
+
+export function fdirLabel(raw: number): string {
+  const octant = raw & 0xffff;
+  const label = FDIR_DIRECTIONS[octant];
+  return label ? `${label} (${octant})` : String(raw);
+}
+
 // Absolute (M68K BUS) addresses of game globals (mirror bridge_JD.lua TRACE_G
 // + camera consts). Keyed by the semantic field name used in freeze mapping.
 export const G: Record<string, number> = {
@@ -605,20 +636,26 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   assignment fields include assidx and assq0..assq7.
 • nhl94_fields — semantic field read/write/freeze/unfreeze for selected entity
   and global fields. Raw offsets/addresses require allow_raw:true and should be
-  temporary verification scaffolding, not the default path.
+  temporary verification scaffolding, not the default path. fdir accepts raw
+  integers or compass strings: north=0, northeast=1, east=2, southeast=3,
+  south=4, southwest=5, west=6, northwest=7.
 • nhl94_stage — batch clean/rig/park/place/possession/field setup for one
   experiment scene. Use it when a multi-step setup would otherwise drift across
-  frames or leave stale freezes. clear_freezes does not stop exec traps.
+  frames or leave stale freezes. Default settle_frames is 0; it does not
+  advance frames unless requested. clear_freezes does not stop exec traps.
 • nhl94_teleport — set any subset of x/y/z and/or xv/yv/zv atomically. Moving
-  pk automatically detaches it so the result is a loose puck. It does not pin.
+  pk automatically detaches it so the result is a loose puck. It does not pin
+  and does not advance frames unless settle_frames > 0 is requested.
 • nhl94_freeze — pin targets at their CURRENT x/y/z and zero+pin velocity.
 • nhl94_unfreeze — targets:[...] releases selected entity pins; all:true clears
   the ENTIRE bridge freeze table, including clock/carrier/camera and unmapped.
 • nhl94_park — move every skater not in keep off-ice and freeze them; pk is
-  untouched. Existing freezes are not cleared.
+  untouched. Existing freezes are not cleared. It does not advance frames
+  unless settle_frames > 0 is requested.
 • nhl94_possession — assign the carrier directly and place pk on that skater,
   or target:"none" for loose. hold:true freezes the carrier word; verify it.
-  The camera normally eases toward the puck/carrier.
+  It does not advance frames unless settle_frames > 0 is requested. The camera
+  normally eases toward the puck/carrier once frames are driven.
 • nhl94_clock — set, freeze, or release only the game clock.
 • nhl94_camera — pin/release scroll. Direct pinning may jitter; possession-led
   focus is usually more reliable. Verify visually.
@@ -659,13 +696,18 @@ Clean 1-on-1 baseline (s0 vs s6, s0 carrying):
 Force a facing/lockout value without address math:
   1. nhl94_fields {"ops":[
        {"op":"write","target":"s6","field":"lockout","value":0},
-       {"op":"freeze","target":"s6","field":"fdir","value":4}]}
+       {"op":"freeze","target":"s6","field":"fdir","value":"south"}]}
   2. nhl94_state {"describe":true}
 
 Loose moving puck (teleport auto-detaches):
   1. nhl94_teleport {"targets":[
        {"target":"pk","x":0,"y":100,"z":0,"xv":0,"yv":-300,"zv":0}]}
   2. nhl94_state {}
+
+Render-settle after placement only when you want it:
+  1. nhl94_teleport {"settle_frames":5,"targets":[
+       {"target":"s6","x":40,"y":0}]}
+  2. nhl94_state {"describe":true}
 
 Freeze the full entity scene for inspection:
   1. nhl94_freeze {"targets":["s0","s1","s2","s3","s4","s5",

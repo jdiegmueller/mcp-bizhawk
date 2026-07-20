@@ -44,7 +44,7 @@ function defaultNhlGlobals(over = {}) {
   };
 }
 
-test("nhl94_teleport writes provided axes as 16.16 and reports decoded coords", async () => {
+test("nhl94_teleport writes provided axes as 16.16 and does not settle by default", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     memory_ops: () => ({ applied: 2, frozen_count: 0 }),
@@ -56,15 +56,33 @@ test("nhl94_teleport writes provided axes as 16.16 and reports decoded coords", 
       arguments: { target: h.target, targets: [{ target: "s3", x: 200, y: -40 }] },
     });
     assert.match(textOf(res), /Teleported s3 → x=200 y=-40/);
-    // After the write the tool settles a few frames so the move renders.
-    assert.match(textOf(res), /\+5 frames so the move renders/);
-    const fa = h.bridge.calls.find((c) => c.method === "frame_advance");
-    assert.equal(fa.params.count, 5);
+    assert.doesNotMatch(textOf(res), /frames so the move renders/);
+    assert.ok(!h.bridge.calls.some((c) => c.method === "frame_advance"));
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.domain, "M68K BUS");
     assert.equal(call.params.ops.length, 2);
     assert.deepEqual(call.params.ops[0], { op: "write", address: 0xffb04a + 3 * 0x80, value: 0x00c80000, width: "u32_be" });
     assert.equal(call.params.ops[1].value, 0xffd80000); // -40 << 16
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_teleport settles only when settle_frames is requested", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: () => ({ applied: 1, frozen_count: 0 }),
+    frame_advance: (p) => ({ framecount: 1000 + (p.count ?? 1) }),
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_teleport",
+      arguments: { target: h.target, settle_frames: 3, targets: [{ target: "s3", x: 200 }] },
+    });
+    assert.match(textOf(res), /Teleported s3 → x=200/);
+    assert.match(textOf(res), /\+3 frames so the move renders/);
+    const fa = h.bridge.calls.find((c) => c.method === "frame_advance");
+    assert.equal(fa.params.count, 3);
   } finally {
     await h.close();
   }

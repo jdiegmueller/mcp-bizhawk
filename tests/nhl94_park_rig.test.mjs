@@ -7,7 +7,7 @@ import { startHarness, textOf } from "./helpers/harness.mjs";
 
 const DOMAINS = ["M68K BUS", "68K RAM"];
 
-test("nhl94_park parks every skater not in keep and freezes 5 ops each", async () => {
+test("nhl94_park parks every skater not in keep and does not settle by default", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     memory_ops: () => ({ frozen_count: 55 }),
@@ -20,12 +20,27 @@ test("nhl94_park parks every skater not in keep and freezes 5 ops each", async (
     assert.match(text, /kept s2/);
     // 11 parked spread evenly across -32000..+32000: first at the left endpoint.
     assert.match(text, /s0 x=-32000/);
-    // Settles a few frames so the parked positions render.
-    assert.match(text, /\+5 frames so the move renders/);
-    assert.equal(h.bridge.calls.find((c) => c.method === "frame_advance").params.count, 5);
+    assert.doesNotMatch(text, /frames so the move renders/);
+    assert.ok(!h.bridge.calls.some((c) => c.method === "frame_advance"));
     const call = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.equal(call.params.ops.length, 55);
     assert.ok(!call.params.ops.some((o) => o.address === 0xffb04a + 2 * 0x80)); // s2 untouched
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_park settles only when settle_frames is requested", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: () => ({ frozen_count: 55 }),
+    frame_advance: (p) => ({ framecount: 1000 + (p.count ?? 1) }),
+  });
+  try {
+    const res = await h.client.callTool({ name: "nhl94_park", arguments: { target: h.target, keep: ["s2"], settle_frames: 4 } });
+    const text = textOf(res);
+    assert.match(text, /\+4 frames so the move renders/);
+    assert.equal(h.bridge.calls.find((c) => c.method === "frame_advance").params.count, 4);
   } finally {
     await h.close();
   }
@@ -72,6 +87,7 @@ test("nhl94_rig save → list → apply → delete round-trips through the store
     assert.ok(h.bridge.calls.some((c) => c.method === "load_state" && c.params.pause === true));
     assert.equal(applied.at(-1).ops[0].op, "freeze");
     assert.equal(applied.at(-1).ops[0].address, 0xffb04a);
+    assert.equal(applied.at(-1).ops[0].width, "u32_be");
 
     const del = await h.client.callTool({ name: "nhl94_rig", arguments: { target: h.target, action: "delete", name: "faceoff" } });
     assert.match(textOf(del), /Deleted rig "faceoff"/);
@@ -190,6 +206,7 @@ test("nhl94_stage clears freezes before applying a rig", async () => {
     assert.ok(unfreezeAt !== -1 && loadAt !== -1 && refreezeAt !== -1);
     assert.ok(unfreezeAt < loadAt, "explicit clear_freezes must run before rig load");
     assert.ok(loadAt < refreezeAt, "rig freeze table must be restored after load");
+    assert.equal(h.bridge.calls[refreezeAt].params.ops[0].width, "u32_be");
   } finally {
     await h.close();
     delete process.env.MCP_BIZHAWK_RIG_DIR;
@@ -213,6 +230,52 @@ test("nhl94_stage supports fdir-only placement without teleport fields", async (
       arguments: { target: h.target, place: [{ target: "s0", fdir: 4 }] },
     });
     assert.match(textOf(res), /Placed 1 target\(s\) \(1 op\(s\)\)/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_stage place accepts compass strings for fdir", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: (p) => {
+      assert.deepEqual(p.ops, [
+        { op: "write", address: 0xffb04a + 0x54, value: 4, width: "u16_be" },
+      ]);
+      return { applied: 1, frozen_count: 0 };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_stage",
+      arguments: { target: h.target, place: [{ target: "s0", fdir: "south" }] },
+    });
+    assert.match(textOf(res), /Placed 1 target\(s\) \(1 op\(s\)\)/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_stage fields writes signed velocity fields with bridge-compatible widths", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: (p) => {
+      assert.deepEqual(p.ops, [
+        { op: "write", address: 0xffb04a + 0x28, value: 65535, width: "u16_be" },
+        { op: "write", address: 0xffb04a + 0x2a, value: 12000, width: "u16_be" },
+      ]);
+      return { applied: 2, frozen_count: 0 };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_stage",
+      arguments: { target: h.target, fields: [
+        { target: "s0", field: "xv", value: -1 },
+        { target: "s0", field: "yv", value: 12000 },
+      ] },
+    });
+    assert.match(textOf(res), /Wrote 2 field\(s\)/);
   } finally {
     await h.close();
   }
