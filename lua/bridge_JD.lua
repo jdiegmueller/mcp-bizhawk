@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.44-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.45-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.45-jd changes: server-side usage reporting and stronger tool
+--   guidance for efficient NHL94/BizHawk sessions. Bridge behavior unchanged;
+--   bumped in lockstep to keep the OSD version line collapsed. Protocol stays 3.
 --
 -- v2026.7.44-jd changes: the LuaCanvas OSD pop-up is OFF by default again,
 --   and when it is enabled its window title includes the configured
@@ -668,7 +672,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.44-jd",
+    version    = "2026.7.45-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

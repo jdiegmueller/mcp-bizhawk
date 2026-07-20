@@ -1,6 +1,6 @@
 {
   "name": "mcp-bizhawk",
-  "version": "2026.7.44-jd",
+  "version": "2026.7.45-jd",
   "description": "MCP server for BizHawk — drive NES/SNES/GB/GBC/GBA/Genesis/N64/PSX/Saturn and more through one Lua bridge",
   "license": "MIT",
   "type": "module",
@@ -17,6 +17,7 @@
   "scripts": {
     "build": "tsc && node -e \"import('node:fs').then(fs => fs.chmodSync('dist/index.js', 0o755))\"",
     "test": "npm run build && node --test 'tests/**/*.test.mjs'",
+    "usage:report": "node scripts/usage-report.cjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "daemon": "node dist/index.js",
