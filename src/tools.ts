@@ -3214,7 +3214,8 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           if (!cfg) {
             return ok(`${stateText}\n\n=== Vision unavailable ===\n(describe is on by default but VISION_BASE_URL/VISION_MODEL are not set; pass describe:false to silence)`);
           }
-          const { local: readPath, remote: sendPath } = shotPaths(`mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`);
+          const backend = bh.getBackend(target);
+          const { local: readPath, remote: sendPath } = shotPaths(`mcp-bizhawk-nhl-${process.pid}-${Date.now()}.png`, backend);
           try {
             await bh.call<string>(target, "screenshot", { path: sendPath });
             const desc = await describeImage(readPath, p.describe_prompt as string | undefined, cfg);

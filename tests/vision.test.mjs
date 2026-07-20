@@ -157,6 +157,39 @@ test("nhl94_state appends a vision caption by default, omits it with describe:fa
   }
 });
 
+test("nhl94_state uses backend screenshot path mapping for Windows targets", async () => {
+  const stub = await startVisionStub("Penalty box area is visible.");
+  const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-nhl-win-"));
+  process.env.VISION_BASE_URL = stub.baseUrl;
+  process.env.VISION_MODEL = "test-vlm";
+  const rec = (i) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0 });
+  let bridgePath = "";
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0, session: 0xff, shotplayer: -1, lastplayer: -1, passdir: 0, passspeed: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+    screenshot: (p) => {
+      bridgePath = p.path;
+      const filename = String(p.path).split(/[\\/]/).at(-1);
+      fs.writeFileSync(path.join(shotDir, filename), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      return p.path;
+    },
+  }, { backend: { shotDir, shotDirBridge: "X:\\tmp" } });
+  try {
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target } }));
+    assert.match(bridgePath, /^X:\\tmp\\mcp-bizhawk-nhl-/);
+    assert.match(t, /Penalty box area is visible/);
+    assert.equal(stub.received.length, 1);
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+    fs.rmSync(shotDir, { recursive: true, force: true });
+    await h.close();
+    await stub.close();
+  }
+});
+
 test("nhl94_state redacts screenshot paths when vision cannot read the image", async () => {
   const stub = await startVisionStub("should never be produced");
   const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-nhl-missing-"));
