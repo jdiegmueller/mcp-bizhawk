@@ -25,7 +25,8 @@ import {
 test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool semantics", () => {
   assert.match(RECIPES_GUIDE, /read once .* do not repeat before every call/);
   assert.match(RECIPES_GUIDE, /nhl94_unfreeze \{"all":true\}/);
-  assert.match(RECIPES_GUIDE, /Velocity xv\/yv\/zv uses RAW signed 16-bit/);
+  assert.match(RECIPES_GUIDE, /Velocity xv\/yv\/zv uses game motion units/);
+  assert.match(RECIPES_GUIDE, /server handles memory shape/);
   assert.match(RECIPES_GUIDE, /nhl94_fields — semantic field read\/write\/freeze\/unfreeze/);
   assert.match(RECIPES_GUIDE, /nhl94_stage — batch clean\/rig\/park\/place\/possession\/field setup/);
   assert.match(RECIPES_GUIDE, /assign the carrier directly/);

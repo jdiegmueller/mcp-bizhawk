@@ -23,10 +23,11 @@ test("bizhawk_ram_snapshot chunks read_range, writes the file, reports sha256", 
     });
     const t = textOf(res);
     assert.match(t, /ram-snap-test-\d+\.bin \(10240 bytes, 68K RAM @0x0\)/);
-    const savedPath = t.split("\n").at(-1);
+    assert.doesNotMatch(t, /\/tmp|\/home|\\Users|\.mcp-bizhawk/);
     assert.match(t, /sha256=[0-9a-f]{64}/);
 
     // File exists, correct size, and content matches the deterministic pattern.
+    const savedPath = path.join(os.homedir(), ".mcp-bizhawk", "ram-snapshots", `ram-snap-test-${process.pid}.bin`);
     const buf = fs.readFileSync(savedPath);
     assert.equal(buf.length, 0x2800);
     for (const probe of [0, 1, 255, 256, 4095, 4096, 10239]) {
@@ -55,8 +56,9 @@ test("bizhawk_ram_snapshot defaults to the full 64 KiB 68K RAM", async () => {
     const res = await h.client.callTool({ name: "bizhawk_ram_snapshot", arguments: { target: h.target } });
     const t = textOf(res);
     assert.match(t, /\(65536 bytes, 68K RAM @0x0\)/);
-    const m = /\n(\S+)$/.exec(t);
-    if (m) fs.rmSync(m[1], { force: true });
+    assert.doesNotMatch(t, /\/tmp|\/home|\\Users|\.mcp-bizhawk/);
+    const m = /^(bizhawk-ram-[^\s]+\.bin)/.exec(t);
+    if (m) fs.rmSync(path.join(os.homedir(), ".mcp-bizhawk", "ram-snapshots", m[1]), { force: true });
   } finally {
     await h.close();
   }

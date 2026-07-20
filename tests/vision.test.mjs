@@ -99,6 +99,30 @@ test("bizhawk_screenshot degrades to image + note when vision is unconfigured", 
   }
 });
 
+test("bizhawk_screenshot redacts screenshot paths when vision cannot read the image", async () => {
+  const stub = await startVisionStub("should never be produced");
+  const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-shot-missing-"));
+  process.env.VISION_BASE_URL = stub.baseUrl;
+  process.env.VISION_MODEL = "test-vlm";
+  const h = await startHarness({ screenshot: (p) => p.path }, { backend: { shotDir } });
+  try {
+    const res = await h.client.callTool({
+      name: "bizhawk_screenshot",
+      arguments: { target: h.target, name: "missing-caption" },
+    });
+    const t = textOf(res);
+    assert.match(t, /vision caption unavailable/);
+    assert.doesNotMatch(t, /\/tmp|mcp-vision-shot-missing-/);
+    assert.equal(stub.received.length, 0, "vision endpoint is not called when local image read fails");
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+    fs.rmSync(shotDir, { recursive: true, force: true });
+    await h.close();
+    await stub.close();
+  }
+});
+
 test("nhl94_state appends a vision caption by default, omits it with describe:false", async () => {
   const stub = await startVisionStub("Faceoff at center ice; players lined up.");
   process.env.VISION_BASE_URL = stub.baseUrl;
@@ -125,6 +149,63 @@ test("nhl94_state appends a vision caption by default, omits it with describe:fa
     assert.doesNotMatch(t2, /Faceoff at center ice/);
     assert.doesNotMatch(t2, /Screenshot described by/);
     assert.equal(stub.received.length, 1, "no additional vision call for describe:false");
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+    await h.close();
+    await stub.close();
+  }
+});
+
+test("nhl94_state redacts screenshot paths when vision cannot read the image", async () => {
+  const stub = await startVisionStub("should never be produced");
+  const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-vision-nhl-missing-"));
+  process.env.VISION_BASE_URL = stub.baseUrl;
+  process.env.VISION_MODEL = "test-vlm";
+  const rec = (i) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0 });
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
+    read_many: () => ({ carrier: 0xff02, gameclock: 300, gsp: 0, gmode: 0, vpos: 0, hpos: 0, yleader: 0, session: 0xff, shotplayer: -1, lastplayer: -1, passdir: 0, passspeed: 0 }),
+    list_frozen: () => ({ frozen: [] }),
+    screenshot: (p) => p.path,
+  }, { backend: { shotDir } });
+  try {
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target } }));
+    assert.match(t, /Vision unavailable/);
+    assert.doesNotMatch(t, /\/tmp|mcp-vision-nhl-missing-|mcp-bizhawk-nhl-/);
+    assert.equal(stub.received.length, 0, "vision endpoint is not called when local image read fails");
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+    fs.rmSync(shotDir, { recursive: true, force: true });
+    await h.close();
+    await stub.close();
+  }
+});
+
+test("vision caption errors do not leak observation image paths", async () => {
+  const stub = await startVisionStub("should never be produced");
+  const missing = path.join(os.tmpdir(), `mcp-vision-missing-observation-${process.pid}.png`);
+  process.env.VISION_BASE_URL = stub.baseUrl;
+  process.env.VISION_MODEL = "test-vlm";
+  const h = await startHarness({
+    play_input_sequence: () => ({
+      played: 1,
+      final_framecount: 2,
+      stopped_early: false,
+      observations: [{ frame_offset: 1, path: missing }],
+    }),
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "bizhawk_play_input_sequence",
+      arguments: { target: h.target, screenshot_every: 1, describe: true, frames: [{ buttons: {}, hold: 1 }] },
+    });
+    const t = textOf(res);
+    assert.match(t, /vision error/);
+    assert.doesNotMatch(t, /\/tmp|mcp-vision-missing-observation/);
+    assert.equal(stub.received.length, 0, "vision endpoint is not called when local image read fails");
   } finally {
     delete process.env.VISION_BASE_URL;
     delete process.env.VISION_MODEL;

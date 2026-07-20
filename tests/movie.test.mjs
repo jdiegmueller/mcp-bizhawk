@@ -9,7 +9,8 @@ test("bizhawk_movie_status formats loaded state", async () => {
   try {
     const res = await h.client.callTool({ name: "bizhawk_movie_status", arguments: { target: h.target } });
     const text = textOf(res);
-    assert.match(text, /Movie: \/tmp\/run\.bk2/);
+    assert.match(text, /Movie: run\.bk2/);
+    assert.doesNotMatch(text, /\/tmp/);
     assert.match(text, /mode: PLAY/);
     assert.match(text, /length: 1242/);
   } finally {

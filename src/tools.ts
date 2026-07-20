@@ -201,7 +201,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Snapshot a contiguous memory range to a named binary file on the server side (with a sha256 digest) — the tool for reverse-engineering by RAM diffing across game states, instead of hand-rolling a memory-dump loop in bizhawk_eval_lua. " +
       "USAGE: Capture the same range in several states (e.g. gameplay vs menu vs title) then diff the named files to isolate the bytes that track a state/flag — exactly the workflow used to hunt game-phase globals. Defaults to the whole 64 KiB Genesis work RAM ('68K RAM', base 0, size 0x10000). The `digest` alone lets you cheaply tell whether two states differ without re-reading. Pair with bizhawk_search_begin/filter when you want the bridge to diff for you against a live-changing value instead. " +
       "BEHAVIOR: No side effects on the emulator — pure reads, chunked into ≤4096-byte read_range calls and assembled + written server-side. DESTRUCTIVE to the named snapshot file. Errors if the domain is unknown or the range exceeds it. Do not pass filesystem paths; omit `name` for an auto name. " +
-      "RETURNS: 'SNAPSHOT NAME (N bytes, DOMAIN @0xBASE) sha256=…' plus the server-side file location for human follow-up.",
+      "RETURNS: 'SNAPSHOT NAME (N bytes, DOMAIN @0xBASE) sha256=…'. The server keeps the file path private; use the snapshot name for follow-up.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -247,7 +247,7 @@ const TOOLS: Tool[] = [
           type: "string",
           enum: ["json", "summary", "jsonl_file", "csv_file"],
           default: "json",
-          description: "For read/read_stop: json returns full inline JSON; summary returns head/tail only; jsonl_file/csv_file writes the capture server-side and returns the file path.",
+          description: "For read/read_stop: json returns full inline JSON; summary returns head/tail only; jsonl_file/csv_file writes the capture server-side and returns the artifact name.",
         },
         head: { type: "integer", minimum: 0, default: 3, description: "For read_mode=summary: number of leading entries per trap to print." },
         tail: { type: "integer", minimum: 0, default: 3, description: "For read_mode=summary: number of trailing entries per trap to print." },
@@ -1199,7 +1199,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Load and play a BizHawk .bk2 movie from frame 0 (power-on), using BizHawk's native movie engine. " +
       "USAGE: Restart the currently loaded movie from frame 0. Check progress with bizhawk_movie_status; detach with bizhawk_movie_stop. Movie file selection is a BizHawk-side setup step, not an MCP path argument. " +
       "BEHAVIOR: DESTRUCTIVE TO LIVE STATE: resets the core to power-on before playback — current game state is lost (savestate first if needed). The .bk2 must match the loaded ROM and the authoring CORE (header records it; mismatches fail to load or desync). Returns an error if movie.play_from_start is unavailable or the file fails to load. " +
-      "RETURNS: 'Movie: PATH (loaded, mode: MODE, length: N)'.",
+      "RETURNS: 'Movie: FILE (loaded, mode: MODE, length: N)'. Backend filesystem paths are kept private.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1229,9 +1229,9 @@ const TOOLS: Tool[] = [
     name: "bizhawk_save_slot",
     description:
       "PURPOSE: Save the full emulator state under a NAME (no filesystem paths needed) — the server stores it in a managed directory, namespaced by ROM hash. " +
-      "USAGE: The convenient form of bizhawk_save_state for bookmarks and experiment rollback points ('before-boss', 'baseline'). Use bizhawk_load_slot to restore and bizhawk_list_slots to browse. Use bizhawk_save_state instead when you need the file at a specific path. " +
+      "USAGE: The convenient form of bizhawk_save_state for bookmarks and experiment rollback points ('before-boss', 'baseline'). Use bizhawk_load_slot to restore and bizhawk_list_slots to browse. " +
       "BEHAVIOR: DESTRUCTIVE TO SLOT: overwrites an existing slot of the same name for this ROM. Requires the MCP server and BizHawk to share a filesystem (true for local setups; the state directory is $MCP_BIZHAWK_STATE_DIR or ~/.mcp-bizhawk/states). State files are core-version-bound like all BizHawk states. " +
-      "RETURNS: 'Saved slot 'NAME' → PATH'.",
+      "RETURNS: 'Saved slot 'NAME''.",
     inputSchema: {
       type: "object",
       required: ["target", "name"],
@@ -1273,7 +1273,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Start (or rotate) the bridge's per-frame trace CSV — a game-specific dump of entity/game state written after every emulated frame (as configured in the bridge script; the stock bridge_JD.lua traces NHL94 player structs, puck, RNG, and pad state). " +
       "USAGE: Rotate to a fresh file before an experiment so the CSV covers exactly that run; re-enable after bizhawk_trace_stop. The osd flag also toggles the on-screen overlay. NOTE: the trace layout is defined in the bridge script for a specific game — on other ROMs it records garbage; stop it or ignore it there. " +
       "BEHAVIOR: DESTRUCTIVE TO TRACE FILE: opens the bridge's per-backend trace file in write mode (truncates). Closes any previously open trace file first. Tracing costs a few hundred memory reads per frame. Do not pass filesystem paths; the bridge chooses the file for this backend. " +
-      "RETURNS: 'Trace started → PATH (osd: on|off)'.",
+      "RETURNS: 'Trace started (osd: on|off)'. Backend filesystem paths are kept private; use bizhawk_trace_tail for inline readback.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1289,25 +1289,25 @@ const TOOLS: Tool[] = [
       "PURPOSE: Stop the per-frame trace CSV and flush/close the file. " +
       "USAGE: End-of-experiment bookend for bizhawk_trace_start; also use to eliminate tracing overhead or stop garbage traces on non-supported ROMs. " +
       "BEHAVIOR: Flushes buffered rows and closes the file; the CSV remains on disk for analysis. Calling with no active trace is a no-op. " +
-      "RETURNS: 'Trace stopped after N rows (PATH)'.",
+      "RETURNS: 'Trace stopped after N rows'.",
     inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_trace_status",
     description:
-      "PURPOSE: Report whether the per-frame trace is active, its file path, row count, and OSD state. " +
-      "USAGE: Find the CSV path before reading it (bizhawk_trace_tail or direct file access); sanity-check that a trace is running before an experiment. " +
+      "PURPOSE: Report whether the per-frame trace is active, its row count, and OSD state. " +
+      "USAGE: Sanity-check that a trace is running before an experiment; use bizhawk_trace_tail for inline readback. " +
       "BEHAVIOR: No side effects. " +
-      "RETURNS: 'Trace active|inactive: PATH, N rows, osd: on|off'.",
+      "RETURNS: 'Trace active|inactive: N rows, osd: on|off'.",
     inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_trace_tail",
     description:
       "PURPOSE: Return the trace CSV's header line plus its last N rows — a quick look at recent frame-by-frame game state without leaving the tool interface. " +
-      "USAGE: Spot-check what the game did during the last action (animation frames, positions, RNG) right after a play_input_sequence. For bulk analysis read the CSV file directly instead — rows are wide (~250 columns on NHL94). " +
+      "USAGE: Spot-check what the game did during the last action (animation frames, positions, RNG) right after a play_input_sequence. For bulk analysis, use server-side artifacts outside the MCP transcript; rows are wide (~250 columns on NHL94). " +
       "BEHAVIOR: No side effects. Reads the file from the server's filesystem (requires server and BizHawk to share one — true locally). Buffered rows are flushed every 60 frames, so the very newest rows may lag slightly. Returns an error if the trace file has never been started or the file is unreadable. " +
-      "RETURNS: 'PATH (N rows, active: yes|no)' + the CSV header + the last N data rows.",
+      "RETURNS: 'Trace tail (N rows, active: yes|no)' + the CSV header + the last N data rows. Backend filesystem paths are kept private.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1323,7 +1323,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Start the bridge's physics-sync trace — one CSV row per NHL94 `updateplayers` physics tick (NOT per video frame), each carrying the per-pass D7 step multiplier latched inside the retail Gameloop. " +
       "USAGE: The right trace when you need physics-tick resolution and the actual D7 sub-step count per tick (e.g. speed/acceleration work), which the per-frame bizhawk_trace_* dump cannot expose. Start → drive input (bizhawk_play_input_sequence) → bizhawk_phys_trace_stop. " +
       "BEHAVIOR: RETAIL nhl94.gen ONLY — hash-guarded (MD5 8356B3F0…), so it errors on any other ROM, and errors on cores without event.on_bus_exec. Registers two bus-exec hooks in the Gameloop. While active it SUPPRESSES the per-video-frame bizhawk_trace_* writer. DESTRUCTIVE TO TRACE FILE: opens the bridge's per-backend trace file in write mode (truncates). Do not pass filesystem paths. " +
-      "RETURNS: 'Physics-sync trace started → PATH (latch ADDR, emit ADDR)'.",
+      "RETURNS: 'Physics-sync trace started (latch ADDR, emit ADDR)'. Backend filesystem paths are kept private; use bizhawk_phys_trace_tail for inline readback.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1337,16 +1337,16 @@ const TOOLS: Tool[] = [
       "PURPOSE: Stop the physics-sync trace and flush/close the file. " +
       "USAGE: End-of-experiment bookend for bizhawk_phys_trace_start; also re-enables the per-video-frame bizhawk_trace_* writer. " +
       "BEHAVIOR: Removes the bus-exec hooks, flushes buffered rows, closes the file (the CSV remains on disk). Calling with no active phys trace is a no-op. " +
-      "RETURNS: 'Physics-sync trace stopped after N ticks (PATH)'.",
+      "RETURNS: 'Physics-sync trace stopped after N ticks'.",
     inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
     name: "bizhawk_phys_trace_status",
     description:
-      "PURPOSE: Report whether the physics-sync trace is active, its file path, tick count, and last latched D7. " +
-      "USAGE: Find the CSV path before reading it (bizhawk_phys_trace_tail or direct file access); sanity-check that the trace is running and that D7 is being latched before an experiment. " +
+      "PURPOSE: Report whether the physics-sync trace is active, its tick count, and last latched D7. " +
+      "USAGE: Sanity-check that the trace is running and that D7 is being latched before an experiment; use bizhawk_phys_trace_tail for inline readback. " +
       "BEHAVIOR: No side effects. " +
-      "RETURNS: 'Physics-sync trace active|inactive: PATH, N ticks, last D7: N'.",
+      "RETURNS: 'Physics-sync trace active|inactive: N ticks, last D7: N'.",
     inputSchema: { type: "object", required: ["target"], properties: { ...targetProp }, additionalProperties: false },
   },
   {
@@ -1355,7 +1355,7 @@ const TOOLS: Tool[] = [
       "PURPOSE: Return the physics-sync CSV's header line plus its last N rows — a quick look at recent physics ticks without leaving the tool interface. " +
       "USAGE: Spot-check per-tick D7 and slot-2 state right after a play_input_sequence. The phys CSV is narrow (12 columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac), so a tail reads cleanly here. " +
       "BEHAVIOR: No side effects. Reads the file from the server's filesystem (requires server and BizHawk to share one — true locally). Rows are buffered, so the very newest may lag slightly. Returns an error if the phys trace has never been started or the file is unreadable. " +
-      "RETURNS: 'PATH (N ticks, active: yes|no)' + the CSV header + the last N data rows.",
+      "RETURNS: 'Physics-sync trace tail (N ticks, active: yes|no)' + the CSV header + the last N data rows. Backend filesystem paths are kept private.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -1384,7 +1384,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_teleport",
     description:
       "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions AND/OR set their x/y/z velocity — place a target, launch a moving one (e.g. fire the puck at the net with a chosen xv/yv/zv, or feed a one-timer), or both in one atomic write. " +
-      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts positions to 16.16 fixed-point, writes big-endian to the M68K BUS, and zeroes the sub-pixel fraction, so you never touch endianness/width/base arithmetic yourself. Velocity axes (xv/yv/zv) are RAW signed 16-bit words written as-is (no fixed-point scaling) — set them to give a target motion the game's physics then acts on; this is the tool for an inbound/loose puck with a specific vector (nhl94_freeze/park only ZERO velocity, they can't set one). For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. If the next step is a screenshot/vision read and you need the render pass to catch up, request settle_frames explicitly; otherwise leave it omitted/0 for precise RAM staging. " +
+      "USAGE: The safe way to place players/puck — pass WHOLE pixel coordinates (the same numbers the OSD shows), one entry per target, only the axes you want to change. The tool converts positions and hides all address/domain/width/endian details. Velocity axes (xv/yv/zv) are game motion units; set them to give a target motion the game's physics then acts on, and the tool handles the storage encoding. This is the tool for an inbound/loose puck with a specific vector (nhl94_freeze/park only ZERO velocity, they can't set one). For pinning a target in place use nhl94_freeze; for a whole reproducible setup use nhl94_rig. If the next step is a screenshot/vision read and you need the render pass to catch up, request settle_frames explicitly; otherwise leave it omitted/0 for precise RAM staging. " +
       "BEHAVIOR: DESTRUCTIVE: overwrites x/y/z (no undo — snapshot with nhl94_rig/save_state if needed). All writes land atomically in one frame. Teleport is PLACEMENT, not a state reset — latched per-skater flags survive it. FOOTGUN handled for you: teleporting pk while a skater carries it is futile (carry logic snaps it back next frame), so a pk teleport AUTO-DETACHES the puck (writes 'nobody' to the carrier word first) — the result is a loose puck at the given spot. To move a carried puck with its carrier, teleport the skater instead. Errors if a target is unknown, an entry sets no axis, or a coordinate is outside -32768..32767. It does not advance frames unless settle_frames > 0 is requested. " +
       "RETURNS: One line per target naming the decoded coordinates written (and whether the puck was detached), plus a note when requested render-settle frames ran.",
     inputSchema: {
@@ -1527,7 +1527,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_fields",
     description:
       "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
-      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, read global.clock plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
+      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
       "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words; fdir accepts either a raw integer or one of north/northeast/east/southeast/south/southwest/west/northwest. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. This tool does not advance frames. " +
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
@@ -1545,8 +1545,8 @@ const TOOLS: Tool[] = [
               field: { type: "string", description: "Named field/global, e.g. fdir, lockout, carrier, clock, faceoff_window_latch." },
               offset: { type: "string", description: "Raw entity-relative offset such as '0x71'. Requires allow_raw:true." },
               address: { type: "string", description: "Raw absolute M68K bus address such as '0xFFC304'. Requires target:'global' and allow_raw:true." },
-              width: { type: "string", enum: WIDTH_ENUM, description: "Width for raw offsets/addresses. Defaults to u8 for raw entity offsets." },
-              value: { description: "Value for write/freeze. Named fields accept decoded values; fdir accepts raw integers or compass strings: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Raw fields use raw integer values. For op:'freeze', omit value to freeze the current RAM value." },
+              width: { type: "string", enum: WIDTH_ENUM, description: "Width for raw offsets/addresses only. Do not provide width for named fields; the tool chooses the correct representation." },
+              value: { description: "Value for write/freeze. Named fields accept semantic values; fdir accepts raw integers or compass strings: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Raw fields use raw integer values. For op:'freeze', omit value to freeze the current RAM value." },
               freeze: { type: "boolean", description: "For op:'write', freeze this field at the written value instead of a one-time write." },
               allow_raw: { type: "boolean", description: "Required for raw offset/address operations." },
             },
@@ -1600,7 +1600,7 @@ const TOOLS: Tool[] = [
           },
         },
         possession: { type: "string", description: "'s0'..'s11' or 'none'." },
-        fields: { type: "array", items: { type: "object" }, description: "nhl94_fields-style write/freeze ops without the op property; op defaults to write. Use this for fdir compass strings such as value:'south'." },
+        fields: { type: "array", items: { type: "object" }, description: "nhl94_fields-style write/freeze ops without the op property; op defaults to write. Named fields use semantic values and hide widths; use this for fdir compass strings such as value:'south' or velocity fields such as xv/yv." },
         settle_frames: { type: "integer", minimum: 0, maximum: 60, default: 0, description: "Optional final frame advance after staging. Default 0: no frame advance." },
       },
       additionalProperties: false,
@@ -1751,7 +1751,7 @@ async function safeDescribe(imgPath: string, prompt: string | undefined, cfg: Vi
   try {
     return await describeImage(imgPath, prompt, cfg);
   } catch (err) {
-    return `(vision error: ${(err as Error).message})`;
+    return `(vision error: ${publicVisionError(err)})`;
   }
 }
 interface FrameObservation {
@@ -1884,17 +1884,19 @@ function formatTrapRead(
     return lines.join("\n");
   }
   if (mode === "jsonl_file") {
-    const out = trapCapturePath(trapCaptureBase(name), "jsonl");
+    const base = trapCaptureBase(name);
+    const out = trapCapturePath(base, "jsonl");
     fs.writeFileSync(out, trapRows(traps).map((row) => JSON.stringify(row)).join("\n") + "\n");
-    return `trap_exec counts=${counts}\nSaved trap_exec JSONL: ${out}`;
+    return `trap_exec counts=${counts}\nSaved trap_exec JSONL: ${base}.jsonl`;
   }
   if (mode === "csv_file") {
     const rows = trapRows(traps);
     const cols = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
-    const out = trapCapturePath(trapCaptureBase(name), "csv");
+    const base = trapCaptureBase(name);
+    const out = trapCapturePath(base, "csv");
     const body = [cols.join(",")].concat(rows.map((row) => cols.map((c) => csvCell(row[c])).join(","))).join("\n");
     fs.writeFileSync(out, `${body}\n`);
-    return `trap_exec counts=${counts}\nSaved trap_exec CSV: ${out}`;
+    return `trap_exec counts=${counts}\nSaved trap_exec CSV: ${base}.csv`;
   }
   return `trap_exec counts=${counts}\n${JSON.stringify(traps, null, 1)}`;
 }
@@ -1905,9 +1907,14 @@ function fmtHex(n: unknown): string {
 function addrHex(n: number): string {
   return `0x${n.toString(16).toUpperCase().padStart(4, "0")}`;
 }
+function publicFilename(name: string | undefined): string {
+  if (!name) return "(unnamed)";
+  const parts = name.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? "(unnamed)";
+}
 function fmtMovieStatus(r: { loaded: boolean; mode?: string; filename?: string; length?: number }): string {
   if (!r.loaded && !r.filename) return "No movie loaded.";
-  return `Movie: ${r.filename ?? "(unnamed)"} (${r.loaded ? "loaded" : "not loaded"}, mode: ${r.mode ?? "?"}, length: ${r.length ?? "?"})`;
+  return `Movie: ${publicFilename(r.filename)} (${r.loaded ? "loaded" : "not loaded"}, mode: ${r.mode ?? "?"}, length: ${r.length ?? "?"})`;
 }
 
 // Named savestate slots, managed server-side under
@@ -1986,6 +1993,15 @@ function pathlessFileReadError(err: unknown): string {
     ? String((err as { code?: unknown }).code)
     : "";
   return code ? `${code}: file is not readable from the MCP server` : "file is not readable from the MCP server";
+}
+function publicVisionError(err: unknown): string {
+  const code = typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code?: unknown }).code)
+    : "";
+  if (code) return pathlessFileReadError(err);
+  return (err as Error).message
+    .replace(/[A-Za-z]:\\[^\s'"`<>()]+/g, "[path]")
+    .replace(/(^|[\s('"`])\/[^\s'"`<>()]+/g, "$1[path]");
 }
 function slotPath(hash: string, name: string, backend?: BizhawkBackend): string {
   namedFile(name, "slot");
@@ -2440,7 +2456,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         fs.mkdirSync(path.dirname(outPath), { recursive: true });
         fs.writeFileSync(outPath, buf);
         const digest = crypto.createHash("sha256").update(buf).digest("hex");
-        return ok(`${snapshotName} (${size} bytes, ${domain} @0x${base.toString(16).toUpperCase()}) sha256=${digest}\n${outPath}`);
+        return ok(`${snapshotName} (${size} bytes, ${domain} @0x${base.toString(16).toUpperCase()}) sha256=${digest}`);
       }
 
       case "bizhawk_trap_exec": {
@@ -3204,7 +3220,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             const desc = await describeImage(readPath, p.describe_prompt as string | undefined, cfg);
             return ok(`${stateText}\n\n=== Screenshot described by ${cfg.model} ===\n${desc}`);
           } catch (err) {
-            return ok(`${stateText}\n\n=== Vision unavailable ===\n(${(err as Error).message})`);
+            return ok(`${stateText}\n\n=== Vision unavailable ===\n(${publicVisionError(err)})`);
           }
         }
 
@@ -3872,18 +3888,18 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         if (p.path !== undefined) rejectPathArg(name, "path");
         if (p.osd  !== undefined) params.osd  = p.osd;
         const r = await bh.call<{ path: string; osd: boolean }>(target, "trace_start", params);
-        return ok(`Trace started → ${r.path} (osd: ${r.osd ? "on" : "off"})`);
+        return ok(`Trace started (osd: ${r.osd ? "on" : "off"})`);
       }
       case "bizhawk_trace_stop": {
         const target = p.target as string;
         const r = await bh.call<{ path?: string; frames: number }>(target, "trace_stop");
-        return ok(`Trace stopped after ${r.frames} rows${r.path ? ` (${r.path})` : ""}`);
+        return ok(`Trace stopped after ${r.frames} rows`);
       }
       case "bizhawk_trace_status": {
         const target = p.target as string;
         const r = await bh.call<{ active: boolean; path?: string; frames: number; osd: boolean }>(target, "trace_status");
         return ok(
-          `Trace ${r.active ? "active" : "inactive"}: ${r.path ?? "(no file)"}, ${r.frames} rows, ` +
+          `Trace ${r.active ? "active" : "inactive"}: ${r.frames} rows, ` +
           `osd: ${r.osd ? "on" : "off"}`,
         );
       }
@@ -3892,12 +3908,17 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const st = await bh.call<{ active: boolean; path?: string }>(target, "trace_status");
         if (!st.path) throw new Error("no trace file — the trace has never been started on this bridge");
         const rows = (p.rows as number) ?? 10;
-        const text = fs.readFileSync(st.path, "utf8");
+        let text: string;
+        try {
+          text = fs.readFileSync(st.path, "utf8");
+        } catch (err) {
+          throw new Error(`trace file is unavailable: ${pathlessFileReadError(err)}`);
+        }
         const lines = text.trimEnd().split("\n");
         const header = lines[0];
         const tail = lines.slice(Math.max(1, lines.length - rows));
         return ok([
-          `${st.path} (${lines.length - 1} rows, active: ${st.active ? "yes" : "no"})`,
+          `Trace tail (${lines.length - 1} rows, active: ${st.active ? "yes" : "no"})`,
           header,
           ...tail,
         ].join("\n"));
@@ -3909,19 +3930,19 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         if (p.path !== undefined) rejectPathArg(name, "path");
         const r = await bh.call<{ path: string; latch_addr: string; emit_addr: string }>(target, 
           "phys_trace_start", params);
-        return ok(`Physics-sync trace started → ${r.path} (latch ${r.latch_addr}, emit ${r.emit_addr})`);
+        return ok(`Physics-sync trace started (latch ${r.latch_addr}, emit ${r.emit_addr})`);
       }
       case "bizhawk_phys_trace_stop": {
         const target = p.target as string;
         const r = await bh.call<{ path?: string; ticks: number }>(target, "phys_trace_stop");
-        return ok(`Physics-sync trace stopped after ${r.ticks} ticks${r.path ? ` (${r.path})` : ""}`);
+        return ok(`Physics-sync trace stopped after ${r.ticks} ticks`);
       }
       case "bizhawk_phys_trace_status": {
         const target = p.target as string;
         const r = await bh.call<{ active: boolean; path?: string; ticks: number; latched_d7: number }>(target, 
           "phys_trace_status");
         return ok(
-          `Physics-sync trace ${r.active ? "active" : "inactive"}: ${r.path ?? "(no file)"}, ` +
+          `Physics-sync trace ${r.active ? "active" : "inactive"}: ` +
           `${r.ticks} ticks, last D7: ${r.latched_d7}`);
       }
       case "bizhawk_phys_trace_tail": {
@@ -3929,12 +3950,17 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const st = await bh.call<{ active: boolean; path?: string }>(target, "phys_trace_status");
         if (!st.path) throw new Error("no phys trace file — the physics-sync trace has never been started on this bridge");
         const rows = (p.rows as number) ?? 10;
-        const text = fs.readFileSync(st.path, "utf8");
+        let text: string;
+        try {
+          text = fs.readFileSync(st.path, "utf8");
+        } catch (err) {
+          throw new Error(`physics-sync trace file is unavailable: ${pathlessFileReadError(err)}`);
+        }
         const lines = text.trimEnd().split("\n");
         const header = lines[0];
         const tail = lines.slice(Math.max(1, lines.length - rows));
         return ok([
-          `${st.path} (${lines.length - 1} ticks, active: ${st.active ? "yes" : "no"})`,
+          `Physics-sync trace tail (${lines.length - 1} ticks, active: ${st.active ? "yes" : "no"})`,
           header,
           ...tail,
         ].join("\n"));
@@ -3969,7 +3995,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
               const desc = await describeImage(readPath, p.describe_prompt as string | undefined, cfg);
               caption = `Described by ${cfg.model}:\n${desc}`;
             } catch (err) {
-              caption = `(vision caption unavailable: ${(err as Error).message})`;
+              caption = `(vision caption unavailable: ${publicVisionError(err)})`;
             }
           }
         }

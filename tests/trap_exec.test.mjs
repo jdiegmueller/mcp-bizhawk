@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { startHarness, textOf } from "./helpers/harness.mjs";
 
 // Server-side tests: the bridge `trap_exec` command is mocked (its real
@@ -106,6 +109,7 @@ test("bizhawk_trap_exec can save readback as JSONL or CSV", async () => {
     }));
     assert.match(jsonl, /Saved trap_exec JSONL: /);
     assert.match(jsonl, /entry\.jsonl/);
+    assert.doesNotMatch(jsonl, /\/tmp|mcp-bizhawk-trap-exec/);
 
     const csv = textOf(await h.client.callTool({
       name: "bizhawk_trap_exec",
@@ -113,7 +117,10 @@ test("bizhawk_trap_exec can save readback as JSONL or CSV", async () => {
     }));
     assert.match(csv, /Saved trap_exec CSV: /);
     assert.match(csv, /entry\.csv/);
+    assert.doesNotMatch(csv, /\/tmp|mcp-bizhawk-trap-exec/);
   } finally {
     await h.close();
+    fs.rmSync(path.join(os.tmpdir(), "mcp-bizhawk-trap-exec", "entry.jsonl"), { force: true });
+    fs.rmSync(path.join(os.tmpdir(), "mcp-bizhawk-trap-exec", "entry.csv"), { force: true });
   }
 });

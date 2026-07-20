@@ -607,9 +607,9 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
 
 ── CORE MODEL ────────────────────────────────────────────────────────────────
 • Targets are game entities: s0-s11 are skater slots; pk is the puck slot.
-• Position x/y/z uses WHOLE pixels. Velocity xv/yv/zv uses RAW signed 16-bit
-  game units. The nhl94_* tools own address, domain, width, endian, and 16.16
-  conversion details.
+• Position x/y/z uses WHOLE pixels. Velocity xv/yv/zv uses game motion units.
+  The nhl94_* tools own address, domain, width, endian, signedness, and 16.16
+  conversion details; agents should not supply memory widths for named fields.
 • Placement is not a state reset. Teleporting preserves animation, flags, and
   other latched state. A live entity may move again on later frames.
 • A freeze is a per-frame rewrite, not a pause and not an undo. Releasing it
@@ -636,13 +636,15 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   assignment fields include assidx and assq0..assq7.
 • nhl94_fields — semantic field read/write/freeze/unfreeze for selected entity
   and global fields. Raw offsets/addresses require allow_raw:true and should be
-  temporary verification scaffolding, not the default path. fdir accepts raw
+  temporary verification scaffolding, not the default path. Named fields hide
+  memory width/sign/endian details, including velocity fields. fdir accepts raw
   integers or compass strings: north=0, northeast=1, east=2, southeast=3,
   south=4, southwest=5, west=6, northwest=7.
 • nhl94_stage — batch clean/rig/park/place/possession/field setup for one
   experiment scene. Use it when a multi-step setup would otherwise drift across
-  frames or leave stale freezes. Default settle_frames is 0; it does not
-  advance frames unless requested. clear_freezes does not stop exec traps.
+  frames or leave stale freezes. place and fields accept the same semantic
+  values as nhl94_teleport/nhl94_fields. Default settle_frames is 0; it does
+  not advance frames unless requested. clear_freezes does not stop exec traps.
 • nhl94_teleport — set any subset of x/y/z and/or xv/yv/zv atomically. Moving
   pk automatically detaches it so the result is a loose puck. It does not pin
   and does not advance frames unless settle_frames > 0 is requested.
@@ -726,6 +728,8 @@ Save and restore a reproducible rig:
 ── ADDRESS AND EVIDENCE SAFETY ───────────────────────────────────────────────
 • Do not hand-compute an entity address when nhl94_state or nhl94_read can
   express the read. raw:true exposes absolute addresses only for genuine traps.
+• Do not pass widths for named nhl94_fields/nhl94_stage fields. Use names like
+  fdir/xv/yv and values like "south"/0/12000; the server handles memory shape.
 • For passive frame capture, use bizhawk_observe_frames. Use
   bizhawk_play_input_sequence only when injecting scripted joypad input.
 • Do not scrape screenshot paths from disk. Use returned image/caption content

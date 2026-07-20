@@ -16,13 +16,16 @@ test("trace start/stop/status round-trip", async () => {
       name: "bizhawk_trace_start",
       arguments: { target: h.target },
     });
-    assert.match(textOf(res), /Trace started → \/tmp\/nhl94_trace_test\.csv/);
+    assert.match(textOf(res), /Trace started \(osd: on\)/);
+    assert.doesNotMatch(textOf(res), /\/tmp|nhl94_trace_test/);
 
     res = await h.client.callTool({ name: "bizhawk_trace_status", arguments: { target: h.target } });
     assert.match(textOf(res), /active.*480 rows/s);
+    assert.doesNotMatch(textOf(res), /\/tmp|nhl94_trace_test/);
 
     res = await h.client.callTool({ name: "bizhawk_trace_stop", arguments: { target: h.target } });
     assert.match(textOf(res), /Trace stopped after 480 rows/);
+    assert.doesNotMatch(textOf(res), /\/tmp|nhl94_trace_test/);
   } finally {
     await h.close();
   }
@@ -41,11 +44,32 @@ test("bizhawk_trace_tail returns header + last N rows", async () => {
     const res = await h.client.callTool({ name: "bizhawk_trace_tail", arguments: { target: h.target, rows: 3 } });
     const lines = textOf(res).split("\n");
     assert.match(lines[0], /50 rows/);
+    assert.doesNotMatch(lines[0], /\/tmp|trace-tail-test/);
     assert.equal(lines[1], "frame,x,y");
     assert.equal(lines[2], "48,96,144");
     assert.equal(lines[4], "50,100,150");
   } finally {
     await h.close();
     fs.rmSync(file, { force: true });
+  }
+});
+
+test("bizhawk_trace_tail redacts unreadable trace paths", async () => {
+  const file = path.join(os.tmpdir(), `missing-trace-tail-test-${process.pid}.csv`);
+  const h = await startHarness({
+    trace_status: () => ({ active: true, path: file, frames: 0, osd: false }),
+  });
+  try {
+    await assert.rejects(
+      h.client.callTool({ name: "bizhawk_trace_tail", arguments: { target: h.target } }),
+      (err) => {
+        const msg = String(err);
+        assert.match(msg, /trace file is unavailable/);
+        assert.doesNotMatch(msg, /\/tmp|missing-trace-tail-test/);
+        return true;
+      },
+    );
+  } finally {
+    await h.close();
   }
 });
