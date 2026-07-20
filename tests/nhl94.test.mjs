@@ -71,6 +71,8 @@ test("global table exposes faceoff-window and selected-line addresses", () => {
 test("resolveField maps known names to offset/width and flags fixed-point axes", () => {
   assert.deepEqual(resolveField("impact"), { field: "impact", offset: 0x32, width: "s16_be", fixed: false });
   assert.deepEqual(resolveField("pf"), { field: "pf", offset: 0x62, width: "u8", fixed: false });
+  assert.deepEqual(resolveField("assidx"), { field: "assidx", offset: 0x36, width: "u16_be", fixed: false });
+  assert.deepEqual(resolveField("assq7"), { field: "assq7", offset: 0x3f, width: "u8", fixed: false });
   assert.deepEqual(resolveField("x"), { field: "x", offset: 0x00, width: "s32_be", fixed: true });
 });
 

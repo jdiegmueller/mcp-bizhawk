@@ -207,7 +207,7 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
   try {
     // describe:false keeps this focused on the structured decode (the vision
     // caption is on by default now).
-    const res = await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } });
+    const res = await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, sections: "all", describe: false } });
     const text = textOf(res);
     assert.match(text, /s3: x=200 y=-40/);
     assert.match(text, /pk: x=8 y=8/);
@@ -260,7 +260,7 @@ test("nhl94_state reports 1P-CPU control context, pad words, and route confidenc
     list_frozen: () => ({ frozen: [] }),
   });
   try {
-    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
+    const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, sections: ["control"], describe: false } }));
     assert.match(text, /control:/);
     assert.match(text, /home\(team0\): human active=s4 switch_debounce=0\(ready\) line=Sc1 raw_active=0x0004/);
     assert.match(text, /away\(team1\): CPU active=none switch_debounce=12\(gated 12f\) line=Chk raw_active=0xFFFF/);
@@ -359,7 +359,7 @@ test("nhl94_state infers control modes and flags unexpected slot-team pairings",
       list_frozen: () => ({ frozen: [] }),
     });
     try {
-      const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
+      const text = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, sections: ["control"], describe: false } }));
       assert.match(text, c.pattern, c.label);
       assert.match(text, c.route, c.label);
       if (c.extra) assert.match(text, c.extra, c.label);
@@ -391,6 +391,26 @@ test("nhl94_read decodes named + raw fields per target via one read_many", async
   }
 });
 
+test("nhl94_read exposes assignment queue aliases by name", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, r.address & 0xff])),
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_read",
+      arguments: { target: h.target, targets: ["s4"], fields: ["assidx", "assq0", "assq7"] },
+    });
+    assert.match(textOf(res), /s4: assidx=\d+ assq0=\d+ assq7=\d+/);
+    const call = h.bridge.calls.find((c) => c.method === "read_many");
+    assert.ok(call.params.reads.some((r) => r.name === "s4.assidx" && r.address === 0xffb04a + 4 * 0x80 + 0x36 && r.width === "u16_be"));
+    assert.ok(call.params.reads.some((r) => r.name === "s4.assq0" && r.address === 0xffb04a + 4 * 0x80 + 0x38 && r.width === "u8"));
+    assert.ok(call.params.reads.some((r) => r.name === "s4.assq7" && r.address === 0xffb04a + 4 * 0x80 + 0x3f && r.width === "u8"));
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_read rejects unknown fields", async () => {
   const h = await startHarness({ list_memory_domains: () => DOMAINS, read_many: () => ({}) });
   try {
@@ -398,6 +418,36 @@ test("nhl94_read rejects unknown fields", async () => {
       h.client.callTool({ name: "nhl94_read", arguments: { target: h.target, targets: ["s0"], fields: ["bogus"] } }),
       /unknown field/,
     );
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_rules decodes game mode, player mode, and penalty/offside options", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: (p) => {
+      assert.ok(p.reads.some((r) => r.name === "game_mode_flags" && r.address === 0xffc2fa && r.width === "u8"));
+      assert.ok(p.reads.some((r) => r.name === "opt_pen" && r.address === 0xffd056 && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "gmode" && r.address === 0xffc2ea && r.width === "u16_be"));
+      return defaultNhlGlobals({
+        game_mode_flags: 0,
+        opt_pen: 2,
+        gmode: 0x0000,
+        active_control_home: 4,
+        active_control_away: 0xffff,
+        pad_word_0: 0,
+        pad_word_2: 0x0010,
+      });
+    },
+  });
+  try {
+    const text = textOf(await h.client.callTool({ name: "nhl94_rules", arguments: { target: h.target } }));
+    assert.match(text, /game_mode: Exhibition/);
+    assert.match(text, /players: 2P-CPU/);
+    assert.match(text, /penalties: ON \(except OFFSIDE\)/);
+    assert.match(text, /offside: OFF/);
+    assert.match(text, /raw: game_mode_flags=0x00 opt_pen=0x0002 gmode=0x0000/);
   } finally {
     await h.close();
   }
@@ -421,6 +471,67 @@ test("nhl94_state verbose:true appends the extended per-entity line", async () =
   try {
     const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, verbose: true, describe: false } }));
     assert.match(t, /impact=42 impactp=7 pos=3 nopuck=1 pf=0x12 pf2=0x34 pf3=0x56 wgt8=200/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state defaults to compact output and prints dense sections only on request", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i, i === 3
+      ? { x: 200 << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5, shotpwr: 6, shotacc: 5, passacc: 4, energy: 9 }
+      : {})),
+    read_many: () => defaultNhlGlobals({ carrier: 3, active_control_home: 4, active_control_away: 0xffff, shotplayer: 3, lastplayer: 7, passdir: 2, passspeed: 40 }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const compact = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, describe: false } }));
+    assert.match(compact, /s3: x=200 y=0 z=0 \| xv=0 yv=0 zv=0 \| dir=0/);
+    assert.doesNotMatch(compact, /frame=0/);
+    assert.match(compact, /phase: gameplay/);
+    assert.match(compact, /control_mode: 1P-CPU/);
+    assert.doesNotMatch(compact, /anim=0x0046/);
+    assert.doesNotMatch(compact, /\ncontrol:\n/);
+    assert.doesNotMatch(compact, /carrier_ratings:/);
+    assert.doesNotMatch(compact, /camera:/);
+    assert.doesNotMatch(compact, /layout:/);
+
+    const dense = textOf(await h.client.callTool({
+      name: "nhl94_state",
+      arguments: { target: h.target, sections: ["anim", "control", "ratings", "camera", "debug"], describe: false },
+    }));
+    assert.match(dense, /anim=0x0046 attr=0x0008\(xflip=1\) spanum=8\(rec 2\) spacnt=5/);
+    assert.match(dense, /\ncontrol:\n/);
+    assert.match(dense, /carrier_ratings: shotpwr=6 shotacc=5 passacc=4 energy=9/);
+    assert.match(dense, /camera: vpos=0 hpos=0 yleader=0/);
+    assert.match(dense, /layout: slot structs @ base=0xFFB04A/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state sections:'all' aliases every optional section", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: (p) => {
+      assert.ok(p.fields.some((f) => f.name === "impact"), "sections:'all' should request debug fields");
+      return Array.from({ length: p.count }, (_, i) => minimalNhlRec(i, {
+        attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5,
+        impact: 42, impactp: 7, pos: 3, nopuck: 1, pf2: 0x34, pf3: 0x56, wgt8: 200,
+      }));
+    },
+    read_many: () => defaultNhlGlobals({ carrier: 0, active_control_home: 4, active_control_away: 0xffff }),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const t = textOf(await h.client.callTool({ name: "nhl94_state", arguments: { target: h.target, sections: "all", describe: false } }));
+    assert.match(t, /anim=0x0046/);
+    assert.match(t, /\ncontrol:\n/);
+    assert.match(t, /carrier_ratings:/);
+    assert.match(t, /camera:/);
+    assert.match(t, /impact=42 impactp=7 pos=3 nopuck=1/);
+    assert.match(t, /layout:/);
   } finally {
     await h.close();
   }

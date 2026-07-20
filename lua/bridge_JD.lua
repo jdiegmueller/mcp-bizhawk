@@ -1,5 +1,16 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.45-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.48-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.48-jd changes: add passive observe_frames for frame advancement with
+--   memory/screenshot observations and no joypad injection. Protocol stays 3.
+--
+-- v2026.7.47-jd changes: best-effort EmuHawk audio mute at bridge startup and
+--   after socket reconnect via client.SetSoundEnabled(false), guarded for builds
+--   that do not expose the API. Protocol stays 3.
+--
+-- v2026.7.46-jd changes: OSD adds a compact NHL94 setup line with game mode,
+--   inferred players/control snapshot, penalties option, and offside gate.
+--   The OSD clock run/stop label now uses the full gmode word. Protocol stays 3.
 --
 -- v2026.7.45-jd changes: server-side usage reporting and stronger tool
 --   guidance for efficient NHL94/BizHawk sessions. Bridge behavior unchanged;
@@ -672,7 +683,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.45-jd",
+    version    = "2026.7.48-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -1022,7 +1033,7 @@ end
 local frozen = {}
 
 local OSD_LINE_H = 16   -- gui.text fallback line height (fixed OSD font)
-local OSD_LINES  = 21   -- sys + phase + clk + cam + col-header + 12 slots + blank + puck + ratings + shot
+local OSD_LINES  = 22   -- sys + phase + setup + clk + cam + col-header + 12 slots + blank + puck + ratings + shot
 
 -- Canvas render metrics. Widened to fit the expanded per-skater / puck field
 -- set (z, heading fraction, flags, stop-gate, puck Z/Zvel, carrier ratings);
@@ -1204,6 +1215,44 @@ local function osd_clock_line(ff, period, clock, running, carrier)
     return vis, ov
 end
 
+-- Setup/rules globals that are useful in the OSD headline. These mirror the
+-- server-side nhl94_state control context and verified ROM-reference option
+-- bytes without adding another bridge RPC.
+local GAME_MODE_FLAGS = 0xFFC2FA
+local OPT_PEN         = 0xFFD056
+local ACTIVE_HOME     = 0xFFC320
+local ACTIVE_AWAY     = 0xFFC322
+local PAD_WORD_0      = 0xFFBEEE
+local PAD_WORD_2      = 0xFFBEF2
+
+local function osd_game_mode_label(mode_flags)
+    if (mode_flags & 0x03) ~= 0 then return "Shootout" end
+    return "Exhibition"
+end
+
+local function osd_players_label(home_raw, away_raw, p1_word, p2_word)
+    local home_human = home_raw >= 0 and home_raw <= 11
+    local away_human = away_raw >= 0 and away_raw <= 11
+    if home_raw == 0xFFFF and away_raw == 0xFFFF then return "CPU-CPU" end
+    if home_human and away_human then return "1P-2P" end
+    if home_human and away_raw == 0xFFFF then
+        if (p2_word or 0) ~= 0 and (p1_word or 0) == 0 then return "2P-CPU" end
+        return "1P-CPU"
+    end
+    if home_raw == 0xFFFF and away_human then return "CPU-1P" end
+    return "unknown"
+end
+
+local function osd_penalties_label(opt_pen, gmode_word)
+    local pen
+    if opt_pen == 0 then pen = "OFF"
+    elseif opt_pen == 1 then pen = "ON"
+    elseif opt_pen == 2 then pen = "ON-exc-offside"
+    else pen = string.format("unknown(%d)", opt_pen) end
+    local offside = ((gmode_word or 0) & 0x2000) ~= 0 and "ON" or "OFF"
+    return pen .. "/offside " .. offside
+end
+
 -- One entity (skater or puck) as a SINGLE columnar row: position, heading,
 -- velocity triple (xv,yv,zv), the SPA anim record (anim/attr/spanum/spacnt), and
 -- the flag/gate bytes — all fixed-width so every row aligns under osd_row_header.
@@ -1241,11 +1290,11 @@ local function osd_lines()
     local lines, overlays = {}, {}
     local ff = osd_frozen_fields()
     local clock   = tr_u16(TRACE_G.gameclock)   -- seconds remaining in period
-    -- gmode bit 0 SET means the clock is STOPPED (verified live 2026-07-13:
-    -- clock ticks down while gmode==0, holds while gmode==1). Note the trace
-    -- CSV's "clockrun" column records the raw gmode&1, i.e. it is actually
-    -- a clock-STOPPED flag.
-    local running = (tr_u8(TRACE_G.gmode) & 1) == 0
+    local gmode_word = tr_u16(TRACE_G.gmode)
+    -- Full-word gmode == 0 means the clock runs. Low bit 0 is narrower: it
+    -- gates interaction dispatch during whistle/stoppage, while high-byte
+    -- presentation states can also stop the clock.
+    local running = gmode_word == 0
     local carrier = osd_carrier()
     -- System/emulation line: client+server version, reconnect count (rc), the
     -- emulated frame counter, and lag frames — all the non-game telemetry on ONE
@@ -1293,7 +1342,12 @@ local function osd_lines()
     -- Phase headline (heuristic: session byte + gmode bit0) — terse mirror of
     -- nhl94_state's `phase:` so the OSD says whether the game is live / at a
     -- faceoff / at a menu, not just "clock stopped".
-    lines[#lines + 1] = string.format("phase %s", phase_label(tr_u8(SESSION_BYTE), not running))
+    lines[#lines + 1] = string.format("phase %s", phase_label(tr_u8(SESSION_BYTE), (gmode_word & 1) ~= 0))
+    overlays[#lines] = nil
+    lines[#lines + 1] = string.format("mode %s  players %s  penalties %s",
+        osd_game_mode_label(tr_u8(GAME_MODE_FLAGS)),
+        osd_players_label(tr_u16(ACTIVE_HOME), tr_u16(ACTIVE_AWAY), tr_u16(PAD_WORD_0), tr_u16(PAD_WORD_2)),
+        osd_penalties_label(tr_u16(OPT_PEN), gmode_word))
     overlays[#lines] = nil
     -- Game-clock line — pure NHL94 now (lag moved up). Period (gsp) leads,
     -- matching the on-screen scoreboard. The carrier VALUE is its own segment so
@@ -1471,6 +1525,7 @@ local CAPS = {
     ispaused     = client and has(client, "ispaused"),
     reboot_core  = client and has(client, "reboot_core"),
     screenshot   = client and has(client, "screenshot"),
+    set_sound_enabled = client and has(client, "SetSoundEnabled"),
     speedmode          = client and has(client, "speedmode"),
     invisibleemulation = client and has(client, "invisibleemulation"),
     -- savestate
@@ -1514,6 +1569,18 @@ local CAPS = {
     movie_play_from_start = movie and has(movie, "play_from_start"),
     movie_stop            = movie and has(movie, "stop"),
 }
+
+local function mute_emuhawk_audio(context)
+    if not CAPS.set_sound_enabled then return end
+    local ok, err = pcall(function()
+        client.SetSoundEnabled(false)
+    end)
+    if ok then
+        console.log("[mcp-bizhawk] EmuHawk audio muted" .. (context and (" (" .. context .. ")") or ""))
+    else
+        console.log("[mcp-bizhawk] WARNING: failed to mute EmuHawk audio: " .. tostring(err))
+    end
+end
 
 -- ── Command handlers ────────────────────────────────────────────────────────
 
@@ -2023,6 +2090,62 @@ local function cmd_play_input_sequence(p)
         observations = #observations > 0 and observations or nil,
         stopped_early = stopped,
         stop_reason = stop_reason,
+        state = state_summary(),
+    }
+end
+
+local function cmd_observe_frames(p)
+    if not CAPS.frameadvance then error("emu.frameadvance not available") end
+    local total = p.count or p.frames or 1
+    if total < 1 then error("count must be >= 1") end
+
+    local screenshot_every  = p.screenshot_every
+    local screenshot_dir    = p.screenshot_dir    or "C:/temp"
+    local screenshot_prefix = p.screenshot_prefix or "obs"
+    if screenshot_every and not CAPS.screenshot then
+        error("screenshot_every requested but client.screenshot is not available on this build")
+    end
+
+    local observe_memory = p.observe_memory
+    local obs_cadence = screenshot_every or p.observe_every or 0xFFFF
+    local capture_wanted = (screenshot_every ~= nil) or (observe_memory ~= nil)
+    local observations = {}
+    local count = 0
+
+    local function capture_observation()
+        local obs = { frame_offset = count }
+        if screenshot_every then
+            local path = string.format("%s/%s-%04d.png", screenshot_dir, screenshot_prefix, count)
+            client.screenshot(path)
+            obs.path = path
+        end
+        if observe_memory then
+            local mem = {}
+            for _, spec in ipairs(observe_memory) do
+                mem[spec.name] = read_memory_widthed(spec.domain, spec.address, spec.width)
+            end
+            obs.memory = mem
+        end
+        table.insert(observations, obs)
+    end
+
+    run_unpaused(function()
+    maybe_turbo(p.turbo, screenshot_every ~= nil, function()
+        for _ = 1, total do
+            emu.frameadvance()
+            frame_hooks()
+            count = count + 1
+            if capture_wanted and (count % obs_cadence == 0 or count == total) then
+                capture_observation()
+            end
+        end
+    end)
+    end)
+
+    return {
+        played = count,
+        final_framecount = CAPS.framecount and emu.framecount() or nil,
+        observations = #observations > 0 and observations or nil,
         state = state_summary(),
     }
 end
@@ -2948,6 +3071,7 @@ local HANDLERS = {
     list_memory_domains  = cmd_list_memory_domains,
     press_buttons        = cmd_press_buttons,
     play_input_sequence  = cmd_play_input_sequence,
+    observe_frames       = cmd_observe_frames,
     run_trials           = cmd_run_trials,
     pause                = cmd_pause,
     unpause              = cmd_unpause,
@@ -3093,6 +3217,9 @@ local function redial()
     end)
     if ok and comm.socketServerSetTimeout then
         comm.socketServerSetTimeout(SOCKET_TIMEOUT_MS)
+    end
+    if ok then
+        mute_emuhawk_audio("reconnect")
     end
     return ok, err
 end
@@ -3250,6 +3377,8 @@ local target_port = port
 
 console.log(string.format("[mcp-bizhawk] socket server target: %s:%s",
     tostring(ip or "(unknown)"), tostring(port or "(unknown)")))
+
+mute_emuhawk_audio("startup")
 
 -- Receive timeout for socketServerResponse(). Default BizHawk timeout (5ms)
 -- is fine in steady state — replies are sitting in the socket buffer by the

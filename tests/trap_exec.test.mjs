@@ -58,3 +58,62 @@ test("bizhawk_trap_exec read/status/stop format the bridge result", async () => 
     await h.close();
   }
 });
+
+test("bizhawk_trap_exec supports summary read mode and read_stop lifecycle", async () => {
+  const seen = [];
+  const h = await startHarness({
+    trap_exec: (p) => {
+      seen.push(p);
+      if (p.action === "read") {
+        return {
+          active: true,
+          counts: { entry: 3 },
+          traps: { entry: [{ f: 100, A3: 0x10 }, { f: 101, A3: 0x11 }, { f: 102, A3: 0x12 }] },
+        };
+      }
+      if (p.action === "stop") return { stopped: true, counts: { entry: 3 } };
+      return {};
+    },
+  });
+  try {
+    const txt = textOf(await h.client.callTool({
+      name: "bizhawk_trap_exec",
+      arguments: { target: h.target, action: "read_stop", read_mode: "summary", head: 1, tail: 1 },
+    }));
+    assert.match(txt, /trap_exec counts=\{"entry":3\}/);
+    assert.match(txt, /entry: 3 hit\(s\)/);
+    assert.match(txt, /head\[0\].*"f":100/);
+    assert.match(txt, /tail\[0\].*"f":102/);
+    assert.match(txt, /Stopped trap_exec\. Final counts: \{"entry":3\}/);
+    assert.deepEqual(seen.map((s) => s.action), ["read", "stop"]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("bizhawk_trap_exec can save readback as JSONL or CSV", async () => {
+  const h = await startHarness({
+    trap_exec: () => ({
+      active: true,
+      counts: { entry: 2 },
+      traps: { entry: [{ f: 100, D7: 1 }, { f: 101, D7: 2 }] },
+    }),
+  });
+  try {
+    const jsonl = textOf(await h.client.callTool({
+      name: "bizhawk_trap_exec",
+      arguments: { target: h.target, action: "read", read_mode: "jsonl_file", name: "entry" },
+    }));
+    assert.match(jsonl, /Saved trap_exec JSONL: /);
+    assert.match(jsonl, /entry\.jsonl/);
+
+    const csv = textOf(await h.client.callTool({
+      name: "bizhawk_trap_exec",
+      arguments: { target: h.target, action: "read", read_mode: "csv_file", name: "entry" },
+    }));
+    assert.match(csv, /Saved trap_exec CSV: /);
+    assert.match(csv, /entry\.csv/);
+  } finally {
+    await h.close();
+  }
+});

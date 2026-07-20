@@ -37,6 +37,15 @@ export const OFF: Record<string, number> = {
   impact: 0x32,
   impactp: 0x2e,
   pos: 0x34,
+  assidx: 0x36,
+  assq0: 0x38,
+  assq1: 0x39,
+  assq2: 0x3a,
+  assq3: 0x3b,
+  assq4: 0x3c,
+  assq5: 0x3d,
+  assq6: 0x3e,
+  assq7: 0x3f,
   nopuck: 0x5e,
   lockout: 0x5e,
   pf: 0x62,
@@ -62,6 +71,9 @@ export const FIELD_WIDTH: Record<string, string> = {
   fdir: "u16_be", frame: "u16_be",
   attr: "u16_be", anim: "u16_be", spanum: "u16_be", spacnt: "s16_be",
   impact: "s16_be", impactp: "s16_be", pos: "u16_be",
+  assidx: "u16_be",
+  assq0: "u8", assq1: "u8", assq2: "u8", assq3: "u8",
+  assq4: "u8", assq5: "u8", assq6: "u8", assq7: "u8",
   nopuck: "u8", pf: "u8", pf2: "u8", pf3: "u8", wgt8: "u8",
   lockout: "u8", team_flags: "u8",
   energy: "u8", shotpwr: "u8", shotacc: "u8", passacc: "u8",
@@ -581,11 +593,16 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
 
 ── TOOL ROUTER ───────────────────────────────────────────────────────────────
 • nhl94_state — baseline and post-action verification. Default describe:true
-  combines structured RAM with visual placement/contact/animation evidence.
-  Use describe:false only for a fast RAM-only read. verbose:true adds impact,
-  flags, weight, and nopuck. A trailing * marks that exact frozen word.
+  combines compact structured RAM with visual placement/contact/animation
+  evidence. Use describe:false only for a fast RAM-only read. Dense groups are
+  explicit: sections:"all" or sections:["anim","control","ratings","camera",
+  "context","debug","freezes"]. verbose:true is an all-sections debug alias.
+  A trailing * marks that exact frozen word.
+• nhl94_rules — game mode, player matchup, penalties, and offside. Use this
+  for the retail penalty enum: $FFD056 0=OFF, 1=ON, 2=ON except OFFSIDE.
 • nhl94_read — curated entity snapshots by known field list. Use this instead
-  of calculating a slot address or using eval_lua for entity reads.
+  of calculating a slot address or using eval_lua for entity reads. Named
+  assignment fields include assidx and assq0..assq7.
 • nhl94_fields — semantic field read/write/freeze/unfreeze for selected entity
   and global fields. Raw offsets/addresses require allow_raw:true and should be
   temporary verification scaffolding, not the default path.
@@ -624,9 +641,10 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
    contact, resolver entry, or a particular branch. Never infer this RAM gate
    from a frozen HUD clock or a motionless screenshot.
 6. TRACE: arm bizhawk_trap_exec, drive frames/input, verify the stimulus again,
-   then read and stop the traps. read/status do NOT stop hooks. ZERO HITS is
-   inconclusive until frame advance, movement/contact/animation, and gate state
-   are all confirmed.
+   then read_stop the traps (or read, then stop). read/status do NOT stop hooks.
+   Use read_mode:"summary" for transcript output or jsonl_file/csv_file for
+   large captures. ZERO HITS is inconclusive until frame advance,
+   movement/contact/animation, and gate state are all confirmed.
 7. CONCLUDE from measured preconditions plus trap/state results. Keep unverified
    interpretations labeled as hypotheses.
 
@@ -666,6 +684,10 @@ Save and restore a reproducible rig:
 ── ADDRESS AND EVIDENCE SAFETY ───────────────────────────────────────────────
 • Do not hand-compute an entity address when nhl94_state or nhl94_read can
   express the read. raw:true exposes absolute addresses only for genuine traps.
+• For passive frame capture, use bizhawk_observe_frames. Use
+  bizhawk_play_input_sequence only when injecting scripted joypad input.
+• Do not scrape screenshot paths from disk. Use returned image/caption content
+  from bizhawk_screenshot, bizhawk_observe_frames, or play_input_sequence.
 • Structured RAM fields are authoritative for RAM facts. Vision is evidence
   for visible geometry/action and must admit uncertainty from a single still.
 • frozen_summary unmapped>0 is a contamination warning, not automatic proof of

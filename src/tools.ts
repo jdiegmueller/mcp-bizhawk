@@ -219,13 +219,13 @@ const TOOLS: Tool[] = [
     name: "bizhawk_trap_exec",
     description:
       "PURPOSE: Persistent, multi-address execution-site capture — arm exec hooks at ROM addresses that ACCUMULATE register/memory snapshots into per-trap buffers across normally-driven frames, then read them back. The built-in replacement for hand-rolling event.on_bus_exec capture loops in bizhawk_eval_lua (the dominant reverse-engineering use). " +
-      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle: 'start', drive frames/input, verify the intended stimulus actually occurred, then 'read', and finally 'stop'. `read` and `status` do NOT stop hooks; always call `stop` when finished. ZERO HITS alone does not prove a code path is unreachable: first verify frames advanced and, for NHL94 interaction experiments, use nhl94_state to confirm interaction_gate is OPEN plus actual movement/contact/animation. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
+      "USAGE: Unlike bizhawk_trap_memory (one address, first hit only, self-advances then unregisters), this stays armed so you drive gameplay yourself (bizhawk_frame_advance / bizhawk_observe_frames / bizhawk_play_input_sequence / live play) and it records every hit up to a limit. Lifecycle: 'start', drive frames/input, verify the intended stimulus actually occurred, then 'read' or 'read_stop'. `read` and `status` do NOT stop hooks; always call `stop` when finished if you did not use read_stop. Use read_mode:'summary' for transcript-friendly output, or jsonl_file/csv_file for large captures. ZERO HITS alone does not prove a code path is unreachable: first verify frames advanced and, for NHL94 interaction experiments, use nhl94_state to confirm interaction_gate is OPEN plus actual movement/contact/animation. Each trap: {addr, name?, capture?, limit?}. `capture` tokens: registers 'D0'-'D7'/'A0'-'A7'/'PC'/'SR', or memory '@0xADDR:width' (absolute) / '@REG[+/-0xOFF]:width' (register-relative, e.g. '@A3+0x28:s16' reads the checker's x-velocity) — width u8/s8/u16/s16/u32/s32 (16/32 big-endian). Omit `capture` to snapshot all M68K registers. Every entry also carries `f` (framecount). " +
       "BEHAVIOR: 'start' registers event.on_bus_exec hooks (errors if the core lacks it) that persist until 'stop' or a bridge reload — REMEMBER to stop when done, as live hooks cost emulation speed. Clearing freezes, loading states, or applying NHL94 rigs does not stop these hooks. Buffers are bounded by `limit` (default 200/trap). Memory reads use the active domain (M68K BUS on Genesis); addresses masked to 24 bits. " +
       "RETURNS: 'start' the armed trap names; 'read' per-trap counts + the captured entries (JSON); 'status'/'stop' the counts.",
     inputSchema: {
       type: "object",
       properties: { ...targetProp, 
-        action: { type: "string", enum: ["start", "read", "status", "stop"], description: "Lifecycle step." },
+        action: { type: "string", enum: ["start", "read", "read_stop", "status", "stop"], description: "Lifecycle step. read_stop reads buffers and then stops hooks in one tool call." },
         traps: {
           type: "array",
           description: "For action=start: the exec sites to arm.",
@@ -241,8 +241,16 @@ const TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
-        name: { type: "string", description: "For action=read: return only this trap's buffer (default: all)." },
+        name: { type: "string", description: "For action=read/read_stop: return only this trap's buffer (default: all). Also used in exported filenames." },
         limit: { type: "integer", minimum: 1, description: "Default per-trap entry cap for action=start (default 200)." },
+        read_mode: {
+          type: "string",
+          enum: ["json", "summary", "jsonl_file", "csv_file"],
+          default: "json",
+          description: "For read/read_stop: json returns full inline JSON; summary returns head/tail only; jsonl_file/csv_file writes the capture server-side and returns the file path.",
+        },
+        head: { type: "integer", minimum: 0, default: 3, description: "For read_mode=summary: number of leading entries per trap to print." },
+        tail: { type: "integer", minimum: 0, default: 3, description: "For read_mode=summary: number of trailing entries per trap to print." },
       },
       required: ["target", "action"],
       additionalProperties: false,
@@ -508,6 +516,69 @@ const TOOLS: Tool[] = [
         describe_prompt: {
           type: "string",
           description: "The question/instruction sent to the vision model with each screenshot when `describe` is true. Falls back to the server's VISION_DEFAULT_PROMPT.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "bizhawk_observe_frames",
+    description:
+      "PURPOSE: Passively advance N frames without injecting joypad input, capturing optional screenshots and/or labeled memory reads at a fixed cadence in one bridge round-trip. " +
+      "USAGE: Use this when you need to watch the game evolve from its current input/human state, verify motion/contact after staging, or capture a memory trajectory without scripted inputs. For deliberate button playback use bizhawk_play_input_sequence; for a single blind step use bizhawk_frame_advance. Prefer observe_every with observe_memory for cheap RAM-only traces; use screenshot_every only when visual evidence matters. The RPC timeout scales with frame count, but the bridge cannot answer other calls until the observation batch finishes. " +
+      "BEHAVIOR: Temporarily unpauses while advancing, re-applies bridge freezes/hooks each frame, and never calls joypad.set. With screenshot_every each captured image is returned inline unless describe:true requests text captions. Errors if emu.frameadvance is missing, if screenshot support is missing when requested, or if observe_memory references an invalid domain/address/width. Do not scrape screenshot files from disk; use the returned image/caption content. " +
+      "RETURNS: A text summary ('Observed N frames. Final framecount: M. Captured K observations...') followed by image or caption content for screenshot observations.",
+    inputSchema: {
+      type: "object",
+      required: ["target", "frames"],
+      properties: { ...targetProp,
+        frames: {
+          type: "integer",
+          minimum: 1,
+          description: "Number of emulated frames to advance while passively observing.",
+        },
+        observe_every: {
+          type: "integer",
+          minimum: 1,
+          description: "Capture a memory-only observation every N frames. If screenshot_every is also set, screenshot_every is the observation cadence.",
+        },
+        screenshot_every: {
+          type: "integer",
+          minimum: 1,
+          description: "Capture a PNG screenshot every N frames, plus the final frame when it is off-cadence. Omit for memory-only observation.",
+        },
+        screenshot_prefix: {
+          type: "string",
+          description: "Filename prefix for server-managed screenshots. Do not pass filesystem paths.",
+        },
+        observe_memory: {
+          type: "array",
+          description: "Memory reads to perform at each observation point, keyed by name in the output.",
+          items: {
+            type: "object",
+            required: ["name", "address", "width"],
+            additionalProperties: false,
+            properties: {
+              name: { type: "string", description: "Semantic label for this reading." },
+              domain: { type: "string", description: "Optional case-sensitive memory domain; omit for current domain." },
+              address: { type: "integer", minimum: 0, description: "Byte offset within the chosen memory domain." },
+              width: { type: "string", enum: WIDTH_ENUM, description: WIDTH_PARAM_DESC },
+            },
+          },
+        },
+        turbo: {
+          type: "boolean",
+          default: false,
+          description: "Run at maximum speed with rendering disabled unless screenshots are requested. Restores normal speed/rendering afterwards.",
+        },
+        describe: {
+          type: "boolean",
+          default: false,
+          description: "If true, screenshot observations are captioned by the configured vision model instead of returned as PNGs.",
+        },
+        describe_prompt: {
+          type: "string",
+          description: "Prompt sent to the vision model for screenshot observations.",
         },
       },
       additionalProperties: false,
@@ -1399,6 +1470,13 @@ const TOOLS: Tool[] = [
       properties: { ...targetProp, 
         raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
         verbose: { type: "boolean", default: false, description: "Add per-entity raw diagnostic fields: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf2,pf3(+0x63-64)/wgt8(+0x67) plus raw assignment queue bytes. Normal output already decodes pf(+0x62), assidx(+0x36), and assq(+0x38..3F) into role/control context." },
+        sections: {
+          description: "Optional dense sections to include. Default is compact. Use a string or array: anim, control, ratings, camera, context, debug, freezes, or all. verbose:true implies all.",
+          oneOf: [
+            { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes"] },
+            { type: "array", items: { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes"] } },
+          ],
+        },
         describe: { type: "boolean", default: true, description: "Default TRUE and recommended for staging/post-action verification: append a vision caption to the structured RAM state so placement, contact, and animation can be checked. Set false only for a fast RAM-only read (for example an interaction_gate preflight) or when vision is unnecessary. The structured result still returns if vision fails." },
         describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot (unless describe:false). Falls back to the server's built-in NHL94 system prompt / VISION_DEFAULT_PROMPT." },
       },
@@ -1406,10 +1484,24 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "nhl94_rules",
+    description:
+      "PURPOSE: Read the NHL94 menu/rules/options state that agents need before interpreting play: game mode, player matchup mode, penalties, and offside setting. " +
+      "USAGE: Use this instead of ad hoc reads when you need to know Exhibition vs menu mode, CPU/1P/2P control, or whether penalties/offside are enabled. It decodes the empirically pinned retail enum at $FFD056: 0=OFF, 1=ON, 2=ON except OFFSIDE; offside's runtime gate is gmode bit 13 ($FFC2EA & 0x2000). " +
+      "BEHAVIOR: No side effects — one read_many round-trip. Player mode is inferred from active control globals and pad words, so it is a live-control inference rather than a separate menu enum. " +
+      "RETURNS: Four decoded lines plus raw bytes/words for verification.",
+    inputSchema: {
+      type: "object",
+      required: ["target"],
+      properties: { ...targetProp },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "nhl94_read",
     description:
       "PURPOSE: Read arbitrary decoded fields of NHL94 entities (skaters s0-s11, puck pk) by NAME or raw in-struct offset — the game-aware alternative to hand-computing 68K base+offset in bizhawk_read/eval_lua (the #1 source of base/stride/endian mistakes). " +
-      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
+      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), assignment queue assidx/assq0..assq7 (+0x36/+0x38..3F), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,assidx,assq0..assq7,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
       "BEHAVIOR: No side effects — one read_many round-trip. x/y/z decode to whole pixels; every other field is the raw integer at its width. Errors if targets×fields exceeds 128 reads, or on an unknown target/field. " +
       "RETURNS: One line per target: 'sN: field=val field=val …'.",
     inputSchema: {
@@ -1652,6 +1744,150 @@ async function safeDescribe(imgPath: string, prompt: string | undefined, cfg: Vi
   } catch (err) {
     return `(vision error: ${(err as Error).message})`;
   }
+}
+interface FrameObservation {
+  frame_offset: number;
+  path?: string;
+  memory?: Record<string, number>;
+}
+async function observationContent(
+  header: string,
+  obs: FrameObservation[],
+  backend: BizhawkBackend,
+  visCfg: VisionConfig | null,
+  prompt: string | undefined,
+): Promise<({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]> {
+  const lines = [header];
+  const captions = new Map<number, string>();
+  if (visCfg) {
+    for (let i = 0; i < obs.length; i++) {
+      if (obs[i].path) {
+        captions.set(i, await safeDescribe(bridgePathToHost(obs[i].path as string, backend), prompt, visCfg));
+      }
+    }
+  }
+  for (let i = 0; i < obs.length; i++) {
+    const o = obs[i];
+    const memStr = o.memory
+      ? ` memory={${Object.entries(o.memory).map(([k, v]) => `${k}=${v}`).join(", ")}}`
+      : "";
+    const tag = !o.path ? "" : (visCfg ? " (described below)" : ` (image ${i + 1})`);
+    lines.push(`  obs[${i}] frame_offset=${o.frame_offset}${memStr}${tag}`);
+  }
+  const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [
+    { type: "text", text: lines.join("\n") },
+  ];
+  for (let i = 0; i < obs.length; i++) {
+    const o = obs[i];
+    if (!o.path) continue;
+    if (visCfg) {
+      content.push({ type: "text", text: `obs[${i}] frame_offset=${o.frame_offset}: ${captions.get(i) ?? "(no description)"}` });
+      continue;
+    }
+    try {
+      const bytes = fs.readFileSync(bridgePathToHost(o.path, backend));
+      content.push({ type: "image", data: bytes.toString("base64"), mimeType: "image/png" });
+    } catch (err) {
+      content.push({
+        type: "text",
+        text: `(failed to read observation image at frame ${o.frame_offset}: ${pathlessFileReadError(err)})`,
+      });
+    }
+  }
+  return content;
+}
+const STATE_SECTIONS = new Set(["anim", "control", "ratings", "camera", "context", "debug", "freezes"]);
+function parseStateSections(input: unknown, verbose: boolean): Set<string> {
+  const out = new Set<string>();
+  const addAll = () => { for (const s of STATE_SECTIONS) out.add(s); };
+  if (verbose) addAll();
+  if (input === undefined) return out;
+  const vals = Array.isArray(input) ? input : [input];
+  for (const val of vals) {
+    if (typeof val !== "string") throw new Error("nhl94_state.sections must be a string or string array");
+    if (val === "all") { addAll(); continue; }
+    if (!STATE_SECTIONS.has(val)) throw new Error(`unknown nhl94_state section "${val}"`);
+    out.add(val);
+  }
+  return out;
+}
+function rulesGameMode(flags: number): string {
+  return (flags & 0x03) === 0 ? "Exhibition" : `unknown/menu flags=0x${(flags & 0xff).toString(16).toUpperCase().padStart(2, "0")}`;
+}
+function rulesPenalty(optPen: number): string {
+  if (optPen === 0) return "OFF";
+  if (optPen === 1) return "ON";
+  if (optPen === 2) return "ON (except OFFSIDE)";
+  return `unknown(${optPen})`;
+}
+function rulesPlayers(homeRaw: number, awayRaw: number, pad0: number, pad2: number): string {
+  const homeHuman = homeRaw >= 0 && homeRaw <= 11;
+  const awayHuman = awayRaw >= 0 && awayRaw <= 11;
+  if (!homeHuman && !awayHuman) return "CPU-CPU";
+  if (homeHuman && awayHuman) return "1P-2P";
+  if (!homeHuman && awayHuman) return "CPU-1P";
+  if (homeHuman) {
+    const p2HasInput = (pad2 & 0xffff) !== 0 && (pad0 & 0xffff) === 0;
+    return p2HasInput ? "2P-CPU" : "1P-CPU";
+  }
+  return "unknown";
+}
+function trapRows(traps: Record<string, Record<string, unknown>[]> | undefined): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  for (const [trap, entries] of Object.entries(traps ?? {})) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) rows.push({ trap, ...entry });
+  }
+  return rows;
+}
+function trapCaptureBase(name?: unknown): string {
+  const raw = typeof name === "string" && name.trim() ? name.trim() : "traps";
+  return raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "traps";
+}
+function trapCapturePath(base: string, ext: "jsonl" | "csv"): string {
+  const dir = path.join(os.tmpdir(), "mcp-bizhawk-trap-exec");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${base}.${ext}`);
+}
+function csvCell(v: unknown): string {
+  if (v === undefined || v === null) return "";
+  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function formatTrapRead(
+  r: { counts?: Record<string, number>; traps?: Record<string, Record<string, unknown>[]> },
+  mode: string,
+  name?: unknown,
+  head = 3,
+  tail = 3,
+): string {
+  const counts = JSON.stringify(r.counts ?? {});
+  const traps = r.traps ?? {};
+  if (mode === "summary") {
+    const lines = [`trap_exec counts=${counts}`];
+    for (const [trap, entries] of Object.entries(traps)) {
+      const arr = Array.isArray(entries) ? entries : [];
+      lines.push(`${trap}: ${arr.length} hit(s)`);
+      arr.slice(0, head).forEach((entry, i) => lines.push(`  head[${i}] ${JSON.stringify(entry)}`));
+      const tailStart = Math.max(head, arr.length - tail);
+      arr.slice(tailStart).forEach((entry, i) => lines.push(`  tail[${i}] ${JSON.stringify(entry)}`));
+    }
+    return lines.join("\n");
+  }
+  if (mode === "jsonl_file") {
+    const out = trapCapturePath(trapCaptureBase(name), "jsonl");
+    fs.writeFileSync(out, trapRows(traps).map((row) => JSON.stringify(row)).join("\n") + "\n");
+    return `trap_exec counts=${counts}\nSaved trap_exec JSONL: ${out}`;
+  }
+  if (mode === "csv_file") {
+    const rows = trapRows(traps);
+    const cols = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+    const out = trapCapturePath(trapCaptureBase(name), "csv");
+    const body = [cols.join(",")].concat(rows.map((row) => cols.map((c) => csvCell(row[c])).join(","))).join("\n");
+    fs.writeFileSync(out, `${body}\n`);
+    return `trap_exec counts=${counts}\nSaved trap_exec CSV: ${out}`;
+  }
+  return `trap_exec counts=${counts}\n${JSON.stringify(traps, null, 1)}`;
 }
 function fmtHex(n: unknown): string {
   if (typeof n !== "number") return String(n);
@@ -2021,6 +2257,7 @@ const EXPOSED_BIZHAWK = new Set([
   "bizhawk_reset",
   "bizhawk_press_buttons",
   "bizhawk_play_input_sequence",
+  "bizhawk_observe_frames",
   "bizhawk_screenshot",
   "bizhawk_save_state",
   "bizhawk_load_state",
@@ -2185,21 +2422,35 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
       case "bizhawk_trap_exec": {
         const target = p.target as string;
         const action = p.action as string;
-        const args: Record<string, unknown> = { action };
+        const args: Record<string, unknown> = { action: action === "read_stop" ? "read" : action };
         if (action === "start") {
           if (!Array.isArray(p.traps) || p.traps.length === 0) throw new Error("action:start requires a non-empty `traps` array");
           args.traps = p.traps;
           if (p.limit !== undefined) args.limit = p.limit;
         }
-        if (action === "read" && p.name !== undefined) args.name = p.name;
-        const r = await bh.call<{ started?: number; traps?: unknown; counts?: Record<string, number>; active?: boolean }>(target, "trap_exec", args);
+        if ((action === "read" || action === "read_stop") && p.name !== undefined) args.name = p.name;
+        const r = await bh.call<{
+          started?: number;
+          traps?: unknown;
+          counts?: Record<string, number>;
+          active?: boolean;
+        }>(target, "trap_exec", args);
         if (action === "start") {
           const names = Array.isArray(r.traps) ? r.traps.join(", ") : "";
-          return ok(`Armed ${r.started} trap(s): ${names}. Now drive frames (bizhawk_frame_advance / play_input_sequence), then action:"read". Call action:"stop" when done — live hooks cost emulation speed.`);
+          return ok(`Armed ${r.started} trap(s): ${names}. Now drive frames (bizhawk_frame_advance / bizhawk_observe_frames / play_input_sequence), then action:"read" or action:"read_stop". Call action:"stop" when done — live hooks cost emulation speed.`);
         }
         if (action === "status") return ok(`trap_exec active=${r.active} counts=${JSON.stringify(r.counts ?? {})}`);
         if (action === "stop") return ok(`Stopped trap_exec. Final counts: ${JSON.stringify(r.counts ?? {})}`);
-        return ok(`trap_exec counts=${JSON.stringify(r.counts ?? {})}\n${JSON.stringify(r.traps ?? {}, null, 1)}`);
+        const readText = formatTrapRead(
+          r as { counts?: Record<string, number>; traps?: Record<string, Record<string, unknown>[]> },
+          (p.read_mode as string | undefined) ?? "json",
+          p.name,
+          (p.head as number | undefined) ?? 3,
+          (p.tail as number | undefined) ?? 3,
+        );
+        if (action !== "read_stop") return ok(readText);
+        const stopped = await bh.call<{ counts?: Record<string, number> }>(target, "trap_exec", { action: "stop" });
+        return ok(`${readText}\nStopped trap_exec. Final counts: ${JSON.stringify(stopped.counts ?? {})}`);
       }
 
       case "bizhawk_write8": {
@@ -2329,6 +2580,44 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           }
         }
         return { content };
+      }
+
+      case "bizhawk_observe_frames": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
+        const visCfg = p.describe ? requireVisionConfig() : null;
+        const params: Record<string, unknown> = { count: p.frames };
+        if (p.screenshot_dir !== undefined) rejectPathArg(name, "screenshot_dir");
+        if (p.observe_every          !== undefined) params.observe_every          = p.observe_every;
+        if (p.screenshot_every       !== undefined) params.screenshot_every       = p.screenshot_every;
+        if (p.screenshot_every !== undefined && backend.shotDirBridge()) params.screenshot_dir = backend.shotDirBridge();
+        if (p.screenshot_prefix      !== undefined) params.screenshot_prefix      = p.screenshot_prefix;
+        if (p.observe_memory         !== undefined) params.observe_memory         = p.observe_memory;
+        if (p.turbo                  !== undefined) params.turbo                  = p.turbo;
+        const frames = p.frames as number;
+        const r = await bh.call<{
+          played: number;
+          final_framecount?: number;
+          state?: StateSummary;
+          observations?: FrameObservation[];
+        }>(target, "observe_frames", params, { timeoutMs: frameTimeout(frames) });
+
+        const obs = Array.isArray(r.observations) ? r.observations : [];
+        const lines = [
+          `Observed ${r.played} frames. Final framecount: ${r.final_framecount ?? "(unavailable)"}.`,
+          `Captured ${obs.length} observation${obs.length === 1 ? "" : "s"}.`,
+        ];
+        const st = fmtState(r.state);
+        if (st) lines.push(`State: ${st}`);
+        return {
+          content: await observationContent(
+            lines.join("\n"),
+            obs,
+            backend,
+            visCfg,
+            p.describe_prompt as string | undefined,
+          ),
+        };
       }
 
       case "bizhawk_run_trials": {
@@ -2629,6 +2918,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const backend = bh.getBackend(target);
         const raw = p.raw === true;
         const verbose = p.verbose === true;
+        const sections = parseStateSections(p.sections, verbose);
         const d = await backend.nhlDomain();
         const domain = await d.detect({});
         const fields = [
@@ -2665,7 +2955,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // — the ones agents otherwise hand-read; kept off the default block to
         // avoid bloating the common snapshot.
         const EXTRA_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf2", "pf3", "wgt8"];
-        if (verbose) {
+        if (sections.has("debug")) {
           for (const name of EXTRA_FIELDS) fields.push({ name, offset: nhl94.OFF[name], width: nhl94.FIELD_WIDTH[name] });
         }
         // Slots 0..14 in one contiguous read (12 skaters + 2 unused + puck@14).
@@ -2745,16 +3035,18 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             `spanum=${rec.spanum}${mark(label, "spanum")}(rec ${rec.spanum >> 2}) ` +
             `spacnt=${rec.spacnt}${mark(label, "spacnt")}`;
           const out = [
-            `${label}${at}: ${pos} | ${vel} | dir=${rec.fdir} frame=${rec.frame}`,
-            `     ${anim}`,
+            `${label}${at}: ${pos} | ${vel} | dir=${rec.fdir}${sections.has("anim") ? ` frame=${rec.frame}` : ""}`,
           ];
-          if (idx <= 11) {
+          if (sections.has("anim")) {
+            out.push(`     ${anim}`);
+          }
+          if (idx <= 11 && sections.has("control")) {
             const ctx = nhl94.decodeSlotControl(rec);
             const mismatch = humanPointerSlots.has(idx) && !ctx.humanActive ? " control_pointer_mismatch=true" : "";
-            const assqRaw = verbose ? ` assidx=${ctx.assidx} assq=[${ctx.assq.join(",")}]` : "";
+            const assqRaw = sections.has("debug") ? ` assidx=${ctx.assidx} assq=[${ctx.assq.join(",")}]` : "";
             out.push(`     ${nhl94.formatSlotControlContext(ctx)}${mismatch}${assqRaw}`);
           }
-          if (verbose) {
+          if (sections.has("debug")) {
             out.push(
               `     impact=${rec.impact}${mark(label, "impact")} impactp=${rec.impactp}${mark(label, "impactp")} ` +
               `pos=${rec.pos}${mark(label, "pos")} nopuck=${rec.nopuck}${mark(label, "nopuck")} ` +
@@ -2814,48 +3106,61 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const ratings = crec
           ? `shotpwr=${crec.shotpwr} shotacc=${crec.shotacc} passacc=${crec.passacc} energy=${crec.energy}`
           : "— (loose puck)";
-        lines.push(`carrier_ratings: ${ratings}`);
-        lines.push(`camera: vpos=${gv.vpos}${markG("vpos")} hpos=${gv.hpos}${markG("hpos")} yleader=${gv.yleader}${markG("yleader")}`);
+        if (sections.has("ratings")) {
+          lines.push(`carrier_ratings: ${ratings}`);
+        }
+        if (sections.has("camera")) {
+          lines.push(`camera: vpos=${gv.vpos}${markG("vpos")} hpos=${gv.hpos}${markG("hpos")} yleader=${gv.yleader}${markG("yleader")}`);
+        }
         // Play-context globals (OSD footer parity). shot/last are slot indices
         // (sN, or none when < 0 / out of range); pass is the last pass vector.
         const slotName = (v: number) => (v >= 0 && v <= 11 ? `s${v}` : `none (${v})`);
-        lines.push(`shot: ${slotName(gv.shotplayer)}${markG("shotplayer")}   last: ${slotName(gv.lastplayer)}${markG("lastplayer")}   pass: dir=${gv.passdir}${markG("passdir")} speed=${gv.passspeed}${markG("passspeed")}`);
+        if (sections.has("context")) {
+          lines.push(`shot: ${slotName(gv.shotplayer)}${markG("shotplayer")}   last: ${slotName(gv.lastplayer)}${markG("lastplayer")}   pass: dir=${gv.passdir}${markG("passdir")} speed=${gv.passspeed}${markG("passspeed")}`);
+        }
         const homeControl = nhl94.controlSlotInfo(activeHomeRaw, "home");
         const awayControl = nhl94.controlSlotInfo(activeAwayRaw, "away");
         const controlMode = nhl94.inferControlMode(activeHomeRaw, activeAwayRaw);
         const coopNote = controlMode === "1P-CPU" || controlMode === "CPU-1P" ? "; coop_unverified=true" : "";
         const unexpected = (info: nhl94.ControlSlotInfo) => info.slotTeamUnexpected ? " slot_team_unexpected=true" : "";
-        lines.push("control:");
-        lines.push(
-          `  home(team0): ${homeControl.role} active=${homeControl.active}${unexpected(homeControl)} ` +
-          `switch_debounce=${nhl94.formatSwitchDebounce(gv.switch_debounce_home ?? 0)} ` +
-          `line=${nhl94.lineLabel(gv.home_line ?? -1)} raw_active=${homeControl.raw}`,
-        );
-        lines.push(
-          `  away(team1): ${awayControl.role} active=${awayControl.active}${unexpected(awayControl)} ` +
-          `switch_debounce=${nhl94.formatSwitchDebounce(gv.switch_debounce_away ?? 0)} ` +
-          `line=${nhl94.lineLabel(gv.away_line ?? -1)} raw_active=${awayControl.raw}`,
-        );
-        lines.push(`  mode: ${controlMode} inferred from active control slots${coopNote}`);
-        lines.push(`  input_route: ${nhl94.formatInputRoute(controlMode, homeControl.active, awayControl.active)}`);
-        lines.push(
-          `  pad_words: word0@0xFFBEEE=${nhl94.formatPadWord(gv.pad_word_0 ?? 0)} ` +
-          `word1@0xFFBEF0=${nhl94.formatPadWord(gv.pad_word_1 ?? 0)} ` +
-          `word2@0xFFBEF2=${nhl94.formatPadWord(gv.pad_word_2 ?? 0)} ` +
-          `word3@0xFFBEF4=${nhl94.formatPadWord(gv.pad_word_3 ?? 0)}`,
-        );
-        lines.push(
-          `  caveat: c1playernum=${nhl94.hexWord(gv.c1playernum ?? 0)} ` +
-          `c2playernum=${nhl94.hexWord(gv.c2playernum ?? 0)} are reported raw only; ` +
-          `they are not active skater indices and are not used for mode/input_route inference`,
-        );
-        lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
+        lines.push(`control_mode: ${controlMode}${coopNote}`);
+        if (sections.has("control")) {
+          lines.push("control:");
+          lines.push(
+            `  home(team0): ${homeControl.role} active=${homeControl.active}${unexpected(homeControl)} ` +
+            `switch_debounce=${nhl94.formatSwitchDebounce(gv.switch_debounce_home ?? 0)} ` +
+            `line=${nhl94.lineLabel(gv.home_line ?? -1)} raw_active=${homeControl.raw}`,
+          );
+          lines.push(
+            `  away(team1): ${awayControl.role} active=${awayControl.active}${unexpected(awayControl)} ` +
+            `switch_debounce=${nhl94.formatSwitchDebounce(gv.switch_debounce_away ?? 0)} ` +
+            `line=${nhl94.lineLabel(gv.away_line ?? -1)} raw_active=${awayControl.raw}`,
+          );
+          lines.push(`  mode: ${controlMode} inferred from active control slots${coopNote}`);
+          lines.push(`  input_route: ${nhl94.formatInputRoute(controlMode, homeControl.active, awayControl.active)}`);
+          lines.push(
+            `  pad_words: word0@0xFFBEEE=${nhl94.formatPadWord(gv.pad_word_0 ?? 0)} ` +
+            `word1@0xFFBEF0=${nhl94.formatPadWord(gv.pad_word_1 ?? 0)} ` +
+            `word2@0xFFBEF2=${nhl94.formatPadWord(gv.pad_word_2 ?? 0)} ` +
+            `word3@0xFFBEF4=${nhl94.formatPadWord(gv.pad_word_3 ?? 0)}`,
+          );
+          lines.push(
+            `  caveat: c1playernum=${nhl94.hexWord(gv.c1playernum ?? 0)} ` +
+            `c2playernum=${nhl94.hexWord(gv.c2playernum ?? 0)} are reported raw only; ` +
+            `they are not active skater indices and are not used for mode/input_route inference`,
+          );
+        }
+        if (sections.has("freezes") || frozenList.length > 0) {
+          lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
+        }
         const baseHex = d.addr(nhl94.SORTCORDS).toString(16).toUpperCase();
-        lines.push(
-          `layout: slot structs @ base=0x${baseHex} stride=0x${nhl94.SCSIZE.toString(16).toUpperCase()} domain='${domain}' ` +
-          `(reference only; do not hand-compute reads). Use nhl94_read with a named field or raw +0xNN:width offset. ` +
-          `offsets: x+00 y+14 z+18(all s32_be 16.16) xv+28 yv+2A zv+2C(s16_be) frame+06 fdir+54 attr+04 anim+58 spanum+5A(u16_be) spacnt+5C(s16_be).`,
-        );
+        if (sections.has("debug")) {
+          lines.push(
+            `layout: slot structs @ base=0x${baseHex} stride=0x${nhl94.SCSIZE.toString(16).toUpperCase()} domain='${domain}' ` +
+            `(reference only; do not hand-compute reads). Use nhl94_read with a named field or raw +0xNN:width offset. ` +
+            `offsets: x+00 y+14 z+18(all s32_be 16.16) xv+28 yv+2A zv+2C(s16_be) frame+06 fdir+54 attr+04 anim+58 spanum+5A(u16_be) spacnt+5C(s16_be).`,
+          );
+        }
         lines.push(`frozen_summary: total=${frozenList.length} mapped=${mapped} unmapped=${unmapped}`);
         const stateText = lines.join("\n");
 
@@ -2879,6 +3184,35 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         }
 
         return ok(stateText);
+      }
+
+      case "nhl94_rules": {
+        const target = p.target as string;
+        const backend = bh.getBackend(target);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
+        const reads = [
+          { name: "game_mode_flags", address: d.addr(0xffc2fa), width: "u8", domain },
+          { name: "opt_pen", address: d.addr(0xffd056), width: "u16_be", domain },
+          { name: "gmode", address: d.addr(nhl94.G.gmode), width: "u16_be", domain },
+          { name: "active_control_home", address: d.addr(nhl94.CONTROL_G.active_control_home), width: "u16_be", domain },
+          { name: "active_control_away", address: d.addr(nhl94.CONTROL_G.active_control_away), width: "u16_be", domain },
+          { name: "pad_word_0", address: d.addr(nhl94.CONTROL_G.pad_word_0), width: "u16_be", domain },
+          { name: "pad_word_2", address: d.addr(nhl94.CONTROL_G.pad_word_2), width: "u16_be", domain },
+        ];
+        const gv = await bh.call<Record<string, number>>(target, "read_many", { reads });
+        const offsideOn = ((gv.gmode ?? 0) & 0x2000) !== 0;
+        const lines = [
+          `game_mode: ${rulesGameMode(gv.game_mode_flags ?? 0)}`,
+          `players: ${rulesPlayers(gv.active_control_home ?? 0xffff, gv.active_control_away ?? 0xffff, gv.pad_word_0 ?? 0, gv.pad_word_2 ?? 0)}`,
+          `penalties: ${rulesPenalty(gv.opt_pen ?? -1)}`,
+          `offside: ${offsideOn ? "ON" : "OFF"}`,
+          `raw: game_mode_flags=0x${((gv.game_mode_flags ?? 0) & 0xff).toString(16).toUpperCase().padStart(2, "0")} ` +
+            `opt_pen=${nhl94.hexWord(gv.opt_pen ?? 0)} gmode=${nhl94.hexWord(gv.gmode ?? 0)} ` +
+            `active_home=${nhl94.hexWord(gv.active_control_home ?? 0xffff)} active_away=${nhl94.hexWord(gv.active_control_away ?? 0xffff)} ` +
+            `pad0=${nhl94.hexWord(gv.pad_word_0 ?? 0)} pad2=${nhl94.hexWord(gv.pad_word_2 ?? 0)}`,
+        ];
+        return ok(lines.join("\n"));
       }
 
       case "nhl94_read": {

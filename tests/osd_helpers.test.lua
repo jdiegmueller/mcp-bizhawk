@@ -20,6 +20,9 @@ local socket_block = extract("local function socket_badge_text()", "\nend", "soc
 local frozen_block = extract("local function osd_frozen_fields()", "\n    return out\nend", "osd_frozen_fields")
 local build_block = extract("local function osd_build(segs)", "\nend", "osd_build")
 local clock_block = extract("local function osd_clock_line(", "\nend", "osd_clock_line")
+local mode_block = extract("local function osd_game_mode_label(", "\nend", "osd_game_mode_label")
+local players_block = extract("local function osd_players_label(", "\nend", "osd_players_label")
+local penalties_block = extract("local function osd_penalties_label(", "\nend", "osd_penalties_label")
 
 local env = {
   tostring = tostring,
@@ -39,9 +42,10 @@ local env = {
 
 local chunk = assert(load(
   socket_block .. "\n" .. frozen_block .. "\n" .. build_block .. "\n" .. clock_block ..
-  "\nreturn socket_badge_text, osd_frozen_fields, osd_clock_line",
+  "\n" .. mode_block .. "\n" .. players_block .. "\n" .. penalties_block ..
+  "\nreturn socket_badge_text, osd_frozen_fields, osd_clock_line, osd_game_mode_label, osd_players_label, osd_penalties_label",
   "osd_helpers", "t", env))
-local socket_badge_text, osd_frozen_fields, osd_clock_line = chunk()
+local socket_badge_text, osd_frozen_fields, osd_clock_line, osd_game_mode_label, osd_players_label, osd_penalties_label = chunk()
 
 assert(socket_badge_text() == "127.0.0.1:8768:CONNECTED", socket_badge_text())
 env.disconnected = true
@@ -60,5 +64,21 @@ assert(visible:match("1st 9:33 run%s+carry s4"), visible)
 assert(overlay and overlay:match("9:33"), overlay or "(nil)")
 assert(not overlay:match("1st"), overlay)
 print("ok   clock line highlights the time value only")
+
+assert(osd_game_mode_label(0x00) == "Exhibition", osd_game_mode_label(0x00))
+assert(osd_game_mode_label(0x87) == "Shootout", osd_game_mode_label(0x87))
+print("ok   game mode label distinguishes exhibition and shootout mode")
+
+assert(osd_players_label(0xffff, 0xffff, 0, 0) == "CPU-CPU")
+assert(osd_players_label(4, 0xffff, 0x0010, 0) == "1P-CPU")
+assert(osd_players_label(4, 0xffff, 0, 0x0010) == "2P-CPU")
+assert(osd_players_label(0xffff, 8, 0, 0) == "CPU-1P")
+assert(osd_players_label(4, 8, 0, 0) == "1P-2P")
+print("ok   players label covers CPU/human control snapshots")
+
+assert(osd_penalties_label(0, 0x0000) == "OFF/offside OFF")
+assert(osd_penalties_label(2, 0x0000) == "ON-exc-offside/offside OFF")
+assert(osd_penalties_label(1, 0x2000) == "ON/offside ON")
+print("ok   penalties label separates penalty option from offside gate")
 
 print("all OSD helper tests passed")
