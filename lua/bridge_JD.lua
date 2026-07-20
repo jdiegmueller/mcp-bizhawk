@@ -1,5 +1,10 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.43-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.44-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.44-jd changes: the LuaCanvas OSD pop-up is OFF by default again,
+--   and when it is enabled its window title includes the configured
+--   socket_port so multiple BizHawk instances can be distinguished.
+--   Protocol stays 3.
 --
 -- v2026.7.43-jd changes: nhl94_state decodes verified per-slot control
 --   and assignment role context, and reports full-word gmode clock semantics.
@@ -663,7 +668,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.43-jd",
+    version    = "2026.7.44-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -998,7 +1003,7 @@ end
 -- Rendering prefers a SEPARATE WINDOW (gui.createcanvas LuaCanvas) so the
 -- game view stays clean; if the build can't create one (or the window dies
 -- — e.g. user closes it), it falls back to the on-game gui.text overlay.
-local TRACE_OSD = true
+local TRACE_OSD = false
 
 -- gui.text (EmuHawk OSD renderer, window coords) — NOT gui.pixelText, whose
 -- bitmap font renders as empty boxes under mono/Linux.
@@ -1042,6 +1047,11 @@ OSD_REFRESH_EVERY = 6
 -- enable so toggling the OSD on repaints immediately rather than after N frames).
 local osd_last_frame = -1
 
+local function bridge_window_title()
+    local suffix = port and (" socket_port=" .. tostring(port)) or " socket_port=?"
+    return BRIDGE.name .. suffix .. " - NHL94 state"
+end
+
 local function osd_get_canvas()
     if osd_canvas or osd_canvas_failed then return osd_canvas end
     if not (gui and has(gui, "createcanvas")) then
@@ -1050,7 +1060,7 @@ local function osd_get_canvas()
     end
     local ok, c = pcall(gui.createcanvas, OSD_CANVAS_W, 4 + OSD_CANVAS_BADGE_H + OSD_LINES * OSD_CANVAS_LINE_H + 4)
     if ok and c then
-        pcall(function() c.SetTitle(BRIDGE.name .. " — NHL94 state") end)
+        pcall(function() c.SetTitle(bridge_window_title()) end)
         osd_canvas = c
         console.log("[mcp-bizhawk] OSD rendering to separate LuaCanvas window")
     else
