@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.48-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.49-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.49-jd changes: EmuHawk audio mute now logs and returns one status
+--   message for every attempt: unsupported API, success, or failure.
+--   Protocol stays 3.
 --
 -- v2026.7.48-jd changes: add passive observe_frames for frame advancement with
 --   memory/screenshot observations and no joypad injection. Protocol stays 3.
@@ -683,7 +687,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.48-jd",
+    version    = "2026.7.49-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -1571,15 +1575,23 @@ local CAPS = {
 }
 
 local function mute_emuhawk_audio(context)
-    if not CAPS.set_sound_enabled then return end
+    local suffix = context and (" (" .. context .. ")") or ""
+    local msg
+    if not CAPS.set_sound_enabled then
+        msg = "[mcp-bizhawk] EmuHawk audio mute unsupported" .. suffix .. ": client.SetSoundEnabled not available"
+        console.log(msg)
+        return msg
+    end
     local ok, err = pcall(function()
         client.SetSoundEnabled(false)
     end)
     if ok then
-        console.log("[mcp-bizhawk] EmuHawk audio muted" .. (context and (" (" .. context .. ")") or ""))
+        msg = "[mcp-bizhawk] EmuHawk audio muted" .. suffix
     else
-        console.log("[mcp-bizhawk] WARNING: failed to mute EmuHawk audio: " .. tostring(err))
+        msg = "[mcp-bizhawk] WARNING: failed to mute EmuHawk audio" .. suffix .. ": " .. tostring(err)
     end
+    console.log(msg)
+    return msg
 end
 
 -- ── Command handlers ────────────────────────────────────────────────────────
