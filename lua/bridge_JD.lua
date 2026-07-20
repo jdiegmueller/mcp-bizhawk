@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.52-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.53-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.53-jd changes: phys_trace now appends puck position, velocity, and
+--   carrier columns so physics-sync captures are self-contained for puck-driven
+--   goalie/positioning analysis. Protocol stays 3.
 --
 -- v2026.7.52-jd changes: version bump after nhl94_state Windows screenshot
 --   path mapping fix. Protocol stays 3.
@@ -403,7 +407,7 @@
 --     LAST so existing column order/values are unchanged. For held-Down from
 --     rest, frac advances +0x3000 per tick and carries into the octant on
 --     16-bit overflow (verified against retail nhl94.gen).
---   * CSV columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac.
+--   * CSV columns then: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac.
 --
 -- v0.15.1 changes (drop phys_trace eval_lua workaround):
 --   * Removed the `_G.phys_trace_start/stop/status` global aliases. They existed
@@ -693,7 +697,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.52-jd",
+    version    = "2026.7.53-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -995,19 +999,23 @@ local function phys_emit_cb()
     if phys_latch_d7 == 0 then return end
     phys_tick = phys_tick + 1
     local b = PHYS_SLOT2
-    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+    local pk = PUCK_ADDR
+    phys_fh:write(string.format("%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
         phys_tick, emu.framecount(), phys_latch_d7, trace_pad_string(1),
         tr_s16(b + 0x00), tr_u16(b + 0x02),      -- X 16.16: whole, sub
         tr_s16(b + 0x14), tr_u16(b + 0x16),      -- Y 16.16: whole, sub
         tr_s16(b + 0x28), tr_s16(b + 0x2A),      -- xv, yv
         tr_u16(b + 0x54),                        -- fdir = octant (high word of heading longword @+0x54)
         tr_u16(b + 0x56),                        -- frac = low word of the 32-bit heading longword @+0x54; octant (fdir) is the high word
-        tr_u8(TRACE_G.gmode) & 1))               -- faceoff = gmode(0xC2EA) bit0 (1 = whistle/faceoff/stoppage mode)
+        tr_u8(TRACE_G.gmode) & 1,                -- faceoff = gmode(0xC2EA) bit0 (1 = whistle/faceoff/stoppage mode)
+        tr_s16(pk + 0x00), tr_s16(pk + 0x14), tr_s16(pk + 0x18),
+        tr_s16(pk + 0x28), tr_s16(pk + 0x2A), tr_s16(pk + 0x2C),
+        tr_s16(TRACE_G.puckc)))
     if phys_tick % TRACE_FLUSH == 0 then phys_fh:flush() end
 end
 
 local function phys_header()
-    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac,faceoff"
+    return "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac,faceoff,puck_x,puck_y,puck_z,puck_xv,puck_yv,puck_zv,puckc"
 end
 
 -- ── Live state OSD ──────────────────────────────────────────────────────────

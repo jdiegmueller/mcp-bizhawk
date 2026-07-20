@@ -1321,7 +1321,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_phys_trace_start",
     description:
       "PURPOSE: Start the bridge's physics-sync trace — one CSV row per NHL94 `updateplayers` physics tick (NOT per video frame), each carrying the per-pass D7 step multiplier latched inside the retail Gameloop. " +
-      "USAGE: The right trace when you need physics-tick resolution and the actual D7 sub-step count per tick (e.g. speed/acceleration work), which the per-frame bizhawk_trace_* dump cannot expose. Start → drive input (bizhawk_play_input_sequence) → bizhawk_phys_trace_stop. " +
+      "USAGE: The right trace when you need physics-tick resolution and the actual D7 sub-step count per tick (e.g. speed/acceleration work), plus same-tick puck position/velocity context for puck-driven AI analysis. Start → drive input (bizhawk_play_input_sequence) → bizhawk_phys_trace_stop. " +
       "BEHAVIOR: RETAIL nhl94.gen ONLY — hash-guarded (MD5 8356B3F0…), so it errors on any other ROM, and errors on cores without event.on_bus_exec. Registers two bus-exec hooks in the Gameloop. While active it SUPPRESSES the per-video-frame bizhawk_trace_* writer. DESTRUCTIVE TO TRACE FILE: opens the bridge's per-backend trace file in write mode (truncates). Do not pass filesystem paths. " +
       "RETURNS: 'Physics-sync trace started (latch ADDR, emit ADDR)'. Backend filesystem paths are kept private; use bizhawk_phys_trace_tail for inline readback.",
     inputSchema: {
@@ -1353,7 +1353,7 @@ const TOOLS: Tool[] = [
     name: "bizhawk_phys_trace_tail",
     description:
       "PURPOSE: Return the physics-sync CSV's header line plus its last N rows — a quick look at recent physics ticks without leaving the tool interface. " +
-      "USAGE: Spot-check per-tick D7 and slot-2 state right after a play_input_sequence. The phys CSV is narrow (12 columns: tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac), so a tail reads cleanly here. " +
+      "USAGE: Spot-check per-tick D7, slot-2 state, facing fraction, faceoff flag, and puck position/velocity/carrier right after a play_input_sequence. The phys CSV columns are tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac,faceoff,puck_x,puck_y,puck_z,puck_xv,puck_yv,puck_zv,puckc. " +
       "BEHAVIOR: No side effects. Reads the file from the server's filesystem (requires server and BizHawk to share one — true locally). Rows are buffered, so the very newest may lag slightly. Returns an error if the phys trace has never been started or the file is unreadable. " +
       "RETURNS: 'Physics-sync trace tail (N ticks, active: yes|no)' + the CSV header + the last N data rows. Backend filesystem paths are kept private.",
     inputSchema: {

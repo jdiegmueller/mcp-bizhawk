@@ -5,6 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import { startHarness, textOf } from "./helpers/harness.mjs";
 
+const PHYS_HEADER =
+  "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir,frac,faceoff,puck_x,puck_y,puck_z,puck_xv,puck_yv,puck_zv,puckc";
+
+test("bridge physics trace schema includes puck state", () => {
+  const bridge = fs.readFileSync(new URL("../lua/bridge_JD.lua", import.meta.url), "utf8");
+
+  assert.match(bridge, new RegExp(`return "${PHYS_HEADER}"`));
+  assert.match(bridge, /local pk = PUCK_ADDR/);
+  assert.match(bridge, /tr_s16\(pk \+ 0x28\).*tr_s16\(pk \+ 0x2A\).*tr_s16\(pk \+ 0x2C\)/s);
+});
+
 test("phys trace start/stop/status round-trip", async () => {
   const h = await startHarness({
     phys_trace_start: (p) => ({
@@ -37,8 +48,8 @@ test("phys trace start/stop/status round-trip", async () => {
 
 test("bizhawk_phys_trace_tail returns header + last N rows", async () => {
   const file = path.join(os.tmpdir(), `phys-tail-test-${process.pid}.csv`);
-  const rows = ["tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir"];
-  for (let i = 1; i <= 50; i++) rows.push(`${i},${i * 2},1,0,${i},0,${i},0,0,0,0`);
+  const rows = [PHYS_HEADER];
+  for (let i = 1; i <= 50; i++) rows.push(`${i},${i * 2},1,0,${i},0,${i},0,0,0,0,0,0,${i + 100},200,0,12,-34,0,65535`);
   fs.writeFileSync(file, rows.join("\n") + "\n");
 
   const h = await startHarness({
@@ -49,9 +60,9 @@ test("bizhawk_phys_trace_tail returns header + last N rows", async () => {
     const lines = textOf(res).split("\n");
     assert.match(lines[0], /50 ticks, active: yes/);
     assert.doesNotMatch(lines[0], /\/tmp|phys-tail-test/);
-    assert.equal(lines[1], "tick,frame,d7,pad,x,xsub,y,ysub,xv,yv,fdir");
-    assert.equal(lines[2], "48,96,1,0,48,0,48,0,0,0,0");
-    assert.equal(lines[4], "50,100,1,0,50,0,50,0,0,0,0");
+    assert.equal(lines[1], PHYS_HEADER);
+    assert.equal(lines[2], "48,96,1,0,48,0,48,0,0,0,0,0,0,148,200,0,12,-34,0,65535");
+    assert.equal(lines[4], "50,100,1,0,50,0,50,0,0,0,0,0,0,150,200,0,12,-34,0,65535");
   } finally {
     await h.close();
     fs.rmSync(file, { force: true });
