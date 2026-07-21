@@ -91,6 +91,61 @@ test("nhl94_fields reads documented NHL94 RNG and frame globals", async () => {
   }
 });
 
+test("nhl94_fields reads documented read-only control globals", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: (p) => {
+      assert.ok(p.reads.some((r) => r.name === "global.control_gate_team0" && r.address === 0xffd05a && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "global.control_gate_team1" && r.address === 0xffd05c && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "global.secondary_control_0" && r.address === 0xffc328 && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "global.secondary_control_1" && r.address === 0xffc32a && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "global.raw_pad_byte_0" && r.address === 0xffbef6 && r.width === "u8"));
+      return {
+        "global.control_gate_team0": 0,
+        "global.control_gate_team1": 0,
+        "global.secondary_control_0": 1,
+        "global.secondary_control_1": 0,
+        "global.raw_pad_byte_0": 0xff,
+      };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_fields",
+      arguments: { target: h.target,
+        ops: [
+          { op: "read", target: "global", field: "control_gate_team0" },
+          { op: "read", target: "global", field: "control_gate_team1" },
+          { op: "read", target: "global", field: "secondary_control_0" },
+          { op: "read", target: "global", field: "secondary_control_1" },
+          { op: "read", target: "global", field: "raw_pad_byte_0" },
+        ],
+      },
+    });
+    const text = textOf(res);
+    assert.match(text, /global\.control_gate_team0=0/);
+    assert.match(text, /global\.secondary_control_0=1/);
+    assert.match(text, /global\.raw_pad_byte_0=255/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_fields rejects writes to read-only control globals", async () => {
+  const h = await startHarness({ list_memory_domains: () => DOMAINS });
+  try {
+    await assert.rejects(
+      h.client.callTool({
+        name: "nhl94_fields",
+        arguments: { target: h.target, ops: [{ op: "write", target: "global", field: "control_gate_team0", value: 1 }] },
+      }),
+      /read-only control context/,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_fields writes and freezes with post-write readback", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,

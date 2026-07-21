@@ -1527,7 +1527,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_fields",
     description:
       "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
-      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock/global.home_score/global.rng_seed plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
+      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock/global.home_score/global.rng_seed plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. Control-context globals in CONTROL_G are readable only. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
       "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words; fdir accepts either a raw integer or one of north/northeast/east/southeast/south/southwest/west/northwest. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. This tool does not advance frames. " +
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
@@ -2114,12 +2114,14 @@ interface NhlFieldRef {
   field: string;
   target: string;
   global: boolean;
+  readOnly: boolean;
 }
 
 function globalWidth(field: string): string {
   if (field === "rng_seed") return "u32_be";
   if (field === "gmode" || field === "session_byte" || field === "home_line" || field === "away_line") return "u8";
   if (field === "vpos" || field === "hpos" || field === "yleader" || field === "shotplayer" || field === "lastplayer" || field === "passdir" || field === "passspeed") return "s16_be";
+  if (field.startsWith("raw_pad_byte_") || field.startsWith("switch_debounce_")) return "u8";
   return "u16_be";
 }
 
@@ -2132,12 +2134,18 @@ function resolveNhlFieldOp(op: Record<string, unknown>): NhlFieldRef {
   if (target === "global") {
     if (typeof op.address === "string" || typeof op.address === "number") {
       if (!allowRaw) throw new Error(`raw global address ${String(op.address)} requires allow_raw:true`);
-      return { label: `global.${String(op.address)}`, address: parseRawNumber("address", op.address), width, fixed: false, field: String(op.address), target, global: true };
+      return { label: `global.${String(op.address)}`, address: parseRawNumber("address", op.address), width, fixed: false, field: String(op.address), target, global: true, readOnly: false };
     }
-    if (!field || !(field in nhl94.G)) {
-      throw new Error(`unknown global field "${field}" (use carrier, clock, gameclock, period, gsp, gmode, faceoff_window_latch, home_line, away_line; raw address requires allow_raw:true)`);
+    if (field && field in nhl94.G) {
+      return { label: `global.${field}`, address: nhl94.G[field], width: globalWidth(field), fixed: false, field, target, global: true, readOnly: false };
     }
-    return { label: `global.${field}`, address: nhl94.G[field], width: globalWidth(field), fixed: false, field, target, global: true };
+    if (field && field in nhl94.CONTROL_G) {
+      if (op.op !== "read") {
+        throw new Error(`global.${field} is read-only control context; only op:"read" is allowed`);
+      }
+      return { label: `global.${field}`, address: nhl94.CONTROL_G[field], width: globalWidth(field), fixed: false, field, target, global: true, readOnly: true };
+    }
+    throw new Error(`unknown global field "${field}" (use a named NHL94 global/control field, or raw address with allow_raw:true)`);
   }
 
   const { base } = nhl94.resolveTarget(target);
@@ -2145,7 +2153,7 @@ function resolveNhlFieldOp(op: Record<string, unknown>): NhlFieldRef {
     if (!allowRaw) throw new Error(`raw entity offset ${String(op.offset)} requires allow_raw:true`);
     const offset = parseRawNumber("offset", op.offset);
     if (offset < 0 || offset >= nhl94.SCSIZE) throw new Error(`raw entity offset ${String(op.offset)} out of struct range 0..0x${(nhl94.SCSIZE - 1).toString(16)}`);
-    return { label: `${target}.${String(op.offset)}`, address: base + offset, width, fixed: false, field: String(op.offset), target, global: false };
+    return { label: `${target}.${String(op.offset)}`, address: base + offset, width, fixed: false, field: String(op.offset), target, global: false, readOnly: false };
   }
   if (!field || !(field in nhl94.OFF)) {
     throw new Error(`unknown field "${field}" (use a named NHL94 field, or raw offset with allow_raw:true)`);
@@ -2158,6 +2166,7 @@ function resolveNhlFieldOp(op: Record<string, unknown>): NhlFieldRef {
     field,
     target,
     global: false,
+    readOnly: false,
   };
 }
 
@@ -3020,7 +3029,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "away_line", address: d.addr(nhl94.G.away_line), width: "u8", domain },
         );
         for (const [name, address] of Object.entries(nhl94.CONTROL_G)) {
-          const width = name.startsWith("switch_debounce_") ? "u8" : "u16_be";
+          const width = name.startsWith("switch_debounce_") || name.startsWith("raw_pad_byte_") ? "u8" : "u16_be";
           gReads.push({ name, address: d.addr(address), width, domain });
         }
         // Session/phase byte (0xFFC735) — read in the same round-trip; drives the
@@ -3185,6 +3194,15 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             `word1@0xFFBEF0=${nhl94.formatPadWord(gv.pad_word_1 ?? 0)} ` +
             `word2@0xFFBEF2=${nhl94.formatPadWord(gv.pad_word_2 ?? 0)} ` +
             `word3@0xFFBEF4=${nhl94.formatPadWord(gv.pad_word_3 ?? 0)}`,
+          );
+          lines.push(
+            `  control_words: gate0=${nhl94.hexWord(gv.control_gate_team0 ?? 0)} gate1=${nhl94.hexWord(gv.control_gate_team1 ?? 0)} ` +
+            `secondary0=${nhl94.hexWord(gv.secondary_control_0 ?? 0)} secondary1=${nhl94.hexWord(gv.secondary_control_1 ?? 0)} ` +
+            `(semantics unconfirmed/unexplored)`,
+          );
+          lines.push(
+            `  raw_pad_bytes: b0=0x${hex2(gv.raw_pad_byte_0 ?? 0)} b1=0x${hex2(gv.raw_pad_byte_1 ?? 0)} ` +
+            `b2=0x${hex2(gv.raw_pad_byte_2 ?? 0)} b3=0x${hex2(gv.raw_pad_byte_3 ?? 0)}`,
           );
           lines.push(
             `  caveat: c1playernum=${nhl94.hexWord(gv.c1playernum ?? 0)} ` +

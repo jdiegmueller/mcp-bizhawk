@@ -20,6 +20,7 @@ import {
   RECIPES_GUIDE,
   lineLabel,
   G,
+  CONTROL_G,
 } from "../dist/nhl94.js";
 
 test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool semantics", () => {
@@ -77,6 +78,15 @@ test("global table exposes documented score addresses", () => {
 test("global table exposes documented RNG and frame-counter addresses", () => {
   assert.equal(G.rng_seed, 0xffd066);
   assert.equal(G.vblank_frame_counter, 0xffb03e);
+});
+
+test("control global table exposes read-only unexplored and raw-pad addresses", () => {
+  assert.equal(CONTROL_G.control_gate_team0, 0xffd05a);
+  assert.equal(CONTROL_G.control_gate_team1, 0xffd05c);
+  assert.equal(CONTROL_G.secondary_control_0, 0xffc328);
+  assert.equal(CONTROL_G.secondary_control_1, 0xffc32a);
+  assert.equal(CONTROL_G.raw_pad_byte_0, 0xffbef6);
+  assert.equal(CONTROL_G.raw_pad_byte_3, 0xffbef9);
 });
 
 test("resolveField maps known names to offset/width and flags fixed-point axes", () => {

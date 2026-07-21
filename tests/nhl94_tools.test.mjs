@@ -32,6 +32,10 @@ function defaultNhlGlobals(over = {}) {
     away_line: 2,
     active_control_home: 0xffff,
     active_control_away: 0xffff,
+    control_gate_team0: 0,
+    control_gate_team1: 0,
+    secondary_control_0: 1,
+    secondary_control_1: 0,
     c1playernum: 0,
     c2playernum: 0,
     switch_debounce_home: 0,
@@ -40,6 +44,10 @@ function defaultNhlGlobals(over = {}) {
     pad_word_1: 0,
     pad_word_2: 0,
     pad_word_3: 0,
+    raw_pad_byte_0: 0,
+    raw_pad_byte_1: 0,
+    raw_pad_byte_2: 0,
+    raw_pad_byte_3: 0,
     ...over,
   };
 }
@@ -295,6 +303,9 @@ test("nhl94_state reports 1P-CPU control context, pad words, and route confidenc
     assert.ok(reads.some((r) => r.name === "switch_debounce_home" && r.address === 0xffbf06 && r.width === "u8"));
     assert.ok(reads.some((r) => r.name === "pad_word_0" && r.address === 0xffbeee && r.width === "u16_be"));
     assert.ok(reads.some((r) => r.name === "pad_word_3" && r.address === 0xffbef4 && r.width === "u16_be"));
+    assert.ok(reads.some((r) => r.name === "control_gate_team0" && r.address === 0xffd05a && r.width === "u16_be"));
+    assert.ok(reads.some((r) => r.name === "secondary_control_0" && r.address === 0xffc328 && r.width === "u16_be"));
+    assert.ok(reads.some((r) => r.name === "raw_pad_byte_0" && r.address === 0xffbef6 && r.width === "u8"));
   } finally {
     await h.close();
   }

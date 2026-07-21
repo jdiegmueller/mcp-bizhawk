@@ -152,14 +152,24 @@ export const G: Record<string, number> = {
 export const CONTROL_G: Record<string, number> = {
   active_control_home: 0xffc320,
   active_control_away: 0xffc322,
+  // Adjacent to active-control pointers; documented as unexplored.
+  secondary_control_0: 0xffc328,
+  secondary_control_1: 0xffc32a,
   c1playernum: 0xffc656,
   c2playernum: 0xffc658,
+  // Semantics unconfirmed when nonzero; live-read 0 in 1-human-vs-CPU captures.
+  control_gate_team0: 0xffd05a,
+  control_gate_team1: 0xffd05c,
   switch_debounce_home: 0xffbf06,
   switch_debounce_away: 0xffbf07,
   pad_word_0: 0xffbeee,
   pad_word_1: 0xffbef0,
   pad_word_2: 0xffbef2,
   pad_word_3: 0xffbef4,
+  raw_pad_byte_0: 0xffbef6,
+  raw_pad_byte_1: 0xffbef7,
+  raw_pad_byte_2: 0xffbef8,
+  raw_pad_byte_3: 0xffbef9,
 };
 
 // Screen/session-phase byte at 0xFFC735. NHL94 has NO clean single "screen
