@@ -69,6 +69,11 @@ test("global table exposes faceoff-window and selected-line addresses", () => {
   assert.equal(G.away_line, 0xffca48);
 });
 
+test("global table exposes documented score addresses", () => {
+  assert.equal(G.home_score, 0xffc6da);
+  assert.equal(G.away_score, 0xffca3e);
+});
+
 test("resolveField maps known names to offset/width and flags fixed-point axes", () => {
   assert.deepEqual(resolveField("impact"), { field: "impact", offset: 0x32, width: "s16_be", fixed: false });
   assert.deepEqual(resolveField("pf"), { field: "pf", offset: 0x62, width: "u8", fixed: false });

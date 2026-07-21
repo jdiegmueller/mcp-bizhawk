@@ -1,9 +1,10 @@
 // NHL94 game-semantic layout + codecs.
 //
-// SOURCE OF TRUTH: lua/bridge_JD.lua (TRACE_FIELDS / TRACE_G / camera consts).
-// This module deliberately duplicates those constants on the server side so the
+// SOURCE OF TRUTH: docs/rom-reference/RETAIL_OFFSETS.md in the NHL94 game repo
+// for decoded retail RAM, plus lua/bridge_JD.lua for trace/OSD parity fields.
+// This module deliberately duplicates constants on the server side so the
 // nhl94_* tools can translate game nouns (skaters s0-s11, puck pk) into 68K
-// addresses/widths/endianness without a bridge round-trip. Keep the two in sync.
+// addresses/widths/endianness without a bridge round-trip.
 
 export const SORTCORDS = 0xffb04a; // slot 0 base
 export const SCSIZE = 0x80; // per-slot struct stride
@@ -134,6 +135,9 @@ export const G: Record<string, number> = {
   lastplayer: 0xffbeda,
   passdir: 0xffbedc,
   passspeed: 0xffbede,
+  // RETAIL_OFFSETS.md live-verified RAM table: canonical HUD score pair.
+  home_score: 0xffc6da,
+  away_score: 0xffca3e,
   faceoff_window_latch: 0xffc304,
   line_change_latch: 0xffc304,
   home_line: 0xffc6e5,

@@ -31,6 +31,36 @@ test("nhl94_fields reads named entity and global fields", async () => {
   }
 });
 
+test("nhl94_fields reads documented NHL94 score globals", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: (p) => {
+      assert.ok(p.reads.some((r) => r.name === "global.home_score" && r.address === 0xffc6da && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "global.away_score" && r.address === 0xffca3e && r.width === "u16_be"));
+      return {
+        "global.home_score": 2,
+        "global.away_score": 1,
+      };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_fields",
+      arguments: { target: h.target,
+        ops: [
+          { op: "read", target: "global", field: "home_score" },
+          { op: "read", target: "global", field: "away_score" },
+        ],
+      },
+    });
+    const text = textOf(res);
+    assert.match(text, /global\.home_score=2/);
+    assert.match(text, /global\.away_score=1/);
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_fields writes and freezes with post-write readback", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
