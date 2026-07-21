@@ -1,5 +1,8 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.53-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.54-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.54-jd changes: server-side web tool console and NHL94 score, line,
+--   and penalty tools. Bridge behavior and protocol stay 3.
 --
 -- v2026.7.53-jd changes: phys_trace now appends puck position, velocity, and
 --   carrier columns so physics-sync captures are self-contained for puck-driven
@@ -697,7 +700,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.53-jd",
+    version    = "2026.7.54-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

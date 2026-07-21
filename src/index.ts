@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { BizhawkServer } from "./bizhawk.js";
 import { createMcpHttpServer, MCP_PATH } from "./http.js";
+import { createWebHttpServer, resolveWebListenerConfig } from "./web.js";
 import { loadConfig } from "./config.js";
 import { VERSION } from "./version.js";
 
@@ -35,6 +36,8 @@ async function main() {
   }
 
   const httpServer = createMcpHttpServer(bh);
+  const webConfig = resolveWebListenerConfig(process.env);
+  const webServer = createWebHttpServer({ mcpUrl: webConfig.mcpUrl });
   httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
     process.stderr.write(
       `[mcp-bizhawk] MCP server v${VERSION} ready — streamable-HTTP at http://${HTTP_HOST}:${HTTP_PORT}${MCP_PATH}\n`
@@ -44,6 +47,15 @@ async function main() {
     process.stderr.write(`[mcp-bizhawk] FATAL: HTTP server error on ${HTTP_HOST}:${HTTP_PORT}: ${err}\n`);
     process.exit(1);
   });
+  webServer.listen(webConfig.port, webConfig.host, () => {
+    process.stderr.write(
+      `[mcp-bizhawk] web control ready at http://${webConfig.host}:${webConfig.port}/\n`
+    );
+  });
+  webServer.on("error", (err) => {
+    process.stderr.write(`[mcp-bizhawk] FATAL: web server error on ${webConfig.host}:${webConfig.port}: ${err}\n`);
+    process.exit(1);
+  });
 
   let shuttingDown = false;
   const shutdown = (reason: string) => {
@@ -51,6 +63,7 @@ async function main() {
     shuttingDown = true;
     process.stderr.write(`[mcp-bizhawk] shutting down (${reason})\n`);
     httpServer.close();
+    webServer.close();
     bh.stop().catch((e) => process.stderr.write(`[mcp-bizhawk] stop error: ${e}\n`));
     setTimeout(() => process.exit(0), 150);
   };

@@ -210,6 +210,137 @@ test("nhl94_unfreeze requires exactly one scope", async () => {
   }
 });
 
+test("nhl94_set_score writes both scores atomically and returns readback", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: () => ({ applied: 2, frozen_count: 0 }),
+    read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, r.name === "home_score" ? 7 : 4])),
+  });
+  try {
+    const result = await h.client.callTool({
+      name: "nhl94_set_score",
+      arguments: { target: h.target, home: 7, away: 4 },
+    });
+    assert.match(textOf(result), /Score set: home 7, away 4/);
+    const call = h.bridge.calls.find((c) => c.method === "memory_ops");
+    assert.deepEqual(call.params.ops, [
+      { op: "write", address: 0xffc6da, value: 7, width: "u16_be" },
+      { op: "write", address: 0xffca3e, value: 4, width: "u16_be" },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_set_line writes the selected team line and returns decoded readback", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    memory_ops: () => ({ applied: 1, frozen_count: 0 }),
+    read8: () => 2,
+  });
+  try {
+    const result = await h.client.callTool({
+      name: "nhl94_set_line",
+      arguments: { target: h.target, team: "away", line: "Chk" },
+    });
+    assert.match(textOf(result), /Away line set: Chk \(2\)/);
+    const call = h.bridge.calls.find((c) => c.method === "memory_ops");
+    assert.deepEqual(call.params.ops, [
+      { op: "write", address: 0xffca48, value: 2, width: "u8" },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_add_penalty resolves team plus player id, queues the type, and arms arbitrary duration", async () => {
+  const records = Array.from({ length: 12 }, (_, i) => ({
+    _index: i,
+    player_id: i === 8 ? 89 : i,
+    pf: i >= 6 ? 0x40 : 0,
+    pf2: 0,
+  }));
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: () => records,
+    read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, 0])),
+    read16: () => 0x2059,
+    eval_lua: () => "hook-armed",
+    memory_ops: () => ({ applied: 2, frozen_count: 0 }),
+  });
+  try {
+    const result = await h.client.callTool({
+      name: "nhl94_add_penalty",
+      arguments: { target: h.target, team: "away", player_id: 89, penalty_type: "tripping", duration_seconds: 360 },
+    });
+    assert.match(textOf(result), /Queued 6:00 Tripping for s8 \(away, player 89\)/);
+    const write = h.bridge.calls.find((c) => c.method === "memory_ops");
+    assert.deepEqual(write.params.ops, [
+      { op: "write", address: 0xffd056, value: 1, width: "u16_be" },
+      { op: "write", address: 0xffc3a4, value: 0x2059, width: "u16_be" },
+    ]);
+    const hook = h.bridge.calls.find((c) => c.method === "eval_lua");
+    assert.match(hook.params.code, /0xFFCA9E/);
+    assert.match(hook.params.code, /360/);
+    assert.match(hook.params.code, /event\.onframestart/);
+    assert.doesNotMatch(hook.params.code, /event\.on_bus_write/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_remove_penalty clears a queued entry and expires an active slot penalty", async () => {
+  const records = Array.from({ length: 12 }, (_, i) => ({
+    _index: i,
+    player_id: i === 3 ? 12 : i,
+    pf: i >= 6 ? 0x40 : 0,
+    pf2: i === 3 ? 0x04 : 0,
+  }));
+  let removed = false;
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: () => records,
+    read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, !removed && r.name === "penalty_0" ? 0x200c : 0])),
+    eval_lua: () => "hook-cleared",
+    memory_ops: () => { removed = true; return { applied: 2, frozen_count: 0 }; },
+  });
+  try {
+    const result = await h.client.callTool({
+      name: "nhl94_remove_penalty",
+      arguments: { target: h.target, slot: "s3" },
+    });
+    assert.match(textOf(result), /Removed penalty for s3 \(home, player 12\)/);
+    const write = h.bridge.calls.find((c) => c.method === "memory_ops");
+    assert.deepEqual(write.params.ops, [
+      { op: "write", address: 0xffc3a4, value: 0, width: "u16_be" },
+      { op: "write", address: 0xffc73a, value: 0, width: "u16_be" },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("NHL94 write tools publish detailed descriptions and recipes", async () => {
+  const h = await startHarness();
+  try {
+    const catalog = await h.client.listTools();
+    for (const name of ["nhl94_set_score", "nhl94_set_line", "nhl94_add_penalty", "nhl94_remove_penalty"]) {
+      const tool = catalog.tools.find((entry) => entry.name === name);
+      assert.ok(tool, `${name} is listed`);
+      assert.match(tool.description, /PURPOSE:/);
+      assert.match(tool.description, /USAGE:/);
+      assert.match(tool.description, /BEHAVIOR:/);
+      assert.match(tool.description, /RETURNS:/);
+    }
+    const recipes = await h.client.callTool({ name: "nhl94_recipes", arguments: {} });
+    assert.match(textOf(recipes), /nhl94_set_score/);
+    assert.match(textOf(recipes), /nhl94_add_penalty/);
+    assert.match(textOf(recipes), /duration_seconds/);
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_state decodes the slot grid, globals, and frozen annotations", async () => {
   const rec = (i, over = {}) => ({ _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0, attr: 0, anim: 0, spanum: 0, spacnt: 0, ...over });
   const h = await startHarness({

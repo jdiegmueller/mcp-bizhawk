@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Dependency-free web tool console with schema-generated forms, backend/tool
+  autocomplete, MCP result rendering, and loopback/`10.245.0.0/16` access.
+- Semantic NHL94 score, line, add-penalty, and remove-penalty tools, including
+  slot or team/player selection and arbitrary penalty durations.
+
+### Changed
+
+- `nhl94_recipes` and tool descriptions cover the new state-edit workflows.
+
 ## [2026.7.39-jd] - 2026-07-17
 
 ### Added

@@ -1381,6 +1381,70 @@ const TOOLS: Tool[] = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "nhl94_set_score",
+    description:
+      "PURPOSE: Set the NHL '94 home and away scores together using their semantic fields. " +
+      "USAGE: Use this instead of raw writes or nhl94_fields whenever changing the scoreboard. Both values are required so the displayed matchup is explicit. " +
+      "BEHAVIOR: DESTRUCTIVE: atomically writes both unsigned 16-bit score fields, then reads both back. Values may be intentionally unrealistic. " +
+      "RETURNS: The confirmed home and away score readback.",
+    inputSchema: {
+      type: "object", required: ["target", "home", "away"],
+      properties: { ...targetProp,
+        home: { type: "integer", minimum: 0, maximum: 65535, description: "New home score (0-65535)." },
+        away: { type: "integer", minimum: 0, maximum: 65535, description: "New away score (0-65535)." },
+      }, additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_set_line",
+    description:
+      "PURPOSE: Select the active scoring/checking line for one NHL '94 team. " +
+      "USAGE: Use at the faceoff line-change window or while staging a lineup; choose home or away and Sc1, Sc2, or Chk. " +
+      "BEHAVIOR: DESTRUCTIVE: writes the selected team's line byte and immediately reads it back. The game may replace it later when its own line-change logic runs. " +
+      "RETURNS: The team and confirmed decoded line readback.",
+    inputSchema: {
+      type: "object", required: ["target", "team", "line"],
+      properties: { ...targetProp,
+        team: { type: "string", enum: ["home", "away"], description: "Team whose selected line changes." },
+        line: { type: "string", enum: ["Sc1", "Sc2", "Chk"], description: "Scoring line 1, scoring line 2, or checking line." },
+      }, additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_add_penalty",
+    description:
+      "PURPOSE: Queue a real retail NHL '94 penalty for one skater and set its eventual box duration. " +
+      "USAGE: Select the skater either with slot ('s0'..'s11') OR with team plus player_id. penalty_type uses the complete known retail infraction list. duration_seconds may be standard or intentionally nonsensical, such as 360 seconds of tripping. " +
+      "BEHAVIOR: DESTRUCTIVE: enables penalties, writes one free PenBuf entry, and arms a one-shot BizHawk memory hook that replaces the team's timer when the normal penalty pipeline commits the skater to the box. The whistle/ref presentation remains game-driven and may be delayed until possession changes. Errors before writing if the selector is invalid/ambiguous, the skater is already boxed, or the queue is full. " +
+      "RETURNS: The resolved slot/team/player, queued penalty type, requested duration, queue index, and confirmed queue readback.",
+    inputSchema: {
+      type: "object", required: ["target", "penalty_type", "duration_seconds"],
+      properties: { ...targetProp,
+        slot: { type: "string", enum: Array.from({ length: 12 }, (_, i) => `s${i}`), description: "Direct live entity slot. Use this OR team+player_id." },
+        team: { type: "string", enum: ["home", "away"], description: "Team used with player_id. Use this OR slot." },
+        player_id: { type: "integer", minimum: 0, maximum: 255, description: "Live in-game player identity byte (+0x53), used with team." },
+        penalty_type: { type: "string", enum: Object.keys(nhl94.PENALTY_TYPES), description: "Known retail infraction type." },
+        duration_seconds: { type: "integer", minimum: 0, maximum: 8191, default: 120, description: "Box duration in game-seconds. Arbitrary values are allowed." },
+      }, additionalProperties: false,
+    },
+  },
+  {
+    name: "nhl94_remove_penalty",
+    description:
+      "PURPOSE: Remove one selected NHL '94 skater's queued or active penalty. " +
+      "USAGE: Select the skater either with slot ('s0'..'s11') OR with team plus player_id, matching nhl94_add_penalty. " +
+      "BEHAVIOR: DESTRUCTIVE: cancels this tool's pending duration hook, clears matching PenBuf entries, and sets the selected team timer to zero when the skater is already boxed so the game's normal return-to-ice path runs. It does not directly clear unrelated skater flags. Errors before writing for an invalid/ambiguous selector or when no queued/active penalty exists. " +
+      "RETURNS: The resolved skater and confirmed cleared queue/timer readback.",
+    inputSchema: {
+      type: "object", required: ["target"],
+      properties: { ...targetProp,
+        slot: { type: "string", enum: Array.from({ length: 12 }, (_, i) => `s${i}`), description: "Direct live entity slot. Use this OR team+player_id." },
+        team: { type: "string", enum: ["home", "away"], description: "Team used with player_id. Use this OR slot." },
+        player_id: { type: "integer", minimum: 0, maximum: 255, description: "Live in-game player identity byte (+0x53), used with team." },
+      }, additionalProperties: false,
+    },
+  },
+  {
     name: "nhl94_teleport",
     description:
       "PURPOSE: Move one or more NHL94 targets (skaters s0-s11, puck pk) to new x/y/z positions AND/OR set their x/y/z velocity — place a target, launch a moving one (e.g. fire the puck at the net with a chosen xv/yv/zv, or feed a one-timer), or both in one atomic write. " +
@@ -2222,6 +2286,106 @@ function decodeNhlValue(ref: NhlFieldRef, raw: number): string {
   return String(raw);
 }
 
+interface PenaltyPlayer {
+  slot: number;
+  slotName: string;
+  playerId: number;
+  team: "home" | "away";
+  pf2: number;
+}
+
+type NhlDomain = Awaited<ReturnType<BizhawkBackend["nhlDomain"]>>;
+
+async function resolvePenaltyPlayer(
+  target: string,
+  bh: BizhawkServer,
+  d: NhlDomain,
+  domain: string,
+  args: Record<string, unknown>,
+): Promise<PenaltyPlayer> {
+  const records = await bh.call<Record<string, number>[]>(target, "read_struct_array", {
+    base: d.addr(nhl94.SORTCORDS), count: 12, stride: nhl94.SCSIZE, domain,
+    fields: [
+      { name: "player_id", offset: nhl94.OFF.player_id, width: "u8" },
+      { name: "pf", offset: nhl94.OFF.pf, width: "u8" },
+      { name: "pf2", offset: nhl94.OFF.pf2, width: "u8" },
+    ],
+  });
+  const players = records.map((record, slot) => ({
+    slot,
+    slotName: `s${slot}`,
+    playerId: record.player_id,
+    team: ((record.pf ?? 0) & 0x40) !== 0 ? "away" as const : "home" as const,
+    pf2: record.pf2 ?? 0,
+  }));
+  const hasSlot = args.slot !== undefined;
+  const hasIdentity = args.team !== undefined || args.player_id !== undefined;
+  if (hasSlot === hasIdentity) throw new Error("select a player with either slot OR team+player_id");
+  if (hasSlot) {
+    if (typeof args.slot !== "string") throw new Error("slot must be s0..s11");
+    const { slot } = nhl94.resolveTarget(args.slot);
+    if (slot > 11) throw new Error("penalty player slot must be s0..s11");
+    return players[slot];
+  }
+  if ((args.team !== "home" && args.team !== "away") || !Number.isInteger(args.player_id)) {
+    throw new Error("team+player_id selection requires team home|away and integer player_id");
+  }
+  const matches = players.filter((player) => player.team === args.team && player.playerId === args.player_id);
+  if (matches.length !== 1) {
+    const candidates = players.filter((player) => player.team === args.team)
+      .map((player) => `${player.slotName}=player${player.playerId}`).join(", ");
+    throw new Error(`team+player_id resolved to ${matches.length} skaters; candidates: ${candidates}`);
+  }
+  return matches[0];
+}
+
+async function readPenaltyQueue(target: string, bh: BizhawkServer, d: NhlDomain, domain: string): Promise<number[]> {
+  const reads = Array.from({ length: nhl94.PENALTY.queueEntries }, (_, index) => ({
+    name: `penalty_${index}`,
+    address: d.addr(nhl94.PENALTY.queue + index * 2),
+    width: "u16_be",
+    domain,
+  }));
+  const values = await bh.call<Record<string, number>>(target, "read_many", { reads });
+  return reads.map((read) => values[read.name] ?? 0);
+}
+
+function penaltyHookKey(player: PenaltyPlayer): string {
+  return `${player.team}-${player.playerId}`;
+}
+
+function penaltyDurationHookCode(player: PenaltyPlayer, duration: number, d: NhlDomain, domain: string): string {
+  const key = JSON.stringify(penaltyHookKey(player));
+  const domainLiteral = JSON.stringify(domain);
+  const pf2Address = d.addr(nhl94.SORTCORDS + player.slot * nhl94.SCSIZE + nhl94.OFF.pf2);
+  const timerAddress = d.addr(player.team === "home" ? nhl94.PENALTY.homeTimer : nhl94.PENALTY.awayTimer);
+  const timerValue = 0x2000 | duration;
+  return `_G.__mcp_bizhawk_penalty_hooks = _G.__mcp_bizhawk_penalty_hooks or {}\n` +
+    `local key = ${key}\n` +
+    `local old = _G.__mcp_bizhawk_penalty_hooks[key]\n` +
+    `if old then pcall(function() event.unregisterbyid(old) end) end\n` +
+    `local hook\n` +
+    `hook = event.onframestart(function()\n` +
+    `  local previous = memory.getcurrentmemorydomain and memory.getcurrentmemorydomain() or nil\n` +
+    `  memory.usememorydomain(${domainLiteral})\n` +
+    `  if (memory.read_u8(0x${pf2Address.toString(16).toUpperCase()}) & 0x04) ~= 0 then\n` +
+    `    pcall(function() event.unregisterbyid(hook) end)\n` +
+    `    _G.__mcp_bizhawk_penalty_hooks[key] = nil\n` +
+    `    memory.write_u16_be(0x${timerAddress.toString(16).toUpperCase()}, ${timerValue})\n` +
+    `  end\n` +
+    `  if previous then memory.usememorydomain(previous) end\n` +
+    `end, "mcp_penalty_duration")\n` +
+    `_G.__mcp_bizhawk_penalty_hooks[key] = hook\n` +
+    `return "armed ${duration}s timer override"`;
+}
+
+function penaltyCancelHookCode(player: PenaltyPlayer): string {
+  const key = JSON.stringify(penaltyHookKey(player));
+  return `local hooks = _G.__mcp_bizhawk_penalty_hooks\n` +
+    `if hooks and hooks[${key}] then pcall(function() event.unregisterbyid(hooks[${key}]) end); hooks[${key}] = nil end\n` +
+    `return "cleared penalty timer override"`;
+}
+
 // Optional frame step after sprite-moving writes so BizHawk re-renders the new
 // positions. Default callers pass 0 for frame-precise RAM edits.
 // Returns whether the step actually ran, for an honest note in the output.
@@ -2886,6 +3050,98 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
       // ── NHL94 game-semantic tools ───────────────────────────────────────
       case "nhl94_recipes":
         return ok(nhl94.RECIPES_GUIDE);
+
+      case "nhl94_set_score": {
+        const target = p.target as string;
+        const home = p.home as number;
+        const away = p.away as number;
+        if (!Number.isInteger(home) || home < 0 || home > 0xffff || !Number.isInteger(away) || away < 0 || away > 0xffff) {
+          throw new Error("home and away scores must be integers from 0 to 65535");
+        }
+        const d = await bh.getBackend(target).nhlDomain();
+        const domain = await d.detect({});
+        const scoreOps: nhl94.MemOp[] = [
+          { op: "write", address: nhl94.G.home_score, value: home, width: "u16_be" },
+          { op: "write", address: nhl94.G.away_score, value: away, width: "u16_be" },
+        ];
+        await bh.call(target, "memory_ops", { domain, ops: d.rebase(scoreOps) });
+        const values = await bh.call<Record<string, number>>(target, "read_many", { reads: [
+          { name: "home_score", address: d.addr(nhl94.G.home_score), width: "u16_be", domain },
+          { name: "away_score", address: d.addr(nhl94.G.away_score), width: "u16_be", domain },
+        ] });
+        if (values.home_score !== home || values.away_score !== away) throw new Error("score readback did not match the requested values");
+        return ok(`Score set: home ${values.home_score}, away ${values.away_score}.`);
+      }
+
+      case "nhl94_set_line": {
+        const target = p.target as string;
+        if (p.team !== "home" && p.team !== "away") throw new Error("team must be home or away");
+        const value = lineValue(p.line);
+        if (value < 0 || value > 2) throw new Error("line must be Sc1, Sc2, or Chk");
+        const d = await bh.getBackend(target).nhlDomain();
+        const domain = await d.detect({});
+        const address = p.team === "home" ? nhl94.G.home_line : nhl94.G.away_line;
+        const lineOps: nhl94.MemOp[] = [
+          { op: "write", address, value, width: "u8" },
+        ];
+        await bh.call(target, "memory_ops", { domain, ops: d.rebase(lineOps) });
+        const readback = await bh.call<number>(target, "read8", { address: d.addr(address), domain });
+        if (readback !== value) throw new Error("line readback did not match the requested value");
+        return ok(`${p.team === "home" ? "Home" : "Away"} line set: ${nhl94.lineLabel(readback)} (${readback}).`);
+      }
+
+      case "nhl94_add_penalty": {
+        const target = p.target as string;
+        const penaltyType = p.penalty_type as nhl94.PenaltyType;
+        if (!(penaltyType in nhl94.PENALTY_TYPES)) throw new Error(`unknown penalty_type "${String(p.penalty_type)}"`);
+        const duration = p.duration_seconds as number;
+        if (!Number.isInteger(duration) || duration < 0 || duration > 0x1fff) throw new Error("duration_seconds must be an integer from 0 to 8191");
+        const d = await bh.getBackend(target).nhlDomain();
+        const domain = await d.detect({});
+        const player = await resolvePenaltyPlayer(target, bh, d, domain, p);
+        if ((player.pf2 & 0x04) !== 0) throw new Error(`${player.slotName} is already in the penalty box`);
+        const queue = await readPenaltyQueue(target, bh, d, domain);
+        const queueIndex = queue.findIndex((entry) => entry === 0);
+        if (queueIndex < 0) throw new Error("NHL94 penalty queue is full");
+        const typeCode = nhl94.PENALTY_TYPES[penaltyType];
+        const queueValue = (typeCode << 8) | player.playerId;
+        await bh.call(target, "eval_lua", { code: penaltyDurationHookCode(player, duration, d, domain) });
+        const addOps: nhl94.MemOp[] = [
+          { op: "write", address: nhl94.PENALTY.option, value: 1, width: "u16_be" },
+          { op: "write", address: nhl94.PENALTY.queue + queueIndex * 2, value: queueValue, width: "u16_be" },
+        ];
+        await bh.call(target, "memory_ops", { domain, ops: d.rebase(addOps) });
+        const readback = await bh.call<number>(target, "read16", {
+          address: d.addr(nhl94.PENALTY.queue + queueIndex * 2), byteorder: "be", domain,
+        });
+        if (readback !== queueValue) throw new Error("penalty queue readback did not match the requested entry");
+        return ok(`Queued ${nhl94.formatClock(duration)} ${nhl94.penaltyLabel(penaltyType)} for ${player.slotName} (${player.team}, player ${player.playerId}); queue ${queueIndex}, readback 0x${readback.toString(16).toUpperCase().padStart(4, "0")}.`);
+      }
+
+      case "nhl94_remove_penalty": {
+        const target = p.target as string;
+        const d = await bh.getBackend(target).nhlDomain();
+        const domain = await d.detect({});
+        const player = await resolvePenaltyPlayer(target, bh, d, domain, p);
+        const queue = await readPenaltyQueue(target, bh, d, domain);
+        const queuedIndexes = queue.flatMap((entry, index) => ((entry & 0xff) === player.playerId && entry !== 0 ? [index] : []));
+        const active = (player.pf2 & 0x04) !== 0;
+        if (!active && queuedIndexes.length === 0) throw new Error(`${player.slotName} has no queued or active penalty`);
+        await bh.call(target, "eval_lua", { code: penaltyCancelHookCode(player) });
+        const ops: nhl94.MemOp[] = queuedIndexes.map((index) => ({
+          op: "write", address: nhl94.PENALTY.queue + index * 2, value: 0, width: "u16_be",
+        }));
+        const timerAddress = player.team === "home" ? nhl94.PENALTY.homeTimer : nhl94.PENALTY.awayTimer;
+        if (active) ops.push({ op: "write", address: timerAddress, value: 0, width: "u16_be" });
+        await bh.call(target, "memory_ops", { domain, ops: d.rebase(ops) });
+        const reads = queuedIndexes.map((index) => ({
+          name: `penalty_${index}`, address: d.addr(nhl94.PENALTY.queue + index * 2), width: "u16_be", domain,
+        }));
+        if (active) reads.push({ name: "timer", address: d.addr(timerAddress), width: "u16_be", domain });
+        const readback = await bh.call<Record<string, number>>(target, "read_many", { reads });
+        if (Object.values(readback).some((value) => value !== 0)) throw new Error("penalty removal readback was not cleared");
+        return ok(`Removed penalty for ${player.slotName} (${player.team}, player ${player.playerId}); cleared ${queuedIndexes.length} queued entr${queuedIndexes.length === 1 ? "y" : "ies"}${active ? " and expired the active box timer" : ""}.`);
+      }
 
       case "nhl94_teleport": {
         const target = p.target as string;

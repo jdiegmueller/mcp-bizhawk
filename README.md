@@ -146,6 +146,17 @@ systemctl --user enable --now bizhawk-daemon
 systemctl --user restart bizhawk-daemon    # after `npm run build` on a version bump
 ```
 
+## Web control
+
+The daemon also serves a small schema-driven tool console on port `8767`.
+Open `http://HOST:8767/`, choose a BizHawk backend, type to find a tool, fill
+the generated parameters, and run it. The page uses the live MCP catalog, so
+its tools, descriptions, defaults, and results match MCP clients.
+
+The web listener accepts only loopback (`127.0.0.0/8`) and
+`10.245.0.0/16` clients. The included user-service file binds both MCP and the
+web console to `10.245.0.226`.
+
 ## Register with your MCP client
 
 Connect to the daemon over HTTP — the same URL works for any number of clients
@@ -201,6 +212,8 @@ The daemon reads its backends from a single JSON config file:
 | `MCP_BIZHAWK_CONFIG` | *(required)* | Path to the JSON config file declaring backends |
 | `MCP_HTTP_HOST` | `127.0.0.1`   | Host the streamable-HTTP MCP endpoint binds |
 | `MCP_HTTP_PORT` | `8765`        | Port the streamable-HTTP MCP endpoint binds |
+| `WEB_HTTP_HOST` | `MCP_HTTP_HOST` | Host the web tool console binds |
+| `WEB_HTTP_PORT` | `8767`        | Port the web tool console binds |
 
 The config file declares one backend per key, keyed by the target name:
 ```json

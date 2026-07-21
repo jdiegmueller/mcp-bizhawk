@@ -54,6 +54,7 @@ export const OFF: Record<string, number> = {
   target_y: 0x46,
   scnum: 0x52,
   SCnum: 0x52,
+  player_id: 0x53,
   roster_index: 0x61,
   pnum: 0x66,
   nopuck: 0x5e,
@@ -84,6 +85,7 @@ export const FIELD_WIDTH: Record<string, string> = {
   assq0: "u8", assq1: "u8", assq2: "u8", assq3: "u8",
   assq4: "u8", assq5: "u8", assq6: "u8", assq7: "u8",
   target_x: "s16_be", target_y: "s16_be", scnum: "u16_be", SCnum: "u16_be",
+  player_id: "u8",
   roster_index: "u8", pnum: "u8",
   nopuck: "u8", pf: "u8", pf2: "u8", pf3: "u8", wgt8: "u8",
   lockout: "u8", team_flags: "u8",
@@ -156,6 +158,33 @@ export const G: Record<string, number> = {
   home_line: 0xffc6e5,
   away_line: 0xffca48,
 };
+
+export const PENALTY = {
+  option: 0xffd056,
+  queue: 0xffc3a4,
+  queueEntries: 32,
+  homeTimer: 0xffc73a,
+  awayTimer: 0xffca9e,
+} as const;
+
+export const PENALTY_TYPES = {
+  charging: 0x16,
+  slashing: 0x18,
+  roughing: 0x1a,
+  cross_check: 0x1c,
+  hooking: 0x1e,
+  tripping: 0x20,
+  interference: 0x22,
+  holding: 0x24,
+  fighting: 0x26,
+  fight_instigator: 0x2a,
+} as const;
+
+export type PenaltyType = keyof typeof PENALTY_TYPES;
+
+export function penaltyLabel(type: PenaltyType): string {
+  return type.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+}
 
 // Read-only control context globals. Kept separate from G so nhl94_fields does
 // not expose semantic writes to control state.
@@ -686,6 +715,14 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   It does not advance frames unless settle_frames > 0 is requested. The camera
   normally eases toward the puck/carrier once frames are driven.
 • nhl94_clock — set, freeze, or release only the game clock.
+• nhl94_set_score — write the home and away score together, then read back both.
+• nhl94_set_line — select Sc1, Sc2, or Chk for the home or away team.
+• nhl94_add_penalty — queue a known retail penalty for a skater selected by
+  slot or team+player_id. duration_seconds can be any value 0-8191, including
+  intentionally nonstandard durations; the bridge arms a one-shot timer patch
+  that applies when the game commits the skater to the box.
+• nhl94_remove_penalty — clear that skater's queued penalty and, when already
+  boxed, expire the team's active box timer so the normal return-to-ice path runs.
 • nhl94_camera — pin/release scroll. Direct pinning may jitter; possession-led
   focus is usually more reliable. Verify visually.
 • nhl94_rig — save/apply/list/delete a savestate plus its exact freeze table.
@@ -751,6 +788,23 @@ Save and restore a reproducible rig:
   2. nhl94_rig {"action":"save","name":"my-drill"}
   3. Later: nhl94_rig {"action":"apply","name":"my-drill"}
   4. The applied rig is paused; drive it with frame/input tools when ready.
+
+Set the score and selected lines:
+  1. nhl94_set_score {"home":7,"away":4}
+  2. nhl94_set_line {"team":"home","line":"Sc1"}
+  3. nhl94_set_line {"team":"away","line":"Chk"}
+  4. nhl94_state {"describe":false}
+
+Add or remove a penalty by live slot:
+  1. nhl94_add_penalty {"slot":"s3","penalty_type":"tripping",
+       "duration_seconds":120}
+  2. For deliberate nonsense, use e.g. duration_seconds:360 for 6:00.
+  3. nhl94_remove_penalty {"slot":"s3"}
+
+Add a penalty by team plus the skater's in-game player-id byte:
+  1. nhl94_add_penalty {"team":"away","player_id":89,
+       "penalty_type":"holding","duration_seconds":120}
+  Note: pass either slot OR team+player_id, never both.
 
 ── ADDRESS AND EVIDENCE SAFETY ───────────────────────────────────────────────
 • Do not hand-compute an entity address when nhl94_state or nhl94_read can

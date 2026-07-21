@@ -28,7 +28,7 @@ This is a personal utility. It will not include accounts, a database, persistent
 
 ## Architecture
 
-The existing process gains a second HTTP listener dedicated to the web console. The existing MCP listener and `/mcp` behavior remain unchanged.
+The existing process gains a second HTTP listener dedicated to the web console. The `/mcp` behavior remains unchanged. This deployment binds both listeners to `10.245.0.226`.
 
 The web listener serves one dependency-free HTML/CSS/JavaScript application and two narrow endpoints:
 
@@ -37,7 +37,7 @@ The web listener serves one dependency-free HTML/CSS/JavaScript application and 
 
 The proxy uses the existing MCP endpoint as the source of truth. Tool availability, schemas, validation, queueing, usage logging, and result semantics therefore remain identical for MCP and web callers.
 
-The web listener defaults to `0.0.0.0:8767` and can be changed with `WEB_HTTP_HOST` and `WEB_HTTP_PORT`. It accepts clients only from `127.0.0.0/8` and `10.245.0.0/16`. Other source addresses receive a forbidden response before static assets or API data are served.
+The web listener defaults to the MCP host on port `8767` and can be changed with `WEB_HTTP_HOST` and `WEB_HTTP_PORT`. It accepts clients only from `127.0.0.0/8` and `10.245.0.0/16`. Other source addresses receive a forbidden response before static assets or API data are served.
 
 ## Interface
 
