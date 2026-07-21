@@ -9,7 +9,7 @@ function minimalNhlRec(i, over = {}) {
   return {
     _index: i, x: 0, y: 0, z: 0, xv: 0, yv: 0, zv: 0, fdir: 0, frame: 0,
     attr: 0, anim: 0, spanum: 0, spacnt: 0, shotpwr: 0, shotacc: 0,
-    passacc: 0, energy: 0, ...over,
+    passacc: 0, pnum: 0, ...over,
   };
 }
 
@@ -217,7 +217,7 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     read_struct_array: (p) =>
       Array.from({ length: p.count }, (_, i) => {
         if (i === 0) return rec(0, { x: 100 << 16 });
-        if (i === 3) return rec(3, { x: 200 << 16, y: (-40) << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5, shotpwr: 6, shotacc: 5, passacc: 4, energy: 9 });
+        if (i === 3) return rec(3, { x: 200 << 16, y: (-40) << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5, shotpwr: 6, shotacc: 5, passacc: 4, pnum: 9 });
         if (i === 14) return rec(14, { x: 8 << 16, y: 8 << 16 });
         return rec(i);
       }),
@@ -239,8 +239,10 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
     assert.match(text, /pk: x=8 y=8/);
     assert.match(text, /s0: x=100\*/); // s0.x is frozen
     assert.match(text, /carrier: s3/);
-    // carrier ratings (OSD parity) come from the carrying slot (s3) struct.
-    assert.match(text, /carrier_ratings: shotpwr=6 shotacc=5 passacc=4 energy=9/);
+    // Carrier readout comes from the carrying slot (s3) struct; +0x66 is pnum,
+    // not dynamic energy.
+    assert.match(text, /carrier_ratings: shotpwr=6 shotacc=5 passacc=4 pnum=9/);
+    assert.doesNotMatch(text, /carrier_ratings: .*energy=/);
     // play-context globals footer (OSD parity): shot/last as slots, pass vector.
     assert.match(text, /shot: s3   last: s7   pass: dir=2 speed=40/);
     assert.match(text, /clock: 19:59 \(1199s\)/);
@@ -440,7 +442,7 @@ test("nhl94_read exposes assignment queue aliases by name", async () => {
   }
 });
 
-test("nhl94_read exposes documented SCnum, roster, and AI target fields", async () => {
+test("nhl94_read exposes documented SCnum, roster, pnum, and AI target fields", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_many: (p) => {
@@ -448,20 +450,22 @@ test("nhl94_read exposes documented SCnum, roster, and AI target fields", async 
       assert.ok(p.reads.some((r) => r.name === "s4.target_y" && r.address === 0xffb04a + 4 * 0x80 + 0x46 && r.width === "s16_be"));
       assert.ok(p.reads.some((r) => r.name === "s4.scnum" && r.address === 0xffb04a + 4 * 0x80 + 0x52 && r.width === "u16_be"));
       assert.ok(p.reads.some((r) => r.name === "s4.roster_index" && r.address === 0xffb04a + 4 * 0x80 + 0x61 && r.width === "u8"));
+      assert.ok(p.reads.some((r) => r.name === "s4.pnum" && r.address === 0xffb04a + 4 * 0x80 + 0x66 && r.width === "u8"));
       return {
         "s4.target_x": 90,
         "s4.target_y": -40,
         "s4.scnum": 4,
         "s4.roster_index": 12,
+        "s4.pnum": 9,
       };
     },
   });
   try {
     const res = await h.client.callTool({
       name: "nhl94_read",
-      arguments: { target: h.target, targets: ["s4"], fields: ["target_x", "target_y", "scnum", "roster_index"] },
+      arguments: { target: h.target, targets: ["s4"], fields: ["target_x", "target_y", "scnum", "roster_index", "pnum"] },
     });
-    assert.match(textOf(res), /s4: target_x=90 target_y=-40 scnum=4 roster_index=12/);
+    assert.match(textOf(res), /s4: target_x=90 target_y=-40 scnum=4 roster_index=12 pnum=9/);
   } finally {
     await h.close();
   }
@@ -536,7 +540,7 @@ test("nhl94_state defaults to compact output and prints dense sections only on r
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i, i === 3
-      ? { x: 200 << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5, shotpwr: 6, shotacc: 5, passacc: 4, energy: 9 }
+      ? { x: 200 << 16, attr: 0x0008, anim: 0x0046, spanum: 8, spacnt: 5, shotpwr: 6, shotacc: 5, passacc: 4, pnum: 9 }
       : {})),
     read_many: () => defaultNhlGlobals({ carrier: 3, active_control_home: 4, active_control_away: 0xffff, shotplayer: 3, lastplayer: 7, passdir: 2, passspeed: 40 }),
     list_frozen: () => ({ frozen: [] }),
@@ -559,7 +563,7 @@ test("nhl94_state defaults to compact output and prints dense sections only on r
     }));
     assert.match(dense, /anim=0x0046 attr=0x0008\(xflip=1\) spanum=8\(rec 2\) spacnt=5/);
     assert.match(dense, /\ncontrol:\n/);
-    assert.match(dense, /carrier_ratings: shotpwr=6 shotacc=5 passacc=4 energy=9/);
+    assert.match(dense, /carrier_ratings: shotpwr=6 shotacc=5 passacc=4 pnum=9/);
     assert.match(dense, /camera: vpos=0 hpos=0 yleader=0/);
     assert.match(dense, /layout: slot structs @ base=0xFFB04A/);
   } finally {

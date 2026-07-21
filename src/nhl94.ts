@@ -49,12 +49,13 @@ export const OFF: Record<string, number> = {
   assq7: 0x3f,
   // RETAIL_OFFSETS.md §Player-struct control / role fields and §CPU assignment
   // model: AI target coords are signed words; SCnum is the slot's self index;
-  // roster_index is the line-placement roster slot.
+  // roster_index is the line-placement roster slot; +0x66 is pnum, not energy.
   target_x: 0x44,
   target_y: 0x46,
   scnum: 0x52,
   SCnum: 0x52,
   roster_index: 0x61,
+  pnum: 0x66,
   nopuck: 0x5e,
   lockout: 0x5e,
   pf: 0x62,
@@ -62,9 +63,8 @@ export const OFF: Record<string, number> = {
   pf2: 0x63,
   pf3: 0x64,
   wgt8: 0x67,
-  // Player ratings the OSD shows for the puck carrier (mirror bridge_JD.lua's
-  // carrier readout): shotpwr/shotacc/passacc @0x6C/6D/6E, energy @0x66. u8.
-  energy: 0x66,
+  // Player ratings the OSD shows for the puck carrier. Dynamic energy is in
+  // teamBase+0x32+pnum*2, not in the slot struct; keep +0x66 labeled pnum.
   shotpwr: 0x6c,
   shotacc: 0x6d,
   passacc: 0x6e,
@@ -84,10 +84,10 @@ export const FIELD_WIDTH: Record<string, string> = {
   assq0: "u8", assq1: "u8", assq2: "u8", assq3: "u8",
   assq4: "u8", assq5: "u8", assq6: "u8", assq7: "u8",
   target_x: "s16_be", target_y: "s16_be", scnum: "u16_be", SCnum: "u16_be",
-  roster_index: "u8",
+  roster_index: "u8", pnum: "u8",
   nopuck: "u8", pf: "u8", pf2: "u8", pf3: "u8", wgt8: "u8",
   lockout: "u8", team_flags: "u8",
-  energy: "u8", shotpwr: "u8", shotacc: "u8", passacc: "u8",
+  shotpwr: "u8", shotacc: "u8", passacc: "u8",
   puck_control_rating: "u8",
 };
 

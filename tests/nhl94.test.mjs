@@ -21,6 +21,7 @@ import {
   lineLabel,
   G,
   CONTROL_G,
+  FIELD_WIDTH,
 } from "../dist/nhl94.js";
 
 test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool semantics", () => {
@@ -102,6 +103,8 @@ test("resolveField exposes documented control and role struct offsets", () => {
   assert.deepEqual(resolveField("target_y"), { field: "target_y", offset: 0x46, width: "s16_be", fixed: false });
   assert.deepEqual(resolveField("scnum"), { field: "scnum", offset: 0x52, width: "u16_be", fixed: false });
   assert.deepEqual(resolveField("roster_index"), { field: "roster_index", offset: 0x61, width: "u8", fixed: false });
+  assert.deepEqual(resolveField("pnum"), { field: "pnum", offset: 0x66, width: "u8", fixed: false });
+  assert.equal(FIELD_WIDTH.energy, undefined);
 });
 
 test("resolveField parses raw offsets with optional width (default u8)", () => {

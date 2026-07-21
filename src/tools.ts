@@ -1502,7 +1502,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_read",
     description:
       "PURPOSE: Read arbitrary decoded fields of NHL94 entities (skaters s0-s11, puck pk) by NAME or raw in-struct offset — the game-aware alternative to hand-computing 68K base+offset in bizhawk_read/eval_lua (the #1 source of base/stride/endian mistakes). " +
-      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), assignment queue assidx/assq0..assq7 (+0x36/+0x38..3F), AI target_x/target_y (+0x44/+0x46), SCnum (+0x52), roster_index (+0x61), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,assidx,assq0..assq7,target_x,target_y,scnum,SCnum,roster_index,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
+      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), assignment queue assidx/assq0..assq7 (+0x36/+0x38..3F), AI target_x/target_y (+0x44/+0x46), SCnum (+0x52), roster_index (+0x61), pnum (+0x66), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,assidx,assq0..assq7,target_x,target_y,scnum,SCnum,roster_index,pnum,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
       "BEHAVIOR: No side effects — one read_many round-trip. x/y/z decode to whole pixels; every other field is the raw integer at its width. Errors if targets×fields exceeds 128 reads, or on an unknown target/field. " +
       "RETURNS: One line per target: 'sN: field=val field=val …'.",
     inputSchema: {
@@ -2987,10 +2987,11 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "spacnt", offset: nhl94.OFF.spacnt, width: "s16_be" },
           // Ratings — always read so the carrier's readout (OSD parity) is
           // available without a second round-trip; only printed for the carrier.
+          // +0x66 is pnum (lineup/roster index), not dynamic energy.
           { name: "shotpwr", offset: nhl94.OFF.shotpwr, width: "u8" },
           { name: "shotacc", offset: nhl94.OFF.shotacc, width: "u8" },
           { name: "passacc", offset: nhl94.OFF.passacc, width: "u8" },
-          { name: "energy", offset: nhl94.OFF.energy, width: "u8" },
+          { name: "pnum", offset: nhl94.OFF.pnum, width: "u8" },
           { name: "pf", offset: nhl94.OFF.pf, width: "u8" },
           { name: "assidx", offset: 0x36, width: "u16_be" },
           { name: "assq0", offset: 0x38, width: "u8" },
@@ -3151,11 +3152,11 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           ? `interaction_gate: CLOSED (gmode.bit0=1; collision/check dispatch is blocked during whistle/faceoff mode)`
           : `interaction_gate: OPEN (gmode.bit0=0; stoppage gate is clear — necessary, not proof that contact/resolver dispatch occurred)`);
         lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}   faceoff: ${faceoff}`);
-        // Carrier ratings (OSD parity): shotpwr/shotacc/passacc/energy of the
-        // slot carrying the puck; dashes when the puck is loose.
+        // Carrier ratings (OSD parity): shotpwr/shotacc/passacc plus pnum of
+        // the slot carrying the puck; dashes when the puck is loose.
         const crec = (gv.carrier >= 0 && gv.carrier <= 11) ? byIndex.get(gv.carrier) : undefined;
         const ratings = crec
-          ? `shotpwr=${crec.shotpwr} shotacc=${crec.shotacc} passacc=${crec.passacc} energy=${crec.energy}`
+          ? `shotpwr=${crec.shotpwr} shotacc=${crec.shotacc} passacc=${crec.passacc} pnum=${crec.pnum}`
           : "— (loose puck)";
         if (sections.has("ratings")) {
           lines.push(`carrier_ratings: ${ratings}`);
