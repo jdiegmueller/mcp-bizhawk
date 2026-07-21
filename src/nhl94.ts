@@ -165,6 +165,10 @@ export const PENALTY = {
   queueEntries: 32,
   homeTimer: 0xffc73a,
   awayTimer: 0xffca9e,
+  // Power-play/penalty-tracker flags at 0xFFC300. bit9 (0x0200) = home is
+  // penalized (live-verified); bit10 (0x0400) = away is penalized (inferred
+  // by symmetry, not yet live-confirmed). Zero when nobody is in the box.
+  ppFlags: 0xffc300,
 } as const;
 
 export const PENALTY_TYPES = {
@@ -182,8 +186,19 @@ export const PENALTY_TYPES = {
 
 export type PenaltyType = keyof typeof PENALTY_TYPES;
 
+/** Reverse lookup: penalty type-code byte → PenaltyType label. */
+export const PENALTY_TYPES_BY_CODE: Record<number, PenaltyType> = Object.fromEntries(
+  Object.entries(PENALTY_TYPES).map(([label, code]) => [code, label as PenaltyType]),
+);
+
 export function penaltyLabel(type: PenaltyType): string {
   return type.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+}
+
+/** Human-readable label for a raw penalty type-code byte (e.g. 0x1a → "Roughing"), or a hex fallback. */
+export function penaltyLabelByCode(code: number): string {
+  const label = PENALTY_TYPES_BY_CODE[code & 0xff];
+  return label ? penaltyLabel(label) : `0x${(code & 0xff).toString(16).toUpperCase().padStart(2, "0")}`;
 }
 
 // Read-only control context globals. Kept separate from G so nhl94_fields does

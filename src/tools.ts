@@ -1527,21 +1527,21 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
       "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For additional entity reads use nhl94_read; for selected field reads/writes/freezes use nhl94_fields. Never compute slot addresses yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
-      "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
-      "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. When the faceoff-window latch at $FFC304 is nonzero, phase is the stable token `faceoff_line_change` and a `faceoff_window` line reports latch + selected lines (Sc1/Sc2/Chk). CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context except for the RAM-backed faceoff_line_change token. A trailing `*` marks a frozen word.",
-    inputSchema: {
-      type: "object",
-      required: ["target"],
-      properties: { ...targetProp, 
-        raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
-        verbose: { type: "boolean", default: false, description: "Add per-entity raw diagnostic fields: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf2,pf3(+0x63-64)/wgt8(+0x67) plus raw assignment queue bytes. Normal output already decodes pf(+0x62), assidx(+0x36), and assq(+0x38..3F) into role/control context." },
-        sections: {
-          description: "Optional dense sections to include. Default is compact. Use a string or array: anim, control, ratings, camera, context, debug, freezes, or all. verbose:true implies all.",
-          oneOf: [
-            { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes"] },
-            { type: "array", items: { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes"] } },
-          ],
-        },
+      "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list; a 4th round-trip is added only when the `penalties` section is requested). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
+      "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. When the faceoff-window latch at $FFC304 is nonzero, phase is the stable token `faceoff_line_change` and a `faceoff_window` line reports latch + selected lines (Sc1/Sc2/Chk). CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context except for the RAM-backed faceoff_line_change token. With `sections:[\"penalties\"]` (or verbose/all), a `penalties:` block reports the penalty option flag, power-play flags, home/away master timers (MM:SS + raw seconds), in-box skaters with their infraction, and the pending penalty queue (slot + infraction). A trailing `*` marks a frozen word.",
+      inputSchema: {
+        type: "object",
+        required: ["target"],
+        properties: { ...targetProp, 
+          raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
+          verbose: { type: "boolean", default: false, description: "Add per-entity raw diagnostic fields: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf2,pf3(+0x63-64)/wgt8(+0x67) plus raw assignment queue bytes. Normal output already decodes pf(+0x62), assidx(+0x36), and assq(+0x38..3F) into role/control context." },
+          sections: {
+            description: "Optional dense sections to include. Default is compact. Use a string or array: anim, control, ratings, camera, context, debug, freezes, penalties, or all. verbose:true implies all.",
+            oneOf: [
+              { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes", "penalties"] },
+              { type: "array", items: { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes", "penalties"] } },
+            ],
+          },
         describe: { type: "boolean", default: true, description: "Default TRUE and recommended for staging/post-action verification: append a vision caption to the structured RAM state so placement, contact, and animation can be checked. Set false only for a fast RAM-only read (for example an interaction_gate preflight) or when vision is unnecessary. The structured result still returns if vision fails." },
         describe_prompt: { type: "string", description: "The question/instruction sent to the vision model with the screenshot (unless describe:false). Falls back to the server's built-in NHL94 system prompt / VISION_DEFAULT_PROMPT." },
       },
@@ -1869,7 +1869,7 @@ async function observationContent(
   }
   return content;
 }
-const STATE_SECTIONS = new Set(["anim", "control", "ratings", "camera", "context", "debug", "freezes"]);
+const STATE_SECTIONS = new Set(["anim", "control", "ratings", "camera", "context", "debug", "freezes", "penalties"]);
 function parseStateSections(input: unknown, verbose: boolean): Set<string> {
   const out = new Set<string>();
   const addAll = () => { for (const s of STATE_SECTIONS) out.add(s); };
@@ -3249,6 +3249,11 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "passacc", offset: nhl94.OFF.passacc, width: "u8" },
           { name: "pnum", offset: nhl94.OFF.pnum, width: "u8" },
           { name: "pf", offset: nhl94.OFF.pf, width: "u8" },
+          // player_id (+0x53) and pf2 (+0x63) are always read so the penalties
+          // section can build a pid→slot map and detect in-box skaters without a
+          // second round-trip; they are not printed outside the penalties block.
+          { name: "player_id", offset: nhl94.OFF.player_id, width: "u8" },
+          { name: "pf2", offset: nhl94.OFF.pf2, width: "u8" },
           { name: "assidx", offset: 0x36, width: "u16_be" },
           { name: "assq0", offset: 0x38, width: "u8" },
           { name: "assq1", offset: 0x39, width: "u8" },
@@ -3466,6 +3471,76 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             `c2playernum=${nhl94.hexWord(gv.c2playernum ?? 0)} are reported raw only; ` +
             `they are not active skater indices and are not used for mode/input_route inference`,
           );
+        }
+        // ── penalties section ──────────────────────────────────────────────
+        // Reads the PenBuf (32×u16_be), the home/away master timers, the
+        // power-play flags, and the penalty option byte; decodes in-box skaters
+        // (pf2 bit2) and the pending queue. Adds one round-trip only when the
+        // `penalties` section is requested.
+        if (sections.has("penalties")) {
+          const qReads: { name: string; address: number; width: string; domain: string }[] = [];
+          for (let i = 0; i < nhl94.PENALTY.queueEntries; i++) {
+            qReads.push({ name: `q${i}`, address: d.addr(nhl94.PENALTY.queue + i * 2), width: "u16_be", domain });
+          }
+          qReads.push(
+            { name: "opt_pen", address: d.addr(nhl94.PENALTY.option), width: "u16_be", domain },
+            { name: "pp_flags", address: d.addr(nhl94.PENALTY.ppFlags), width: "u16_be", domain },
+            { name: "home_timer", address: d.addr(nhl94.PENALTY.homeTimer), width: "u16_be", domain },
+            { name: "away_timer", address: d.addr(nhl94.PENALTY.awayTimer), width: "u16_be", domain },
+          );
+          const pv = await bh.call<Record<string, number>>(target, "read_many", { reads: qReads });
+          // pid → slot reverse map from the main struct read (player_id at +0x53).
+          const pidToSlot = new Map<number, number>();
+          for (let idx = 0; idx <= 11; idx++) {
+            const rec = byIndex.get(idx);
+            if (rec) pidToSlot.set(rec.player_id & 0x3f, idx);
+          }
+          const optPen = pv.opt_pen ?? 0;
+          const ppFlags = pv.pp_flags ?? 0;
+          const homePen = (ppFlags & 0x0200) !== 0;
+          const awayPen = (ppFlags & 0x0400) !== 0;
+          const decodeTimer = (v: number): string => {
+            const u = v >>> 0;
+            if (u === 0xFFFE) return "expired";
+            if (u === 0xFFFF) return "—";
+            const secs = u & 0x1FFF;
+            const flags = u & 0xE000;
+            const flagMark = flags ? ` flags=0x${flags.toString(16).toUpperCase()}` : "";
+            return `${nhl94.formatClock(secs)}(${secs}s)${flagMark}`;
+          };
+          const optLabel = optPen === 0 ? "OFF" : optPen === 1 ? "ON" : optPen === 2 ? "ON(ex-offside)" : `unknown(${optPen})`;
+          lines.push(
+            `penalties: option=${optLabel}  pp_flags=home=${homePen ? "penalized" : "—"} away=${awayPen ? "penalized" : "—"}  ` +
+            `home_timer=${decodeTimer(pv.home_timer ?? 0)}  away_timer=${decodeTimer(pv.away_timer ?? 0)}`,
+          );
+          // In-box skaters: pf2 bit2 (0x04). Cross-reference with queue entries
+          // by player_id to show the infraction type.
+          const queueByPid = new Map<number, { typeCode: number; team: string }>();
+          const queueList: string[] = [];
+          for (let i = 0; i < nhl94.PENALTY.queueEntries; i++) {
+            const v = (pv[`q${i}`] ?? 0) >>> 0;
+            if (v === 0) continue;
+            const typeCode = (v >> 8) & 0xFF;
+            const low = v & 0xFF;
+            const team = (low & 0x80) ? "home" : (low & 0x40) ? "away" : "?";
+            const pid = low & 0x3F;
+            queueByPid.set(pid, { typeCode, team });
+            const slot = pidToSlot.get(pid);
+            const slotStr = slot !== undefined ? `s${slot}` : `pid${pid}`;
+            queueList.push(`${slotStr} ${nhl94.penaltyLabelByCode(typeCode)}`);
+          }
+          const boxList: string[] = [];
+          for (let idx = 0; idx <= 11; idx++) {
+            const rec = byIndex.get(idx);
+            if (!rec) continue;
+            if (!(rec.pf2 & 0x04)) continue;
+            const pid = rec.player_id & 0x3F;
+            const qe = queueByPid.get(pid);
+            const infraction = qe ? `(${nhl94.penaltyLabelByCode(qe.typeCode)})` : "(draining)";
+            boxList.push(`s${idx}${infraction}`);
+          }
+          lines.push(`  box: ${boxList.length ? boxList.join(" ") : "(empty)"}`);
+          lines.push(`  queue: ${queueList.length ? "[" + queueList.join(", ") + "]" : "(empty)"}`);
         }
         if (sections.has("freezes") || frozenList.length > 0) {
           lines.push(`(\`*\` marks a value currently frozen by the bridge.)`);
