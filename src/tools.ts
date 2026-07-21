@@ -1527,7 +1527,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_fields",
     description:
       "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
-      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock/global.home_score plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
+      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock/global.home_score/global.rng_seed plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
       "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words; fdir accepts either a raw integer or one of north/northeast/east/southeast/south/southwest/west/northwest. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. This tool does not advance frames. " +
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
@@ -2117,6 +2117,7 @@ interface NhlFieldRef {
 }
 
 function globalWidth(field: string): string {
+  if (field === "rng_seed") return "u32_be";
   if (field === "gmode" || field === "session_byte" || field === "home_line" || field === "away_line") return "u8";
   if (field === "vpos" || field === "hpos" || field === "yleader" || field === "shotplayer" || field === "lastplayer" || field === "passdir" || field === "passspeed") return "s16_be";
   return "u16_be";

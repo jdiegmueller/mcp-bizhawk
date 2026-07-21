@@ -74,6 +74,11 @@ test("global table exposes documented score addresses", () => {
   assert.equal(G.away_score, 0xffca3e);
 });
 
+test("global table exposes documented RNG and frame-counter addresses", () => {
+  assert.equal(G.rng_seed, 0xffd066);
+  assert.equal(G.vblank_frame_counter, 0xffb03e);
+});
+
 test("resolveField maps known names to offset/width and flags fixed-point axes", () => {
   assert.deepEqual(resolveField("impact"), { field: "impact", offset: 0x32, width: "s16_be", fixed: false });
   assert.deepEqual(resolveField("pf"), { field: "pf", offset: 0x62, width: "u8", fixed: false });

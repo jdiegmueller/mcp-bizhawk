@@ -135,9 +135,12 @@ export const G: Record<string, number> = {
   lastplayer: 0xffbeda,
   passdir: 0xffbedc,
   passspeed: 0xffbede,
-  // RETAIL_OFFSETS.md live-verified RAM table: canonical HUD score pair.
+  // RETAIL_OFFSETS.md live-verified RAM table: canonical HUD score pair,
+  // sim RNG state, and VBlank frame counter.
   home_score: 0xffc6da,
   away_score: 0xffca3e,
+  rng_seed: 0xffd066,
+  vblank_frame_counter: 0xffb03e,
   faceoff_window_latch: 0xffc304,
   line_change_latch: 0xffc304,
   home_line: 0xffc6e5,

@@ -61,6 +61,36 @@ test("nhl94_fields reads documented NHL94 score globals", async () => {
   }
 });
 
+test("nhl94_fields reads documented NHL94 RNG and frame globals", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: (p) => {
+      assert.ok(p.reads.some((r) => r.name === "global.rng_seed" && r.address === 0xffd066 && r.width === "u32_be"));
+      assert.ok(p.reads.some((r) => r.name === "global.vblank_frame_counter" && r.address === 0xffb03e && r.width === "u16_be"));
+      return {
+        "global.rng_seed": 0x12345678,
+        "global.vblank_frame_counter": 42,
+      };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_fields",
+      arguments: { target: h.target,
+        ops: [
+          { op: "read", target: "global", field: "rng_seed" },
+          { op: "read", target: "global", field: "vblank_frame_counter" },
+        ],
+      },
+    });
+    const text = textOf(res);
+    assert.match(text, /global\.rng_seed=305419896/);
+    assert.match(text, /global\.vblank_frame_counter=42/);
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_fields writes and freezes with post-write readback", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
