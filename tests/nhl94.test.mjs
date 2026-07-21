@@ -97,6 +97,13 @@ test("resolveField maps known names to offset/width and flags fixed-point axes",
   assert.deepEqual(resolveField("x"), { field: "x", offset: 0x00, width: "s32_be", fixed: true });
 });
 
+test("resolveField exposes documented control and role struct offsets", () => {
+  assert.deepEqual(resolveField("target_x"), { field: "target_x", offset: 0x44, width: "s16_be", fixed: false });
+  assert.deepEqual(resolveField("target_y"), { field: "target_y", offset: 0x46, width: "s16_be", fixed: false });
+  assert.deepEqual(resolveField("scnum"), { field: "scnum", offset: 0x52, width: "u16_be", fixed: false });
+  assert.deepEqual(resolveField("roster_index"), { field: "roster_index", offset: 0x61, width: "u8", fixed: false });
+});
+
 test("resolveField parses raw offsets with optional width (default u8)", () => {
   assert.deepEqual(resolveField("+0x32"), { field: "+0x32", offset: 0x32, width: "u8", fixed: false });
   assert.deepEqual(resolveField("0x32:s16_be"), { field: "0x32:s16_be", offset: 0x32, width: "s16_be", fixed: false });

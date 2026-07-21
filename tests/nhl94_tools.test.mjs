@@ -440,6 +440,33 @@ test("nhl94_read exposes assignment queue aliases by name", async () => {
   }
 });
 
+test("nhl94_read exposes documented SCnum, roster, and AI target fields", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: (p) => {
+      assert.ok(p.reads.some((r) => r.name === "s4.target_x" && r.address === 0xffb04a + 4 * 0x80 + 0x44 && r.width === "s16_be"));
+      assert.ok(p.reads.some((r) => r.name === "s4.target_y" && r.address === 0xffb04a + 4 * 0x80 + 0x46 && r.width === "s16_be"));
+      assert.ok(p.reads.some((r) => r.name === "s4.scnum" && r.address === 0xffb04a + 4 * 0x80 + 0x52 && r.width === "u16_be"));
+      assert.ok(p.reads.some((r) => r.name === "s4.roster_index" && r.address === 0xffb04a + 4 * 0x80 + 0x61 && r.width === "u8"));
+      return {
+        "s4.target_x": 90,
+        "s4.target_y": -40,
+        "s4.scnum": 4,
+        "s4.roster_index": 12,
+      };
+    },
+  });
+  try {
+    const res = await h.client.callTool({
+      name: "nhl94_read",
+      arguments: { target: h.target, targets: ["s4"], fields: ["target_x", "target_y", "scnum", "roster_index"] },
+    });
+    assert.match(textOf(res), /s4: target_x=90 target_y=-40 scnum=4 roster_index=12/);
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_read rejects unknown fields", async () => {
   const h = await startHarness({ list_memory_domains: () => DOMAINS, read_many: () => ({}) });
   try {
