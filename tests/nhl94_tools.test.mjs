@@ -258,15 +258,15 @@ test("nhl94_add_penalty resolves team plus player id, queues the type, and arms 
     _index: i,
     player_id: i === 8 ? 89 : i,
     pf: i >= 6 ? 0x40 : 0,
-    pf2: 0,
+    pf2: i === 8 ? 0x02 : 0,
   }));
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: () => records,
     read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, 0])),
-    read16: () => 0x2059,
+    read16: (p) => p.address === 0xffc300 ? 0x0200 : 0x2059,
     eval_lua: () => "hook-armed",
-    memory_ops: () => ({ applied: 2, frozen_count: 0 }),
+    memory_ops: () => ({ applied: 4, frozen_count: 0 }),
   });
   try {
     const result = await h.client.callTool({
@@ -277,13 +277,52 @@ test("nhl94_add_penalty resolves team plus player id, queues the type, and arms 
     const write = h.bridge.calls.find((c) => c.method === "memory_ops");
     assert.deepEqual(write.params.ops, [
       { op: "write", address: 0xffd056, value: 1, width: "u16_be" },
+      { op: "write", address: 0xffb4ad, value: 0x12, width: "u8" },
+      { op: "write", address: 0xffc300, value: 0x0600, width: "u16_be" },
       { op: "write", address: 0xffc3a4, value: 0x2059, width: "u16_be" },
     ]);
     const hook = h.bridge.calls.find((c) => c.method === "eval_lua");
     assert.match(hook.params.code, /0xFFCA9E/);
     assert.match(hook.params.code, /360/);
     assert.match(hook.params.code, /event\.onframestart/);
+    assert.match(hook.params.code, /local saw_box_transition = false/);
+    assert.match(hook.params.code, /saw_box_transition = true/);
+    assert.match(hook.params.code, /elseif saw_box_transition then/);
     assert.doesNotMatch(hook.params.code, /event\.on_bus_write/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state keeps committed assdopen skaters in box and excludes inactive positional slots", async () => {
+  const records = Array.from({ length: 15 }, (_, i) => minimalNhlRec(i, {
+    player_id: i,
+    pf: i >= 6 && i <= 11 ? 0x40 : 0,
+    pf2: 0,
+    pos: i === 6 || i === 8 ? 0xffff : i,
+    assidx: 0,
+    assq0: i === 6 ? 13 : i === 8 ? 6 : 0,
+  }));
+  records[6].pf = 0x46;
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: () => records,
+    read_many: (p) => {
+      if (p.reads.some((r) => r.name === "opt_pen")) {
+        return Object.fromEntries(p.reads.map((r) => [r.name, r.name === "away_timer" ? 120 : 0]));
+      }
+      return defaultNhlGlobals();
+    },
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const result = await h.client.callTool({
+      name: "nhl94_state",
+      arguments: { target: h.target, sections: ["penalties"], describe: false },
+    });
+    const output = textOf(result);
+    assert.match(output, /box: s6\(draining\)/);
+    assert.doesNotMatch(output, /box: .*s8/);
   } finally {
     await h.close();
   }

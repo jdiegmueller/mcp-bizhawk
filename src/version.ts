@@ -1,7 +1,7 @@
 // Single source of truth for the server version string. The "-jd" suffix
 // marks this modified build (frame-scaled timeouts, byteorder, hold,
 // wait_for_memory, pause-safe bridge) vs the unmodified upstream server.
-export const VERSION = "2026.7.55-jd";
+export const VERSION = "2026.7.56-jd";
 
 // RPC PROTOCOL version — the wire contract between this server and the Lua
 // bridge (command framing, command/RESULT shapes, the HELLO handshake). It is
