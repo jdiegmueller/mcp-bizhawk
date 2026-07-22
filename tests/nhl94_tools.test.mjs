@@ -253,7 +253,7 @@ test("nhl94_set_line writes the selected team line and returns decoded readback"
   }
 });
 
-test("nhl94_add_penalty resolves team plus player id, queues the type, and arms arbitrary duration", async () => {
+test("nhl94_add_penalty atomically enqueues retail duration and reports slot plus occupancy", async () => {
   const records = Array.from({ length: 12 }, (_, i) => ({
     _index: i,
     player_id: i === 8 ? 89 : i,
@@ -263,47 +263,36 @@ test("nhl94_add_penalty resolves team plus player id, queues the type, and arms 
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: () => records,
-    read_many: (p) => Object.fromEntries(p.reads.map((r) => [r.name, 0])),
-    read16: (p) => p.address === 0xffc300 ? 0x0200 : 0x2059,
-    eval_lua: () => "hook-armed",
-    memory_ops: () => ({ applied: 4, frozen_count: 0 }),
+    eval_lua: () => ({ queue_index: 1, pending_count: 3, queue_value: 0x2059 }),
   });
   try {
     const result = await h.client.callTool({
       name: "nhl94_add_penalty",
-      arguments: { target: h.target, team: "away", player_id: 89, penalty_type: "tripping", duration_seconds: 360 },
+      arguments: { target: h.target, team: "away", player_id: 89, penalty_type: "tripping" },
     });
-    assert.match(textOf(result), /Queued 6:00 Tripping for s8 \(away, player 89\)/);
-    const write = h.bridge.calls.find((c) => c.method === "memory_ops");
-    assert.deepEqual(write.params.ops, [
-      { op: "write", address: 0xffd056, value: 1, width: "u16_be" },
-      { op: "write", address: 0xffb4ad, value: 0x12, width: "u8" },
-      { op: "write", address: 0xffc300, value: 0x0600, width: "u16_be" },
-      { op: "write", address: 0xffc3a4, value: 0x2059, width: "u16_be" },
-    ]);
-    const hook = h.bridge.calls.find((c) => c.method === "eval_lua");
-    assert.match(hook.params.code, /0xFFCA9E/);
-    assert.match(hook.params.code, /360/);
-    assert.match(hook.params.code, /event\.onframestart/);
-    assert.match(hook.params.code, /local saw_box_transition = false/);
-    assert.match(hook.params.code, /saw_box_transition = true/);
-    assert.match(hook.params.code, /elseif saw_box_transition then/);
-    assert.doesNotMatch(hook.params.code, /event\.on_bus_write/);
+    assert.match(textOf(result), /Queued Tripping for s8 \(away, player 89\)/);
+    assert.match(textOf(result), /queue slot 1; pending entries 3\/32/);
+    assert.ok(!h.bridge.calls.some((c) => c.method === "memory_ops"));
+    const enqueue = h.bridge.calls.find((c) => c.method === "eval_lua");
+    assert.match(enqueue.params.code, /for i = 0, 31 do/);
+    assert.match(enqueue.params.code, /memory\.write_u16_be\(0xFFC3A4 \+ queue_index \* 2, 0x2059\)/);
+    assert.match(enqueue.params.code, /memory\.write_u8\(0xFFB4AD/);
+    assert.match(enqueue.params.code, /memory\.write_u16_be\(0xFFC300/);
+    assert.doesNotMatch(enqueue.params.code, /event\.onframestart/);
   } finally {
     await h.close();
   }
 });
 
-test("nhl94_state keeps committed assdopen skaters in box and excludes inactive positional slots", async () => {
+test("nhl94_state excludes ordinary assbench pf2 transitions from the penalty box", async () => {
   const records = Array.from({ length: 15 }, (_, i) => minimalNhlRec(i, {
     player_id: i,
     pf: i >= 6 && i <= 11 ? 0x40 : 0,
-    pf2: 0,
-    pos: i === 6 || i === 8 ? 0xffff : i,
+    pf2: i === 6 ? 0x34 : i === 11 ? 0x04 : 0,
+    pos: i,
     assidx: 0,
-    assq0: i === 6 ? 13 : i === 8 ? 6 : 0,
+    assq0: i === 6 ? 12 : i === 11 ? 11 : 0,
   }));
-  records[6].pf = 0x46;
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
     read_struct_array: () => records,
@@ -322,6 +311,39 @@ test("nhl94_state keeps committed assdopen skaters in box and excludes inactive 
     });
     const output = textOf(result);
     assert.match(output, /box: s6\(draining\)/);
+    assert.doesNotMatch(output, /box: .*s11/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("nhl94_state recognizes committed asspenalty and assdopen serving slots", async () => {
+  const records = Array.from({ length: 15 }, (_, i) => minimalNhlRec(i, {
+    player_id: i,
+    pf: i === 0 ? 0x86 : i === 6 ? 0x46 : i >= 6 && i <= 11 ? 0x40 : 0,
+    pf2: 0,
+    pos: i === 0 || i === 6 || i === 8 ? 0xffff : i,
+    assidx: 0,
+    assq0: i === 0 ? 12 : i === 6 ? 13 : i === 8 ? 6 : 0,
+  }));
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_struct_array: () => records,
+    read_many: (p) => {
+      if (p.reads.some((r) => r.name === "opt_pen")) {
+        return Object.fromEntries(p.reads.map((r) => [r.name, 0]));
+      }
+      return defaultNhlGlobals();
+    },
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const result = await h.client.callTool({
+      name: "nhl94_state",
+      arguments: { target: h.target, sections: ["penalties"], describe: false },
+    });
+    const output = textOf(result);
+    assert.match(output, /box: s0\(draining\) s6\(draining\)/);
     assert.doesNotMatch(output, /box: .*s8/);
   } finally {
     await h.close();
@@ -374,7 +396,10 @@ test("NHL94 write tools publish detailed descriptions and recipes", async () => 
     const recipes = await h.client.callTool({ name: "nhl94_recipes", arguments: {} });
     assert.match(textOf(recipes), /nhl94_set_score/);
     assert.match(textOf(recipes), /nhl94_add_penalty/);
-    assert.match(textOf(recipes), /duration_seconds/);
+    assert.doesNotMatch(textOf(recipes), /duration_seconds/);
+    const addPenalty = catalog.tools.find((entry) => entry.name === "nhl94_add_penalty");
+    assert.deepEqual(addPenalty.inputSchema.required, ["target", "penalty_type"]);
+    assert.ok(!("duration_seconds" in addPenalty.inputSchema.properties));
   } finally {
     await h.close();
   }

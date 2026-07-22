@@ -733,9 +733,9 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
 • nhl94_set_score — write the home and away score together, then read back both.
 • nhl94_set_line — select Sc1, Sc2, or Chk for the home or away team.
 • nhl94_add_penalty — queue a known retail penalty for a skater selected by
-  slot or team+player_id. duration_seconds can be any value 0-8191, including
-  intentionally nonstandard durations; the bridge arms a one-shot timer patch
-  that applies when the game commits the skater to the box.
+  slot or team+player_id. The ROM derives the duration from the penalty type
+  (minor 2:00, major 5:00). Enqueue is atomic and reports both the zero-based
+  queue slot and the instantaneous pending-entry occupancy out of 32.
 • nhl94_remove_penalty — clear that skater's queued penalty and, when already
   boxed, expire the team's active box timer so the normal return-to-ice path runs.
 • nhl94_camera — pin/release scroll. Direct pinning may jitter; possession-led
@@ -811,14 +811,14 @@ Set the score and selected lines:
   4. nhl94_state {"describe":false}
 
 Add or remove a penalty by live slot:
-  1. nhl94_add_penalty {"slot":"s3","penalty_type":"tripping",
-       "duration_seconds":120}
-  2. For deliberate nonsense, use e.g. duration_seconds:360 for 6:00.
+  1. nhl94_add_penalty {"slot":"s3","penalty_type":"tripping"}
+  2. Read the response as queue slot N; pending entries M/32. This count is
+     pending queue occupancy at enqueue time, not the number currently boxed.
   3. nhl94_remove_penalty {"slot":"s3"}
 
 Add a penalty by team plus the skater's in-game player-id byte:
   1. nhl94_add_penalty {"team":"away","player_id":89,
-       "penalty_type":"holding","duration_seconds":120}
+       "penalty_type":"holding"}
   Note: pass either slot OR team+player_id, never both.
 
 ── ADDRESS AND EVIDENCE SAFETY ───────────────────────────────────────────────

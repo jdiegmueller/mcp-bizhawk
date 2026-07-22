@@ -1413,18 +1413,17 @@ const TOOLS: Tool[] = [
   {
     name: "nhl94_add_penalty",
     description:
-      "PURPOSE: Queue a real retail NHL '94 penalty for one skater and set its eventual box duration. " +
-      "USAGE: Select the skater either with slot ('s0'..'s11') OR with team plus player_id. penalty_type uses the complete known retail infraction list. duration_seconds may be standard or intentionally nonsensical, such as 360 seconds of tripping. " +
-      "BEHAVIOR: DESTRUCTIVE: enables penalties, writes one free PenBuf entry, and arms a one-shot BizHawk memory hook that replaces the team's timer when the normal penalty pipeline commits the skater to the box. The whistle/ref presentation remains game-driven and may be delayed until possession changes. Errors before writing if the selector is invalid/ambiguous, the skater is already boxed, or the queue is full. " +
-      "RETURNS: The resolved slot/team/player, queued penalty type, requested duration, queue index, and confirmed queue readback.",
+      "PURPOSE: Queue a real retail NHL '94 penalty for one skater. " +
+      "USAGE: Select the skater either with slot ('s0'..'s11') OR with team plus player_id. penalty_type uses the complete known retail infraction list; the ROM derives box duration from that type (minors 2:00, majors 5:00). " +
+      "BEHAVIOR: DESTRUCTIVE: atomically enables penalties, selects the first free PenBuf slot, writes the retail pending/team flags, and enqueues the infraction in one bridge callback. The whistle/ref presentation remains game-driven and may be delayed until the offending team gains possession. Errors without writing if the selector is invalid/ambiguous or the 32-entry queue is full. " +
+      "RETURNS: The resolved slot/team/player, penalty type, zero-based queue slot, instantaneous pending-entry count/capacity, and confirmed queue readback.",
     inputSchema: {
-      type: "object", required: ["target", "penalty_type", "duration_seconds"],
+      type: "object", required: ["target", "penalty_type"],
       properties: { ...targetProp,
         slot: { type: "string", enum: Array.from({ length: 12 }, (_, i) => `s${i}`), description: "Direct live entity slot. Use this OR team+player_id." },
         team: { type: "string", enum: ["home", "away"], description: "Team used with player_id. Use this OR slot." },
         player_id: { type: "integer", minimum: 0, maximum: 255, description: "Live in-game player identity byte (+0x53), used with team." },
         penalty_type: { type: "string", enum: Object.keys(nhl94.PENALTY_TYPES), description: "Known retail infraction type." },
-        duration_seconds: { type: "integer", minimum: 0, maximum: 8191, default: 120, description: "Box duration in game-seconds. Arbitrary values are allowed." },
       }, additionalProperties: false,
     },
   },
@@ -1433,7 +1432,7 @@ const TOOLS: Tool[] = [
     description:
       "PURPOSE: Remove one selected NHL '94 skater's queued or active penalty. " +
       "USAGE: Select the skater either with slot ('s0'..'s11') OR with team plus player_id, matching nhl94_add_penalty. " +
-      "BEHAVIOR: DESTRUCTIVE: cancels this tool's pending duration hook, clears matching PenBuf entries, and sets the selected team timer to zero when the skater is already boxed so the game's normal return-to-ice path runs. It does not directly clear unrelated skater flags. Errors before writing for an invalid/ambiguous selector or when no queued/active penalty exists. " +
+      "BEHAVIOR: DESTRUCTIVE: clears matching PenBuf entries and sets the selected team timer to zero when the skater is already boxed so the game's normal return-to-ice path runs. It does not directly clear unrelated skater flags. Errors before writing for an invalid/ambiguous selector or when no queued/active penalty exists. " +
       "RETURNS: The resolved skater and confirmed cleared queue/timer readback.",
     inputSchema: {
       type: "object", required: ["target"],
@@ -2350,43 +2349,42 @@ async function readPenaltyQueue(target: string, bh: BizhawkServer, d: NhlDomain,
   return reads.map((read) => values[read.name] ?? 0);
 }
 
-function penaltyHookKey(player: PenaltyPlayer): string {
-  return `${player.team}-${player.playerId}`;
+interface PenaltyEnqueueResult {
+  queue_index: number;
+  pending_count: number;
+  queue_value: number;
 }
 
-function penaltyDurationHookCode(player: PenaltyPlayer, duration: number, d: NhlDomain, domain: string): string {
-  const key = JSON.stringify(penaltyHookKey(player));
+function penaltyEnqueueCode(player: PenaltyPlayer, typeCode: number, d: NhlDomain, domain: string): string {
   const domainLiteral = JSON.stringify(domain);
   const pf2Address = d.addr(nhl94.SORTCORDS + player.slot * nhl94.SCSIZE + nhl94.OFF.pf2);
-  const timerAddress = d.addr(player.team === "home" ? nhl94.PENALTY.homeTimer : nhl94.PENALTY.awayTimer);
-  const timerValue = 0x2000 | duration;
-  return `_G.__mcp_bizhawk_penalty_hooks = _G.__mcp_bizhawk_penalty_hooks or {}\n` +
-    `local key = ${key}\n` +
-    `local old = _G.__mcp_bizhawk_penalty_hooks[key]\n` +
-    `if old then pcall(function() event.unregisterbyid(old) end) end\n` +
-    `local saw_box_transition = false\n` +
-    `local hook\n` +
-    `hook = event.onframestart(function()\n` +
-    `  local previous = memory.getcurrentmemorydomain and memory.getcurrentmemorydomain() or nil\n` +
-    `  memory.usememorydomain(${domainLiteral})\n` +
-    `  if (memory.read_u8(0x${pf2Address.toString(16).toUpperCase()}) & 0x04) ~= 0 then\n` +
-    `    saw_box_transition = true\n` +
-    `  elseif saw_box_transition then\n` +
-    `    pcall(function() event.unregisterbyid(hook) end)\n` +
-    `    _G.__mcp_bizhawk_penalty_hooks[key] = nil\n` +
-    `    memory.write_u16_be(0x${timerAddress.toString(16).toUpperCase()}, ${timerValue})\n` +
-    `  end\n` +
+  const optionAddress = d.addr(nhl94.PENALTY.option);
+  const flagsAddress = d.addr(nhl94.PENALTY.ppFlags);
+  const queueAddress = d.addr(nhl94.PENALTY.queue);
+  const teamPenaltyFlag = player.team === "home" ? 0x0200 : 0x0400;
+  const queueValue = (typeCode << 8) | player.playerId;
+  return `local previous = memory.getcurrentmemorydomain and memory.getcurrentmemorydomain() or nil\n` +
+    `memory.usememorydomain(${domainLiteral})\n` +
+    `local queue_index = -1\n` +
+    `local pending_count = 0\n` +
+    `for i = 0, 31 do\n` +
+    `  local entry = memory.read_u16_be(0x${queueAddress.toString(16).toUpperCase()} + i * 2)\n` +
+    `  if entry == 0 and queue_index < 0 then queue_index = i end\n` +
+    `  if entry ~= 0 then pending_count = pending_count + 1 end\n` +
+    `end\n` +
+    `if queue_index < 0 then\n` +
     `  if previous then memory.usememorydomain(previous) end\n` +
-    `end, "mcp_penalty_duration")\n` +
-    `_G.__mcp_bizhawk_penalty_hooks[key] = hook\n` +
-    `return "armed ${duration}s timer override"`;
-}
-
-function penaltyCancelHookCode(player: PenaltyPlayer): string {
-  const key = JSON.stringify(penaltyHookKey(player));
-  return `local hooks = _G.__mcp_bizhawk_penalty_hooks\n` +
-    `if hooks and hooks[${key}] then pcall(function() event.unregisterbyid(hooks[${key}]) end); hooks[${key}] = nil end\n` +
-    `return "cleared penalty timer override"`;
+    `  return { queue_index = -1, pending_count = pending_count, queue_value = 0 }\n` +
+    `end\n` +
+    `memory.write_u16_be(0x${optionAddress.toString(16).toUpperCase()}, 1)\n` +
+    `local pf2 = memory.read_u8(0x${pf2Address.toString(16).toUpperCase()})\n` +
+    `memory.write_u8(0x${pf2Address.toString(16).toUpperCase()}, pf2 | 0x10)\n` +
+    `local flags = memory.read_u16_be(0x${flagsAddress.toString(16).toUpperCase()})\n` +
+    `memory.write_u16_be(0x${flagsAddress.toString(16).toUpperCase()}, flags | 0x${teamPenaltyFlag.toString(16).toUpperCase()})\n` +
+    `memory.write_u16_be(0x${queueAddress.toString(16).toUpperCase()} + queue_index * 2, 0x${queueValue.toString(16).toUpperCase()})\n` +
+    `local queue_value = memory.read_u16_be(0x${queueAddress.toString(16).toUpperCase()} + queue_index * 2)\n` +
+    `if previous then memory.usememorydomain(previous) end\n` +
+    `return { queue_index = queue_index, pending_count = pending_count + 1, queue_value = queue_value }`;
 }
 
 // Optional frame step after sprite-moving writes so BizHawk re-renders the new
@@ -3097,39 +3095,22 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const target = p.target as string;
         const penaltyType = p.penalty_type as nhl94.PenaltyType;
         if (!(penaltyType in nhl94.PENALTY_TYPES)) throw new Error(`unknown penalty_type "${String(p.penalty_type)}"`);
-        const duration = p.duration_seconds as number;
-        if (!Number.isInteger(duration) || duration < 0 || duration > 0x1fff) throw new Error("duration_seconds must be an integer from 0 to 8191");
         const d = await bh.getBackend(target).nhlDomain();
         const domain = await d.detect({});
         const player = await resolvePenaltyPlayer(target, bh, d, domain, p);
         if ((player.pf2 & 0x04) !== 0) throw new Error(`${player.slotName} is already in the penalty box`);
-        const queue = await readPenaltyQueue(target, bh, d, domain);
-        const queueIndex = queue.findIndex((entry) => entry === 0);
-        if (queueIndex < 0) throw new Error("NHL94 penalty queue is full");
         const typeCode = nhl94.PENALTY_TYPES[penaltyType];
         const queueValue = (typeCode << 8) | player.playerId;
-        const ppFlags = await bh.call<number>(target, "read16", {
-          address: d.addr(nhl94.PENALTY.ppFlags), byteorder: "be", domain,
+        const enqueue = await bh.call<PenaltyEnqueueResult>(target, "eval_lua", {
+          code: penaltyEnqueueCode(player, typeCode, d, domain),
         });
-        const teamPenaltyFlag = player.team === "home" ? 0x0200 : 0x0400;
-        await bh.call(target, "eval_lua", { code: penaltyDurationHookCode(player, duration, d, domain) });
-        const addOps: nhl94.MemOp[] = [
-          { op: "write", address: nhl94.PENALTY.option, value: 1, width: "u16_be" },
-          {
-            op: "write",
-            address: nhl94.SORTCORDS + player.slot * nhl94.SCSIZE + nhl94.OFF.pf2,
-            value: player.pf2 | 0x10,
-            width: "u8",
-          },
-          { op: "write", address: nhl94.PENALTY.ppFlags, value: ppFlags | teamPenaltyFlag, width: "u16_be" },
-          { op: "write", address: nhl94.PENALTY.queue + queueIndex * 2, value: queueValue, width: "u16_be" },
-        ];
-        await bh.call(target, "memory_ops", { domain, ops: d.rebase(addOps) });
-        const readback = await bh.call<number>(target, "read16", {
-          address: d.addr(nhl94.PENALTY.queue + queueIndex * 2), byteorder: "be", domain,
-        });
-        if (readback !== queueValue) throw new Error("penalty queue readback did not match the requested entry");
-        return ok(`Queued ${nhl94.formatClock(duration)} ${nhl94.penaltyLabel(penaltyType)} for ${player.slotName} (${player.team}, player ${player.playerId}); queue ${queueIndex}, readback 0x${readback.toString(16).toUpperCase().padStart(4, "0")}.`);
+        if (enqueue.queue_index < 0) throw new Error(`NHL94 penalty queue is full (${enqueue.pending_count}/${nhl94.PENALTY.queueEntries})`);
+        if (enqueue.queue_value !== queueValue) throw new Error("penalty queue readback did not match the requested entry");
+        return ok(
+          `Queued ${nhl94.penaltyLabel(penaltyType)} for ${player.slotName} (${player.team}, player ${player.playerId}); ` +
+          `queue slot ${enqueue.queue_index}; pending entries ${enqueue.pending_count}/${nhl94.PENALTY.queueEntries}; ` +
+          `readback 0x${enqueue.queue_value.toString(16).toUpperCase().padStart(4, "0")}. Retail duration is determined by penalty type.`,
+        );
       }
 
       case "nhl94_remove_penalty": {
@@ -3141,7 +3122,6 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const queuedIndexes = queue.flatMap((entry, index) => ((entry & 0xff) === player.playerId && entry !== 0 ? [index] : []));
         const active = (player.pf2 & 0x04) !== 0;
         if (!active && queuedIndexes.length === 0) throw new Error(`${player.slotName} has no queued or active penalty`);
-        await bh.call(target, "eval_lua", { code: penaltyCancelHookCode(player) });
         const ops: nhl94.MemOp[] = queuedIndexes.map((index) => ({
           op: "write", address: nhl94.PENALTY.queue + index * 2, value: 0, width: "u16_be",
         }));
@@ -3263,7 +3243,6 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "passacc", offset: nhl94.OFF.passacc, width: "u8" },
           { name: "pnum", offset: nhl94.OFF.pnum, width: "u8" },
           { name: "pf", offset: nhl94.OFF.pf, width: "u8" },
-          { name: "pos", offset: nhl94.OFF.pos, width: "u16_be" },
           // player_id (+0x53) and pf2 (+0x63) are always read so the penalties
           // section can build a pid→slot map and detect in-box skaters without a
           // second round-trip; they are not printed outside the penalties block.
@@ -3282,7 +3261,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // verbose adds the extended per-entity fields (accumulators/flags/weight)
         // — the ones agents otherwise hand-read; kept off the default block to
         // avoid bloating the common snapshot.
-        const EXTRA_FIELDS = ["impact", "impactp", "nopuck", "pf2", "pf3", "wgt8"];
+        const EXTRA_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf2", "pf3", "wgt8"];
         if (sections.has("debug")) {
           for (const name of EXTRA_FIELDS) fields.push({ name, offset: nhl94.OFF[name], width: nhl94.FIELD_WIDTH[name] });
         }
@@ -3528,9 +3507,10 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             `penalties: option=${optLabel}  pp_flags=home=${homePen ? "penalized" : "—"} away=${awayPen ? "penalized" : "—"}  ` +
             `home_timer=${decodeTimer(pv.home_timer ?? 0)}  away_timer=${decodeTimer(pv.away_timer ?? 0)}`,
           );
-          // In-box skaters: pf2 bit2 during the transition, then the committed
-          // assdopen/pf.bit2/pos=-1 signature. Cross-reference queue entries by
-          // player_id to show the infraction type while they still exist.
+          // In-box skaters must be on the penalty assignment path (asspenalty or
+          // assdopen) and carry either the transitional pf2.bit2 or committed
+          // pf.bit2 marker. pf2.bit2 alone is also used by ordinary bench/line
+          // changes, so treating it as a box flag creates false positives.
           const queueByPid = new Map<number, { typeCode: number; team: string }>();
           const queueList: string[] = [];
           for (let i = 0; i < nhl94.PENALTY.queueEntries; i++) {
@@ -3550,9 +3530,9 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
             const rec = byIndex.get(idx);
             if (!rec) continue;
             const roleIdx = nhl94.decodeSlotControl(rec).roleIdx;
-            const transitioning = (rec.pf2 & 0x04) !== 0;
-            const committed = roleIdx === 13 && (rec.pf & 0x04) !== 0 && rec.pos === 0xffff;
-            if (!transitioning && !committed) continue;
+            const penaltyRole = roleIdx === 12 || roleIdx === 13;
+            const penaltyState = ((rec.pf2 | rec.pf) & 0x04) !== 0;
+            if (!penaltyRole || !penaltyState) continue;
             const pid = rec.player_id & 0x3F;
             const qe = queueByPid.get(pid);
             const infraction = qe ? `(${nhl94.penaltyLabelByCode(qe.typeCode)})` : "(draining)";

@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.56-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.57-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.57-jd changes: nhl94_add_penalty uses an atomic retail enqueue and
+--   no longer overrides duration; the box decoder role-gates penalty states.
+--   Protocol stays 3.
 --
 -- v2026.7.56-jd changes: nhl94_add_penalty now mirrors the retail pending
 --   state and applies custom duration only after commit; nhl94_state keeps
@@ -707,7 +711,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.56-jd",
+    version    = "2026.7.57-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
