@@ -16,7 +16,7 @@ const EXPECTED_BIZHAWK = [
 const EXPECTED_NHL94 = [
   "nhl94_recipes", "nhl94_set_score", "nhl94_set_line", "nhl94_add_penalty", "nhl94_remove_penalty",
   "nhl94_teleport", "nhl94_freeze", "nhl94_unfreeze",
-  "nhl94_state", "nhl94_rules", "nhl94_read", "nhl94_fields", "nhl94_stage", "nhl94_park", "nhl94_rig", "nhl94_possession",
+  "nhl94_state", "nhl94_lines", "nhl94_rules", "nhl94_read", "nhl94_fields", "nhl94_stage", "nhl94_park", "nhl94_rig", "nhl94_possession",
   "nhl94_clock", "nhl94_camera",
 ];
 const HIDDEN_SAMPLE = [

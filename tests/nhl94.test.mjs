@@ -30,6 +30,9 @@ test("RECIPES_GUIDE encodes the safe experiment lifecycle and current tool seman
   assert.match(RECIPES_GUIDE, /Velocity xv\/yv\/zv uses game motion units/);
   assert.match(RECIPES_GUIDE, /server handles memory shape/);
   assert.match(RECIPES_GUIDE, /nhl94_fields — semantic field read\/write\/freeze\/unfreeze/);
+  assert.match(RECIPES_GUIDE, /nhl94_lines — selected lines, personnel, configured units, rosters, and live stamina/);
+  assert.match(RECIPES_GUIDE, /detail:"roster"/);
+  assert.match(RECIPES_GUIDE, /pnum.*index.*not stamina/i);
   assert.match(RECIPES_GUIDE, /nhl94_stage — batch clean\/rig\/park\/place\/possession\/field setup/);
   assert.match(RECIPES_GUIDE, /assign the carrier directly/);
   assert.match(RECIPES_GUIDE, /Clock freeze .* does NOT close the collision stoppage gate/s);
@@ -61,7 +64,11 @@ test("lineLabel maps selected-line bytes and preserves unknowns via caller raw f
   assert.equal(lineLabel(0), "Sc1");
   assert.equal(lineLabel(1), "Sc2");
   assert.equal(lineLabel(2), "Chk");
-  assert.equal(lineLabel(3), "unknown");
+  assert.equal(lineLabel(3), "PP1");
+  assert.equal(lineLabel(4), "PP2");
+  assert.equal(lineLabel(5), "PK1");
+  assert.equal(lineLabel(6), "PK2");
+  assert.equal(lineLabel(7), "unknown");
   assert.equal(lineLabel(255), "unknown");
 });
 

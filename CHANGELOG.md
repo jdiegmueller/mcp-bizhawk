@@ -18,6 +18,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `nhl94_recipes` and tool descriptions cover the new state-edit workflows.
 
+## [2026.7.58-jd] - 2026-07-23
+
+### Added
+
+- `nhl94_lines` with cumulative `summary`, `on_ice`, `lines`, and `roster`
+  detail, including selected units, all 12 loaded player entities, live
+  energy/status tables, pending swaps, configured units, and ROM-backed names.
+- Compact line/stamina output in `nhl94_state`; `sections:["lines"]` adds the
+  loaded-player detail.
+
+### Changed
+
+- NHL94 tool descriptions and recipes route agents to the lowest sufficient
+  line/stamina detail and clarify that entity `pnum` is an index, not stamina.
+- The Lua OSD shows selected lines and on-ice energy averages.
+
+### Fixed
+
+- The Lua OSD carrier `en` field now reads the correct team energy-table word
+  instead of displaying entity `+0x66` (the lineup index).
+
 ## [2026.7.39-jd] - 2026-07-17
 
 ### Added

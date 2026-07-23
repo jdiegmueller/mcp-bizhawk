@@ -23,17 +23,23 @@ local clock_block = extract("local function osd_clock_line(", "\nend", "osd_cloc
 local mode_block = extract("local function osd_game_mode_label(", "\nend", "osd_game_mode_label")
 local players_block = extract("local function osd_players_label(", "\nend", "osd_players_label")
 local penalties_block = extract("local function osd_penalties_label(", "\nend", "osd_penalties_label")
+local stamina_block = extract(
+  "local NHL94_OSD",
+  "\nend -- NHL94_OSD.line_stamina_text",
+  "NHL94 line/stamina helpers")
 local mute_block = extract("local function mute_emuhawk_audio(", "\nend", "mute_emuhawk_audio")
 
 local env
 env = {
   tostring = tostring,
+  type = type,
   string = string,
   pcall = pcall,
   pairs = pairs,
   ipairs = ipairs,
   tonumber = tonumber,
   table = table,
+  math = math,
   SORTCORDS = 0xFFB04A,
   SCSIZE = 0x80,
   TRACE_G = { gameclock = 0xFFC468, puckc = 0xFFB7AA, gsp = 0xFFC466 },
@@ -43,19 +49,27 @@ env = {
   disconnected = false,
   CAPS = {},
   logged = {},
+  reads8 = {},
+  reads16 = {},
   console = {
     log = function(msg)
       table.insert(env.logged, msg)
     end,
   },
 }
+env.tr_u8 = function(address) return env.reads8[address] or 0 end
+env.tr_u16 = function(address) return env.reads16[address] or 0 end
 
 local chunk = assert(load(
   socket_block .. "\n" .. frozen_block .. "\n" .. build_block .. "\n" .. clock_block ..
-  "\n" .. mode_block .. "\n" .. players_block .. "\n" .. penalties_block .. "\n" .. mute_block ..
-  "\nreturn socket_badge_text, osd_frozen_fields, osd_clock_line, osd_game_mode_label, osd_players_label, osd_penalties_label, mute_emuhawk_audio",
+  "\n" .. mode_block .. "\n" .. players_block .. "\n" .. penalties_block .. "\n" ..
+  stamina_block .. "\n" .. mute_block ..
+  "\nreturn socket_badge_text, osd_frozen_fields, osd_clock_line, osd_game_mode_label, osd_players_label, osd_penalties_label, NHL94_OSD.energy_for_slot, NHL94_OSD.team_line, NHL94_OSD.carrier_energy, NHL94_OSD.line_stamina_text, mute_emuhawk_audio",
   "osd_helpers", "t", env))
-local socket_badge_text, osd_frozen_fields, osd_clock_line, osd_game_mode_label, osd_players_label, osd_penalties_label, mute_emuhawk_audio = chunk()
+local socket_badge_text, osd_frozen_fields, osd_clock_line, osd_game_mode_label,
+  osd_players_label, osd_penalties_label, nhl94_osd_energy_for_slot,
+  nhl94_osd_team_line, nhl94_osd_carrier_energy, nhl94_osd_line_stamina_text,
+  mute_emuhawk_audio = chunk()
 
 assert(socket_badge_text() == "127.0.0.1:8768:CONNECTED", socket_badge_text())
 env.disconnected = true
@@ -90,6 +104,41 @@ assert(osd_penalties_label(0, 0x0000) == "OFF/offside OFF")
 assert(osd_penalties_label(2, 0x0000) == "ON-exc-offside/offside OFF")
 assert(osd_penalties_label(1, 0x2000) == "ON/offside ON")
 print("ok   penalties label separates penalty option from offside gate")
+
+local home_base, away_base = 0xFFC6CE, 0xFFCA32
+env.reads8[0xFFC6E5] = 0
+env.reads8[0xFFCA48] = 2
+for slot = 0, 11 do
+  local entity = env.SORTCORDS + slot * env.SCSIZE
+  local lineup = slot % 6
+  env.reads8[entity + 0x66] = lineup
+  env.reads16[entity + 0x34] = lineup
+end
+for lineup = 0, 5 do
+  env.reads16[home_base + 0x32 + lineup * 2] = 0x1000 + lineup * 0x10
+  env.reads16[away_base + 0x32 + lineup * 2] = 0x0800 + lineup * 0x10
+end
+
+local energy, err, lineup = nhl94_osd_energy_for_slot(0)
+assert(energy == 0x1000 and err == nil and lineup == 0)
+assert(nhl94_osd_carrier_energy(nil) == "--")
+assert(nhl94_osd_carrier_energy(0) == "4096")
+assert(nhl94_osd_carrier_energy(12) == "??")
+env.reads8[env.SORTCORDS + 0x66] = 0xff
+energy, err, lineup = nhl94_osd_energy_for_slot(0)
+assert(energy == nil and err == "invalid_lineup_index" and lineup == 0xff)
+assert(nhl94_osd_carrier_energy(0) == "??")
+env.reads8[env.SORTCORDS + 0x66] = 0
+
+local line, average, contributors, raw = nhl94_osd_team_line("home")
+assert(line == "Sc1" and average == 4136 and contributors == 6 and raw == 0)
+line, average, contributors, raw = nhl94_osd_team_line("away")
+assert(line == "Chk" and average == 2088 and contributors == 6 and raw == 2)
+line, average, contributors = nhl94_osd_team_line("invalid")
+assert(line == "??" and average == nil and contributors == 0)
+assert(nhl94_osd_line_stamina_text() ==
+  "lines home Sc1 avg4136/6  away Chk avg2088/6")
+print("ok   line/stamina helpers use team energy tables with safe fallbacks")
 
 env.logged = {}
 env.CAPS.set_sound_enabled = false

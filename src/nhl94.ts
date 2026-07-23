@@ -264,11 +264,15 @@ export function classifyPhase(sessionByte: number, faceoffBit: boolean): string 
 }
 
 /** Selected-line byte -> short NHL94 line label. Raw values are reported separately. */
-export function lineLabel(v: number): "Sc1" | "Sc2" | "Chk" | "unknown" {
+export function lineLabel(v: number): "Sc1" | "Sc2" | "Chk" | "PP1" | "PP2" | "PK1" | "PK2" | "unknown" {
   switch (v) {
     case 0: return "Sc1";
     case 1: return "Sc2";
     case 2: return "Chk";
+    case 3: return "PP1";
+    case 4: return "PP2";
+    case 5: return "PK1";
+    case 6: return "PK2";
     default: return "unknown";
   }
 }
@@ -698,19 +702,25 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   combines compact structured RAM with visual placement/contact/animation
   evidence. Use describe:false only for a fast RAM-only read. Dense groups are
   explicit: sections:"all" or sections:["anim","control","ratings","camera",
-  "context","debug","freezes"]. verbose:true is an all-sections debug alias.
-  A trailing * marks that exact frozen word.
+  "context","lines","debug","freezes"]. The compact result always includes
+  selected-line and team-average stamina; "lines" adds all loaded entities.
+  verbose:true is an all-sections debug alias. A trailing * marks that word.
 • nhl94_rules — game mode, player matchup, penalties, and offside. Use this
   for the retail penalty enum: $FFD056 0=OFF, 1=ON, 2=ON except OFFSIDE.
+• nhl94_lines — selected lines, personnel, configured units, rosters, and live stamina.
+  Omit detail for the compact summary; request detail:"on_ice", detail:"lines",
+  or detail:"roster" cumulatively only when that evidence is needed. Entity
+  pnum (+0x66) is a lineup index, not stamina; the tool resolves the energy table.
 • nhl94_read — curated entity snapshots by known field list. Use this instead
   of calculating a slot address or using eval_lua for entity reads. Named
-  assignment fields include assidx and assq0..assq7.
+  assignment fields include assidx and assq0..assq7. Use nhl94_lines for
+  table-backed stamina, line configurations, and roster identity.
 • nhl94_fields — semantic field read/write/freeze/unfreeze for selected entity
   and global fields. Raw offsets/addresses require allow_raw:true and should be
   temporary verification scaffolding, not the default path. Named fields hide
   memory width/sign/endian details, including velocity fields. fdir accepts raw
   integers or compass strings: north=0, northeast=1, east=2, southeast=3,
-  south=4, southwest=5, west=6, northwest=7.
+  south=4, southwest=5, west=6, northwest=7. Use nhl94_lines for stamina/lines.
 • nhl94_stage — batch clean/rig/park/place/possession/field setup for one
   experiment scene. Use it when a multi-step setup would otherwise drift across
   frames or leave stale freezes. place and fields accept the same semantic

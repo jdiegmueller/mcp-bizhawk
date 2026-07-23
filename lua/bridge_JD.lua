@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.57-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.58-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.58-jd changes: NHL94 OSD uses the team energy table for carrier
+--   stamina and adds compact selected-line/on-ice-average visibility.
+--   Protocol stays 3.
 --
 -- v2026.7.57-jd changes: nhl94_add_penalty uses an atomic retail enqueue and
 --   no longer overrides duration; the box decoder role-gates penalty states.
@@ -711,7 +715,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.57-jd",
+    version    = "2026.7.58-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's
@@ -1285,6 +1289,71 @@ local function osd_penalties_label(opt_pen, gmode_word)
     return pen .. "/offside " .. offside
 end
 
+-- NHL94 stores the loaded player's lineup index at entity +0x66; stamina lives
+-- in a separate per-team u16 table. Keep these helpers small and independently
+-- testable so the OSD cannot accidentally regress to displaying the index as
+-- energy again.
+local NHL94_OSD = {
+    team_base = { home = 0xFFC6CE, away = 0xFFCA32 },
+    selected_line = { home = 0xFFC6E5, away = 0xFFCA48 },
+    line_label = {
+        [0] = "Sc1", [1] = "Sc2", [2] = "Chk", [3] = "PP1",
+        [4] = "PP2", [5] = "PK1", [6] = "PK2",
+    },
+}
+
+function NHL94_OSD.energy_for_slot(slot)
+    if type(slot) ~= "number" or slot % 1 ~= 0 or slot < 0 or slot > 11 then
+        return nil, "invalid_team", nil
+    end
+    local team = slot < 6 and "home" or "away"
+    local entity = SORTCORDS + slot * SCSIZE
+    local lineup = tr_u8(entity + 0x66)
+    if lineup < 0 or lineup > 25 then
+        return nil, "invalid_lineup_index", lineup
+    end
+    return tr_u16(NHL94_OSD.team_base[team] + 0x32 + lineup * 2), nil, lineup
+end
+
+function NHL94_OSD.team_line(team)
+    local team_base = NHL94_OSD.team_base[team]
+    local selected = NHL94_OSD.selected_line[team]
+    if not team_base or not selected then return "??", nil, 0, nil end
+
+    local raw = tr_u8(selected)
+    local label = NHL94_OSD.line_label[raw] or string.format("??(%d)", raw)
+    local first = team == "home" and 0 or 6
+    local total, contributors = 0, 0
+    for slot = first, first + 5 do
+        local entity = SORTCORDS + slot * SCSIZE
+        local position = tr_u16(entity + 0x34)
+        if position >= 0 and position <= 5 then
+            local energy = NHL94_OSD.energy_for_slot(slot)
+            if energy ~= nil then
+                total = total + energy
+                contributors = contributors + 1
+            end
+        end
+    end
+    if contributors == 0 then return label, nil, 0, raw end
+    return label, math.floor(total / contributors + 0.5), contributors, raw
+end
+
+function NHL94_OSD.carrier_energy(carrier)
+    if carrier == nil then return "--" end
+    local energy = NHL94_OSD.energy_for_slot(carrier)
+    return energy ~= nil and tostring(energy) or "??"
+end
+
+function NHL94_OSD.line_stamina_text()
+    local home_line, home_avg, home_n = NHL94_OSD.team_line("home")
+    local away_line, away_avg, away_n = NHL94_OSD.team_line("away")
+    local home_text = home_avg ~= nil and tostring(home_avg) or "--"
+    local away_text = away_avg ~= nil and tostring(away_avg) or "--"
+    return string.format("lines home %s avg%s/%d  away %s avg%s/%d",
+        home_line, home_text, home_n, away_line, away_text, away_n)
+end -- NHL94_OSD.line_stamina_text
+
 -- One entity (skater or puck) as a SINGLE columnar row: position, heading,
 -- velocity triple (xv,yv,zv), the SPA anim record (anim/attr/spanum/spacnt), and
 -- the flag/gate bytes — all fixed-width so every row aligns under osd_row_header.
@@ -1381,6 +1450,8 @@ local function osd_lines()
         osd_players_label(tr_u16(ACTIVE_HOME), tr_u16(ACTIVE_AWAY), tr_u16(PAD_WORD_0), tr_u16(PAD_WORD_2)),
         osd_penalties_label(tr_u16(OPT_PEN), gmode_word))
     overlays[#lines] = nil
+    lines[#lines + 1] = NHL94_OSD.line_stamina_text()
+    overlays[#lines] = nil
     -- Game-clock line — pure NHL94 now (lag moved up). Period (gsp) leads,
     -- matching the on-screen scoreboard. The carrier VALUE is its own segment so
     -- a frozen carrier (ff.carry) turns just "sN"/"--" red (like the per-field
@@ -1413,12 +1484,13 @@ local function osd_lines()
         local vis, ov = osd_entity_row("pk", PUCK_ADDR, ff.puck)
         lines[#lines + 1] = vis
         overlays[#lines] = ov and { str = ov, color = OSD_RED } or nil
-        -- Carrier ratings (from the carrying slot's struct); dashes when loose.
+        -- Carrier ratings plus live stamina; dashes when loose. Energy is the
+        -- u16 team-table value (0x1000 = 100%), not entity +0x66's lineup index.
         local sp, sa, pa, en = "--", "--", "--", "--"
         if carrier then
             local cb = SORTCORDS + carrier * SCSIZE
             sp = tostring(tr_u8(cb + 0x6C)); sa = tostring(tr_u8(cb + 0x6D))
-            pa = tostring(tr_u8(cb + 0x6E)); en = tostring(tr_u8(cb + 0x66))
+            pa = tostring(tr_u8(cb + 0x6E)); en = NHL94_OSD.carrier_energy(carrier)
         end
         lines[#lines + 1] = string.format("    carrier  sp%-3s sa%-3s pa%-3s en%-3s", sp, sa, pa, en)
         overlays[#lines] = nil

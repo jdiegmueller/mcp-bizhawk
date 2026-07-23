@@ -216,9 +216,8 @@ record:
   recordSpan: nameFieldLength + 8 bytes
 
 goalie discriminator: attributes[5] == 0x00
-record termination: cursor reaches stringBlockOffset, or a zero length word
-                    begins padding and every remaining byte before
-                    stringBlockOffset is zero
+record termination: an exact u16 value 0x0002 occupies the final two bytes
+                    immediately before stringBlockOffset
 ```
 
 `nameFieldLength` must be at least 2, even, and contained within the roster

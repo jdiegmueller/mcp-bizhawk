@@ -10,6 +10,7 @@ import { errorCode } from "./errors.js";
 import { VERSION } from "./version.js";
 import { describeImage, requireVisionConfig, visionConfig, type VisionConfig } from "./vision.js";
 import * as nhl94 from "./nhl94.js";
+import * as nhlLines from "./nhl94-lines.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1522,10 +1523,31 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "nhl94_lines",
+    description:
+      "PURPOSE: Read selected lines, current personnel, configured line membership, full rosters, and live NHL '94 stamina through one semantic interface. " +
+      "USAGE: Choose the lowest sufficient detail: omit detail (summary) for each team's selected line and on-ice average; on_ice for all 12 loaded player entities plus individual stamina and pending swaps; lines for all NLC/Sc1/Sc2/Chk/PP1/PP2/PK1/PK2 configurations; roster only when every player name, status, and membership is required. pnum/entity +0x66 is a lineup INDEX used to locate the separate team energy table — it is not stamina. Prefer this tool over manually deriving RAM or ROM addresses. " +
+      "BEHAVIOR: No side effects — pure read. summary/on_ice use one same-dispatch RAM snapshot. lines/roster additionally parse bounded layout-compatible roster data from the exact MD CART domain; unsupported ROM layouts preserve valid RAM data and return complete:false plus romError rather than guessed data. " +
+      "RETURNS: Stable JSON text with detail, complete/available, snapshot, summary, and cumulative onIce/configuredLines/rosters sections. Energy includes raw (0x1000=100%) and unclamped percent; averages include contributor counts.",
+    inputSchema: {
+      type: "object",
+      required: ["target"],
+      properties: { ...targetProp,
+        detail: {
+          type: "string",
+          enum: ["summary", "on_ice", "lines", "roster"],
+          default: "summary",
+          description: "Cumulative detail level. Omit for compact summary; request larger levels only when needed.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "nhl94_state",
     description:
-      "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
-      "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For additional entity reads use nhl94_read; for selected field reads/writes/freezes use nhl94_fields. Never compute slot addresses yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
+      "PURPOSE: One-call decoded snapshot of the whole NHL94 game state — every skater + puck position/velocity/heading + animation record, compact selected-line/team-stamina data, the puck carrier, clock/period/play state, camera scroll, and which fields are currently frozen. " +
+      "USAGE: Call before an experiment to establish the baseline and after driving frames/input to verify what actually happened. The default describe:true is recommended when placement, contact, or animation matters because it returns structured RAM plus a screenshot caption; use describe:false only for a faster RAM-only check such as reading interaction_gate. Structured fields are authoritative for RAM facts; the caption is observational evidence, not a replacement. Targets s0-s11 and pk are game entity slots, not render order. Request sections:[\"lines\"] for all 12 loaded player entities and pending swaps; use nhl94_lines for configured units or full rosters. Prefer this tool over hand-built read_many/read_struct_array/eval_lua calls. For additional entity reads use nhl94_read; for selected field reads/writes/freezes use nhl94_fields. Never compute slot addresses yourself. Pass raw:true only when an absolute address is genuinely required for a trap. " +
       "BEHAVIOR: No side effects — pure read (≤3 bridge round-trips: the slot grid, the globals, and the freeze list; a 4th round-trip is added only when the `penalties` section is requested). Coordinates are decoded to whole pixels; velocities are signed. A `frozen_summary` reports total/mapped/unmapped freezes — a nonzero `unmapped` or a surprisingly large total is your tripwire for stale freezes left by a previous rig. " +
       "RETURNS: A structured text block with every entity, then `phase`, `interaction_gate: OPEN|CLOSED`, carrier/clock/play/camera/context, a reference-only layout, and frozen summary. When the faceoff-window latch at $FFC304 is nonzero, phase is the stable token `faceoff_line_change` and a `faceoff_window` line reports latch + selected lines (Sc1/Sc2/Chk). CLOSED proves gmode.bit0 is blocking collision/check dispatch. OPEN proves only that this stoppage gate is clear; it does not prove contact occurred or that the resolver reached a trap. Never infer the RAM gate from a screenshot, apparent motion, or HUD clock. `phase` is heuristic UI context except for the RAM-backed faceoff_line_change token. With `sections:[\"penalties\"]` (or verbose/all), a `penalties:` block reports the penalty option flag, power-play flags, home/away master timers (MM:SS + raw seconds), in-box skaters with their infraction, and the pending penalty queue (slot + infraction). A trailing `*` marks a frozen word.",
       inputSchema: {
@@ -1535,10 +1557,10 @@ const TOOLS: Tool[] = [
           raw: { type: "boolean", default: false, description: "Include raw 16.16 hex and the sub-pixel fraction alongside decoded whole-pixel values." },
           verbose: { type: "boolean", default: false, description: "Add per-entity raw diagnostic fields: impact(+0x32)/impactp(+0x2E)/pos(+0x34)/nopuck(+0x5E)/pf2,pf3(+0x63-64)/wgt8(+0x67) plus raw assignment queue bytes. Normal output already decodes pf(+0x62), assidx(+0x36), and assq(+0x38..3F) into role/control context." },
           sections: {
-            description: "Optional dense sections to include. Default is compact. Use a string or array: anim, control, ratings, camera, context, debug, freezes, penalties, or all. verbose:true implies all.",
+            description: "Optional dense sections to include. Default is compact. Use lines for all 12 loaded player stamina/pending-swap records; use nhl94_lines for configured lines/full rosters. Other values: anim, control, ratings, camera, context, debug, freezes, penalties, or all. verbose:true implies all.",
             oneOf: [
-              { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes", "penalties"] },
-              { type: "array", items: { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "debug", "freezes", "penalties"] } },
+              { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "lines", "debug", "freezes", "penalties"] },
+              { type: "array", items: { type: "string", enum: ["all", "anim", "control", "ratings", "camera", "context", "lines", "debug", "freezes", "penalties"] } },
             ],
           },
         describe: { type: "boolean", default: true, description: "Default TRUE and recommended for staging/post-action verification: append a vision caption to the structured RAM state so placement, contact, and animation can be checked. Set false only for a fast RAM-only read (for example an interaction_gate preflight) or when vision is unnecessary. The structured result still returns if vision fails." },
@@ -1565,7 +1587,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_read",
     description:
       "PURPOSE: Read arbitrary decoded fields of NHL94 entities (skaters s0-s11, puck pk) by NAME or raw in-struct offset — the game-aware alternative to hand-computing 68K base+offset in bizhawk_read/eval_lua (the #1 source of base/stride/endian mistakes). " +
-      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), assignment queue assidx/assq0..assq7 (+0x36/+0x38..3F), AI target_x/target_y (+0x44/+0x46), SCnum (+0x52), roster_index (+0x61), pnum (+0x66), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,assidx,assq0..assq7,target_x,target_y,scnum,SCnum,roster_index,pnum,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
+      "USAGE: Read-only per-entity inspection for fields nhl94_state's default block doesn't show — e.g. the body-check accumulator (impact, +0x32), assignment queue assidx/assq0..assq7 (+0x36/+0x38..3F), AI target_x/target_y (+0x44/+0x46), SCnum (+0x52), roster_index (+0x61), pnum (+0x66), impactp (+0x2E), pos (+0x34), nopuck (+0x5E), player-flag bytes pf/pf2/pf3 (+0x62/63/64), weight wgt8 (+0x67) — or a raw entity-relative offset. `fields` entries are either a KNOWN name (x,y,z,xv,yv,zv,fdir,frame,attr,anim,spanum,spacnt,impact,impactp,pos,assidx,assq0..assq7,target_x,target_y,scnum,SCnum,roster_index,pnum,nopuck,pf,pf2,pf3,wgt8) or a raw '+0xNN[:width]' (width defaults u8). pnum is a lineup index, not stamina; use nhl94_lines for table-backed current stamina, configured lines, or rosters. For common position/velocity/anim/carrier/clock snapshots use nhl94_state. For globals or writes/freezes use nhl94_fields. " +
       "BEHAVIOR: No side effects — one read_many round-trip. x/y/z decode to whole pixels; every other field is the raw integer at its width. Errors if targets×fields exceeds 128 reads, or on an unknown target/field. " +
       "RETURNS: One line per target: 'sN: field=val field=val …'.",
     inputSchema: {
@@ -1590,7 +1612,7 @@ const TOOLS: Tool[] = [
     name: "nhl94_fields",
     description:
       "PURPOSE: Batch read/write/freeze/unfreeze selected NHL94 entity fields and globals by semantic name, with an explicit guarded escape hatch for raw offsets/addresses. " +
-      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock/global.home_score/global.rng_seed plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. Control-context globals in CONTROL_G are readable only. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
+      "USAGE: Use this when nhl94_state is too broad and nhl94_read's curated snapshots are not specific enough — e.g. clear s6.lockout, hold s6.fdir, set s0.xv/yv, read global.clock/global.home_score/global.rng_seed plus s0.puck_control_rating, or temporarily touch a newly decoded raw offset. Use nhl94_lines instead for selected lines, current stamina, configured units, or full rosters. Control-context globals in CONTROL_G are readable only. For fdir, prefer compass strings instead of memorizing values: north=0, northeast=1, east=2, southeast=3, south=4, southwest=5, west=6, northwest=7. Named fields hide address, domain, width, endian, signedness, and position encoding details. Prefer specialized tools for broad placement (nhl94_teleport/nhl94_stage), possession (nhl94_possession), and clock setup (nhl94_clock). Raw entity offsets and raw global addresses require allow_raw:true. " +
       "BEHAVIOR: Mixed per-op batch. Entity targets are s0-s11 or pk; global target is 'global'. Position fields x/y/z accept whole pixels and encode 16.16; velocity fields are raw signed words; fdir accepts either a raw integer or one of north/northeast/east/southeast/south/southwest/west/northwest. op:'freeze' with no value first reads the current RAM value and pins it; op:'write' with freeze:true writes and pins the supplied value. Write/freeze ops default to post-write readback so contested game rewrites are visible. `unfreeze` releases that field's bridge freeze only; it does not stop exec traps/hooks. This tool does not advance frames. " +
       "RETURNS: One line per op with decoded read/write/freeze/unfreeze result and post-write readback when applicable.",
     inputSchema: {
@@ -1868,7 +1890,7 @@ async function observationContent(
   }
   return content;
 }
-const STATE_SECTIONS = new Set(["anim", "control", "ratings", "camera", "context", "debug", "freezes", "penalties"]);
+const STATE_SECTIONS = new Set(["anim", "control", "ratings", "camera", "context", "lines", "debug", "freezes", "penalties"]);
 function parseStateSections(input: unknown, verbose: boolean): Set<string> {
   const out = new Set<string>();
   const addAll = () => { for (const s of STATE_SECTIONS) out.add(s); };
@@ -1882,6 +1904,112 @@ function parseStateSections(input: unknown, verbose: boolean): Set<string> {
     out.add(val);
   }
   return out;
+}
+
+const NHL_LINES_ROM_CACHE = new Map<string, nhlLines.ParsedTeamStructure>();
+
+function nhlLinesRamReads(
+  d: { addr: (address: number) => number },
+  domain: string,
+): { name: string; address: number; width: string; domain: string }[] {
+  const reads = [
+    { name: "frame", address: d.addr(nhl94.G.vblank_frame_counter), width: "u32_be", domain },
+    { name: "session", address: d.addr(nhl94.SESSION_BYTE), width: "u8", domain },
+    { name: "home_team_id", address: d.addr(nhlLines.TEAM_IDENTITY.home), width: "u16_be", domain },
+    { name: "away_team_id", address: d.addr(nhlLines.TEAM_IDENTITY.away), width: "u16_be", domain },
+    { name: "home_selected_line", address: d.addr(nhlLines.SELECTED_LINE.home), width: "u8", domain },
+    { name: "away_selected_line", address: d.addr(nhlLines.SELECTED_LINE.away), width: "u8", domain },
+  ];
+  const tableReads = [
+    ...nhlLines.playerSlotReadSpecs(domain),
+    ...nhlLines.teamTableReadSpecs(domain),
+  ].map((read) => ({ ...read, address: d.addr(read.address) }));
+  return [...reads, ...tableReads];
+}
+
+function be16(bytes: number[], offset: number): number {
+  return bytes[offset] * 0x100 + bytes[offset + 1];
+}
+
+function be32(bytes: number[], offset: number): number {
+  return (((bytes[offset] * 0x100 + bytes[offset + 1]) * 0x100 + bytes[offset + 2]) * 0x100 + bytes[offset + 3]) >>> 0;
+}
+
+async function attachNhlLinesRom(
+  bh: BizhawkServer,
+  target: string,
+  result: Record<string, any>,
+  snapshot: nhlLines.RawLinesSnapshot,
+  detail: "lines" | "roster",
+): Promise<Record<string, any>> {
+  if (!result.available) return result;
+  try {
+    const info = await bh.call<{ rom_hash?: string; memory_domains?: string[] }>(target, "get_info");
+    const domains = info.memory_domains ?? [];
+    if (!domains.includes(nhlLines.ROM_DOMAIN)) {
+      throw new nhlLines.NhlRomLayoutError(
+        "missing_cartridge_domain",
+        `required cartridge domain '${nhlLines.ROM_DOMAIN}' is unavailable`,
+      );
+    }
+    const pointerBytes = await bh.call<number[]>(target, "read_range", {
+      address: nhlLines.ROM_TEAM_POINTER_TABLE,
+      length: nhlLines.ROM_TEAM_COUNT * 4,
+      domain: nhlLines.ROM_DOMAIN,
+    });
+    const teamIds = { home: snapshot.homeTeamId, away: snapshot.awayTeamId } as const;
+    const parsed = {} as Record<nhlLines.TeamSide, nhlLines.ParsedTeamStructure>;
+    for (const side of ["home", "away"] as const) {
+      const teamId = teamIds[side];
+      if (!Number.isInteger(teamId) || teamId < 0 || teamId >= nhlLines.ROM_TEAM_COUNT) {
+        throw new nhlLines.NhlRomLayoutError("invalid_team_identity", `${side} team identity ${teamId} is outside 0..27`);
+      }
+      const pointer = be32(pointerBytes, teamId * 4);
+      if (!Number.isSafeInteger(pointer) || pointer <= 0) {
+        throw new nhlLines.NhlRomLayoutError("invalid_team_pointer", `${side} team pointer ${pointer} is invalid`);
+      }
+      const cacheKey = `${target}:${info.rom_hash ?? "unknown"}:${teamId}:${pointer}:${nhlLines.ROM_LAYOUT_VERSION}`;
+      const cached = NHL_LINES_ROM_CACHE.get(cacheKey);
+      if (cached) {
+        parsed[side] = cached;
+        continue;
+      }
+      const header = await bh.call<number[]>(target, "read_range", {
+        address: pointer,
+        length: 6,
+        domain: nhlLines.ROM_DOMAIN,
+      });
+      const span = be16(header, 4);
+      if (span < 0x92) {
+        throw new nhlLines.NhlRomLayoutError("unsupported_layout", `${side} team span ${span} is shorter than 0x92`);
+      }
+      if (span > nhlLines.MAX_TEAM_SPAN) {
+        throw new nhlLines.NhlRomLayoutError("span_too_large", `${side} team span ${span} exceeds ${nhlLines.MAX_TEAM_SPAN}`);
+      }
+      const bytes = await bh.call<number[]>(target, "read_range", {
+        address: pointer,
+        length: span,
+        domain: nhlLines.ROM_DOMAIN,
+      });
+      parsed[side] = nhlLines.parseTeamStructure(Uint8Array.from(bytes), pointer);
+      NHL_LINES_ROM_CACHE.set(cacheKey, parsed[side]);
+    }
+    return nhlLines.attachRomDetail(
+      result,
+      snapshot,
+      parsed,
+      detail,
+      { domain: nhlLines.ROM_DOMAIN, romHash: info.rom_hash ?? "unknown" },
+    );
+  } catch (error) {
+    result.complete = false;
+    result.rom = null;
+    result.romError = {
+      code: error instanceof nhlLines.NhlRomLayoutError ? error.code : "unsupported_layout",
+      message: error instanceof Error ? error.message : String(error),
+    };
+    return result;
+  }
 }
 function rulesGameMode(flags: number): string {
   return (flags & 0x03) === 0 ? "Exhibition" : `unknown/menu flags=0x${(flags & 0xff).toString(16).toUpperCase().padStart(2, "0")}`;
@@ -3214,6 +3342,23 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         return ok(`${lines.join("\n")}\n${r.frozen_count} address(es) still frozen.`);
       }
 
+      case "nhl94_lines": {
+        const target = p.target as string;
+        const detail = (p.detail ?? "summary") as nhlLines.LinesDetail;
+        const backend = bh.getBackend(target);
+        const d = await backend.nhlDomain();
+        const domain = await d.detect({});
+        const values = await bh.call<Record<string, number>>(target, "read_many", {
+          reads: nhlLinesRamReads(d, domain),
+        });
+        const snapshot = nhlLines.rawSnapshotFromReadValues(values);
+        let result = nhlLines.buildRamResult(detail, snapshot, domain);
+        if (detail === "lines" || detail === "roster") {
+          result = await attachNhlLinesRom(bh, target, result, snapshot, detail);
+        }
+        return ok(JSON.stringify(result, null, 2));
+      }
+
       case "nhl94_state": {
         const target = p.target as string;
         const backend = bh.getBackend(target);
@@ -3242,6 +3387,8 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "shotacc", offset: nhl94.OFF.shotacc, width: "u8" },
           { name: "passacc", offset: nhl94.OFF.passacc, width: "u8" },
           { name: "pnum", offset: nhl94.OFF.pnum, width: "u8" },
+          { name: "roster_index", offset: nhl94.OFF.roster_index, width: "u8" },
+          { name: "pos", offset: nhl94.OFF.pos, width: "u16_be" },
           { name: "pf", offset: nhl94.OFF.pf, width: "u8" },
           // player_id (+0x53) and pf2 (+0x63) are always read so the penalties
           // section can build a pid→slot map and detect in-box skaters without a
@@ -3261,7 +3408,7 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         // verbose adds the extended per-entity fields (accumulators/flags/weight)
         // — the ones agents otherwise hand-read; kept off the default block to
         // avoid bloating the common snapshot.
-        const EXTRA_FIELDS = ["impact", "impactp", "pos", "nopuck", "pf2", "pf3", "wgt8"];
+        const EXTRA_FIELDS = ["impact", "impactp", "nopuck", "pf2", "pf3", "wgt8"];
         if (sections.has("debug")) {
           for (const name of EXTRA_FIELDS) fields.push({ name, offset: nhl94.OFF[name], width: nhl94.FIELD_WIDTH[name] });
         }
@@ -3283,7 +3430,35 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           { name: "faceoff_window_latch", address: d.addr(nhl94.G.faceoff_window_latch), width: "u16_be", domain },
           { name: "home_line", address: d.addr(nhl94.G.home_line), width: "u8", domain },
           { name: "away_line", address: d.addr(nhl94.G.away_line), width: "u8", domain },
+          { name: "home_team_id", address: d.addr(nhlLines.TEAM_IDENTITY.home), width: "u16_be", domain },
+          { name: "away_team_id", address: d.addr(nhlLines.TEAM_IDENTITY.away), width: "u16_be", domain },
+          { name: "line_snapshot_frame", address: d.addr(nhl94.G.vblank_frame_counter), width: "u32_be", domain },
         );
+        const stateEnergyReads = new Set<string>();
+        for (let idx = 0; idx <= 11; idx++) {
+          const rec = byIndex.get(idx);
+          const lineupIndex = rec?.pnum;
+          if (typeof lineupIndex !== "number" || !Number.isInteger(lineupIndex) || lineupIndex < 0 || lineupIndex >= nhlLines.ROSTER_SIZE) continue;
+          const side = idx < 6 ? "home" : "away";
+          const key = `${side}.${lineupIndex}`;
+          if (stateEnergyReads.has(key)) continue;
+          stateEnergyReads.add(key);
+          const teamBase = nhlLines.TEAM_BASE[side];
+          gReads.push(
+            {
+              name: `${side}.energy.${lineupIndex}`,
+              address: d.addr(teamBase + nhlLines.ENERGY_OFFSET + lineupIndex * 2),
+              width: "u16_be",
+              domain,
+            },
+            {
+              name: `${side}.status.${lineupIndex}`,
+              address: d.addr(teamBase + nhlLines.STATUS_OFFSET + lineupIndex * 2),
+              width: "u16_be",
+              domain,
+            },
+          );
+        }
         for (const [name, address] of Object.entries(nhl94.CONTROL_G)) {
           const width = name.startsWith("switch_debounce_") || name.startsWith("raw_pad_byte_") ? "u8" : "u16_be";
           gReads.push({ name, address: d.addr(address), width, domain });
@@ -3294,6 +3469,44 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
         const gv = await bh.call<Record<string, number>>(target, "read_many", { reads: gReads });
         const frozen = await bh.call<{ frozen?: { address: number; width: string; value: number; domain?: string }[] }>(target, "list_frozen");
         const frozenList = Array.isArray(frozen.frozen) ? frozen.frozen : [];
+        const stateEnergy = {
+          home: Array<number>(nhlLines.ROSTER_SIZE),
+          away: Array<number>(nhlLines.ROSTER_SIZE),
+        };
+        const stateStatus = {
+          home: Array<number>(nhlLines.ROSTER_SIZE),
+          away: Array<number>(nhlLines.ROSTER_SIZE),
+        };
+        for (const side of ["home", "away"] as const) {
+          for (let index = 0; index < nhlLines.ROSTER_SIZE; index++) {
+            stateEnergy[side][index] = gv[`${side}.energy.${index}`];
+            stateStatus[side][index] = gv[`${side}.status.${index}`];
+          }
+        }
+        const stateLinesRaw: nhlLines.RawLinesSnapshot = {
+          frame: gv.line_snapshot_frame,
+          session: gv.session,
+          homeTeamId: gv.home_team_id,
+          awayTeamId: gv.away_team_id,
+          homeSelectedLine: gv.home_line,
+          awaySelectedLine: gv.away_line,
+          players: Array.from({ length: 12 }, (_, slot) => {
+            const rec = byIndex.get(slot);
+            return {
+              slot,
+              currentLineupIndex: rec?.pnum ?? 0xff,
+              desiredLineupIndex: rec?.roster_index ?? 0xff,
+              position: rec?.pos ?? 0xffff,
+            };
+          }),
+          energy: stateEnergy,
+          status: stateStatus,
+        };
+        const stateLines = nhlLines.buildRamResult(
+          sections.has("lines") ? "on_ice" : "summary",
+          stateLinesRaw,
+          domain,
+        );
 
         // Map frozen addresses onto {target, field}; tally mapped/unmapped.
         const frozenByTarget = new Map<string, Set<string>>();
@@ -3407,6 +3620,32 @@ export function registerTools(server: Server, bh: import("./bizhawk.js").Bizhawk
           ? `interaction_gate: CLOSED (gmode.bit0=1; collision/check dispatch is blocked during whistle/faceoff mode)`
           : `interaction_gate: OPEN (gmode.bit0=0; stoppage gate is clear — necessary, not proof that contact/resolver dispatch occurred)`);
         lines.push(`carrier: ${carrier}${markG("carrier")}   clock: ${nhl94.formatClock(gv.gameclock)} (${gv.gameclock}s)${markG("gameclock")}   period: ${period}${markG("gsp")}   play: ${play}${markG("gmode")}   faceoff: ${faceoff}`);
+        if (stateLines.available) {
+          const home = stateLines.summary.home;
+          const away = stateLines.summary.away;
+          const avgText = (avg: nhlLines.AverageEnergy) =>
+            avg.raw === null ? `— n=0` : `${avg.percent}% raw=${avg.raw} n=${avg.contributors}`;
+          lines.push(
+            `line_stamina: home=${home.selectedLine.label}(${home.selectedLine.raw}) avg=${avgText(home.onIceAverage)} ` +
+            `away=${away.selectedLine.label}(${away.selectedLine.raw}) avg=${avgText(away.onIceAverage)}`,
+          );
+        } else {
+          lines.push(`line_stamina: unavailable (${stateLines.unavailableReason})`);
+        }
+        if (sections.has("lines") && stateLines.onIce) {
+          lines.push("line_players:");
+          for (const player of stateLines.onIce as nhlLines.LoadedPlayerResult[]) {
+            const energy = player.energy ? `${player.energy.raw}(${player.energy.percent}%)` : "—";
+            const status = player.status ? `${player.status.label}(0x${player.status.raw.toString(16).toUpperCase()})` : "—";
+            const desired = player.desiredLineupIndex === null ? "—" : String(player.desiredLineupIndex);
+            const errors = player.decodeErrors.length ? ` errors=${player.decodeErrors.join(",")}` : "";
+            lines.push(
+              `  ${player.slot} team=${player.team} current=${player.currentLineupIndex} desired=${desired} ` +
+              `pending=${player.pendingSwap} pos=${player.position.label}(${player.position.raw}) ` +
+              `energy=${energy} status=${status}${errors}`,
+            );
+          }
+        }
         // Carrier ratings (OSD parity): shotpwr/shotacc/passacc plus pnum of
         // the slot carrying the puck; dashes when the puck is loose.
         const crec = (gv.carrier >= 0 && gv.carrier <= 11) ? byIndex.get(gv.carrier) : undefined;
