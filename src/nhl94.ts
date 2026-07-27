@@ -263,6 +263,23 @@ export function classifyPhase(sessionByte: number, faceoffBit: boolean): string 
   }
 }
 
+/** The 0x1xxx gmode band is synthetic intermission-highlight gameplay. */
+export function isIntermissionHighlight(gmode: number): boolean {
+  return ((gmode >>> 0) & 0xf000) === 0x1000;
+}
+
+/** Terminal agent-facing response that deliberately excludes highlight data. */
+export function formatIntermissionHighlight(gmode: number, sessionByte: number): string {
+  const word = (gmode >>> 0).toString(16).toUpperCase().padStart(4, "0");
+  const session = (sessionByte >>> 0).toString(16).toUpperCase().padStart(2, "0");
+  return [
+    "phase: intermission_highlight",
+    "INTERMISSION HIGHLIGHT — footage is not part of the active game.",
+    "Active-game entities, puck, score, screenshot, and vision intentionally suppressed.",
+    `evidence: gmode=0x${word} high_nibble=0x1 session=0x${session}`,
+  ].join("\n");
+}
+
 /** Selected-line byte -> short NHL94 line label. Raw values are reported separately. */
 export function lineLabel(v: number): "Sc1" | "Sc2" | "Chk" | "PP1" | "PP2" | "PK1" | "PK2" | "unknown" {
   switch (v) {
@@ -705,6 +722,10 @@ export const RECIPES_GUIDE = `NHL94 PRIMER — read once at the start of an NHL9
   "context","lines","debug","freezes"]. The compact result always includes
   selected-line and team-average stamina; "lines" adds all loaded entities.
   verbose:true is an all-sections debug alias. A trailing * marks that word.
+  phase:intermission_highlight is terminal: its footage is synthetic, not the
+  active game. Entity, puck, score, screenshot, and vision data are suppressed;
+  do not diagnose a team/score change, rig failure, callback failure, reset, or
+  attract mode from it.
 • nhl94_rules — game mode, player matchup, penalties, and offside. Use this
   for the retail penalty enum: $FFD056 0=OFF, 1=ON, 2=ON except OFFSIDE.
 • nhl94_lines — selected lines, personnel, configured units, rosters, and live stamina.

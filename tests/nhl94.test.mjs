@@ -16,6 +16,8 @@ import {
   resolveField,
   READ_DEFAULT_FIELDS,
   classifyPhase,
+  isIntermissionHighlight,
+  formatIntermissionHighlight,
   SESSION_BYTE,
   RECIPES_GUIDE,
   lineLabel,
@@ -58,6 +60,27 @@ test("classifyPhase maps session byte + gmode bit0 to the coarse phase buckets",
   // Anything unexpected degrades gracefully, echoing the raw byte.
   assert.match(classifyPhase(0x42, false), /^unknown \(session=0x42\)/);
   assert.equal(SESSION_BYTE, 0xffc735);
+});
+
+test("intermission-highlight detection uses only the full gmode word high nibble", () => {
+  for (const gmode of [0x1000, 0x1200, 0x1500, 0x1700]) {
+    assert.equal(isIntermissionHighlight(gmode), true, `0x${gmode.toString(16)} is a highlight`);
+  }
+  for (const gmode of [0x0000, 0x0fff, 0x2000, 0x6000, 0xe500]) {
+    assert.equal(isIntermissionHighlight(gmode), false, `0x${gmode.toString(16)} is not a highlight`);
+  }
+});
+
+test("intermission-highlight response is terminal and preserves raw evidence", () => {
+  assert.equal(
+    formatIntermissionHighlight(0x1500, 0xff),
+    [
+      "phase: intermission_highlight",
+      "INTERMISSION HIGHLIGHT — footage is not part of the active game.",
+      "Active-game entities, puck, score, screenshot, and vision intentionally suppressed.",
+      "evidence: gmode=0x1500 high_nibble=0x1 session=0xFF",
+    ].join("\n"),
+  );
 });
 
 test("lineLabel maps selected-line bytes and preserves unknowns via caller raw fields", () => {

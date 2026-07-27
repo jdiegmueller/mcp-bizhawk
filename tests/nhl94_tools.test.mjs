@@ -396,7 +396,11 @@ test("NHL94 write tools publish detailed descriptions and recipes", async () => 
     const recipes = await h.client.callTool({ name: "nhl94_recipes", arguments: {} });
     assert.match(textOf(recipes), /nhl94_set_score/);
     assert.match(textOf(recipes), /nhl94_add_penalty/);
+    assert.match(textOf(recipes), /intermission_highlight.*terminal/s);
     assert.doesNotMatch(textOf(recipes), /duration_seconds/);
+    const state = catalog.tools.find((entry) => entry.name === "nhl94_state");
+    assert.match(state.description, /intermission_highlight.*terminal/s);
+    assert.match(state.description, /rig failure.*callback failure.*attract mode/s);
     const addPenalty = catalog.tools.find((entry) => entry.name === "nhl94_add_penalty");
     assert.deepEqual(addPenalty.inputSchema.required, ["target", "penalty_type"]);
     assert.ok(!("duration_seconds" in addPenalty.inputSchema.properties));
@@ -462,6 +466,78 @@ test("nhl94_state decodes the slot grid, globals, and frozen annotations", async
   }
 });
 
+test("nhl94_state suppresses every observed intermission-highlight substate before entity or vision work", async () => {
+  process.env.VISION_BASE_URL = "http://127.0.0.1:1/v1";
+  process.env.VISION_MODEL = "must-not-be-called";
+  try {
+    for (const gmode of [0x1000, 0x1200, 0x1500, 0x1700]) {
+      const h = await startHarness({
+        list_memory_domains: () => DOMAINS,
+        read_many: () => defaultNhlGlobals({ gmode, session: 0xff }),
+        read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i)),
+        list_frozen: () => ({ frozen: [] }),
+        screenshot: (p) => p.path,
+      });
+      try {
+        const text = textOf(await h.client.callTool({
+          name: "nhl94_state",
+          arguments: {
+            target: h.target,
+            raw: true,
+            verbose: true,
+            sections: "all",
+            describe: true,
+          },
+        }));
+        const word = gmode.toString(16).toUpperCase().padStart(4, "0");
+        assert.match(text, /^phase: intermission_highlight/m);
+        assert.match(text, new RegExp(`gmode=0x${word} high_nibble=0x1 session=0xFF`));
+        assert.doesNotMatch(text, /^s0:/m);
+        assert.doesNotMatch(text, /^pk:/m);
+        assert.equal(h.bridge.calls.filter((c) => c.method === "read_struct_array").length, 0);
+        assert.equal(h.bridge.calls.filter((c) => c.method === "list_frozen").length, 0);
+        assert.equal(h.bridge.calls.filter((c) => c.method === "screenshot").length, 0);
+
+        const reads = h.bridge.calls.filter((c) => c.method === "read_many");
+        assert.equal(reads.length, 1);
+        assert.deepEqual(reads[0].params.reads, [
+          { name: "gmode", address: 0xffc2ea, width: "u16_be", domain: "M68K BUS" },
+          { name: "session", address: 0xffc735, width: "u8", domain: "M68K BUS" },
+        ]);
+      } finally {
+        await h.close();
+      }
+    }
+  } finally {
+    delete process.env.VISION_BASE_URL;
+    delete process.env.VISION_MODEL;
+  }
+});
+
+test("nhl94_state continues to the entity snapshot outside the highlight band", async () => {
+  const h = await startHarness({
+    list_memory_domains: () => DOMAINS,
+    read_many: () => defaultNhlGlobals({ gmode: 0x2000, session: 0xff }),
+    read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => minimalNhlRec(i)),
+    list_frozen: () => ({ frozen: [] }),
+  });
+  try {
+    const text = textOf(await h.client.callTool({
+      name: "nhl94_state",
+      arguments: { target: h.target, describe: false },
+    }));
+    assert.match(text, /^s0:/m);
+    assert.equal(h.bridge.calls.filter((c) => c.method === "read_struct_array").length, 1);
+    const reads = h.bridge.calls.filter((c) => c.method === "read_many");
+    assert.deepEqual(reads[0].params.reads, [
+      { name: "gmode", address: 0xffc2ea, width: "u16_be", domain: "M68K BUS" },
+      { name: "session", address: 0xffc735, width: "u8", domain: "M68K BUS" },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
 test("nhl94_state reports 1P-CPU control context, pad words, and route confidence", async () => {
   const h = await startHarness({
     list_memory_domains: () => DOMAINS,
@@ -493,8 +569,8 @@ test("nhl94_state reports 1P-CPU control context, pad words, and route confidenc
     assert.match(text, /caveat: c1playernum=0x0000 c2playernum=0x0000 are reported raw only; they are not active skater indices and are not used for mode\/input_route inference/);
 
     const readManyCalls = h.bridge.calls.filter((c) => c.method === "read_many");
-    assert.equal(readManyCalls.length, 1, "control fields should ride the existing globals read_many call");
-    const reads = readManyCalls[0].params.reads;
+    assert.equal(readManyCalls.length, 2, "preflight is followed by the existing globals read_many call");
+    const reads = readManyCalls[1].params.reads;
     assert.ok(reads.some((r) => r.name === "active_control_home" && r.address === 0xffc320 && r.width === "u16_be"));
     assert.ok(reads.some((r) => r.name === "active_control_away" && r.address === 0xffc322 && r.width === "u16_be"));
     assert.ok(reads.some((r) => r.name === "switch_debounce_home" && r.address === 0xffbf06 && r.width === "u8"));
@@ -828,6 +904,9 @@ test("nhl94_state reports RAM-backed faceoff line-change window", async () => {
     list_memory_domains: () => DOMAINS,
     read_struct_array: (p) => Array.from({ length: p.count }, (_, i) => rec(i)),
     read_many: (p) => {
+      if (p.reads.length === 2 && p.reads[0].name === "gmode") {
+        return { gmode: 1, session: 0xff };
+      }
       assert.ok(p.reads.some((r) => r.name === "faceoff_window_latch" && r.address === 0xffc304 && r.width === "u16_be"));
       assert.ok(p.reads.some((r) => r.name === "home_line" && r.address === 0xffc6e5 && r.width === "u8"));
       assert.ok(p.reads.some((r) => r.name === "away_line" && r.address === 0xffca48 && r.width === "u8"));

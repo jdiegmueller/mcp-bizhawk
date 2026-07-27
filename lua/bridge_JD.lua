@@ -1,5 +1,9 @@
 -- bridge_JD.lua: BizHawk-side polling client for mcp-bizhawk
--- v2026.7.58-jd  (was semver 0.16.0; version scheme now matches the server)
+-- v2026.7.59-jd  (was semver 0.16.0; version scheme now matches the server)
+--
+-- v2026.7.59-jd changes: nhl94_state suppresses synthetic intermission
+--   highlight entities, screenshots, and vision at the server preflight.
+--   Bridge behavior unchanged. Protocol stays 3.
 --
 -- v2026.7.58-jd changes: NHL94 OSD uses the team energy table for carrier
 --   stamina and adds compact selected-line/on-ice-average visibility.
@@ -715,7 +719,7 @@ local json = require("json")
 -- on any behavioral change.
 local BRIDGE = {
     name       = "bridge_JD",
-    version    = "2026.7.58-jd",
+    version    = "2026.7.59-jd",
     -- RPC PROTOCOL version — the wire contract with the server (framing,
     -- command/RESULT shapes, HELLO). SEPARATE from `version`: the OSD flags a
     -- stale-component warning only when this number differs from the server's

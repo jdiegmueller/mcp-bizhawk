@@ -4,7 +4,7 @@ import { startHarness } from "./helpers/harness.mjs";
 import { VERSION, PROTOCOL_VERSION } from "../dist/version.js";
 
 test("release version and wire protocol stay intentionally independent", () => {
-  assert.equal(VERSION, "2026.7.58-jd");
+  assert.equal(VERSION, "2026.7.59-jd");
   assert.equal(PROTOCOL_VERSION, 3);
 });
 
