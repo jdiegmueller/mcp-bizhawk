@@ -16,7 +16,7 @@ done
 
 while true; do
   clear
-  DISPLAY=:1 ~/nvnhl94-2/tools/bizhawk/BizHawk-2.11.1-linux-x64/EmuHawkMono.sh \
+  DISPLAY=:1 ~/src/nvnhl94-2/tools/bizhawk/BizHawk-2.11.1-linux-x64/EmuHawkMono.sh \
     --socket_ip="$IP" --socket_port="$PORT" --lua=Lua/bridge_JD.lua \
     /mnt/8tb/jason/nvnhl94-2/rom/nhl94.gen
   echo "BizHawk exited. Restarting in 5s... (CTRL+C to stop)"
